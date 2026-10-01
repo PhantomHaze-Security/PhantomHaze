@@ -370,7 +370,6 @@ public class MainForm : Form
         _newTabButton.MinimumSize = new Size(36, 28);
         _newTabButton.Padding = new Padding(0);
         _newTabButton.Margin = new Padding(2, 0, 0, 0);
-        _newTabButton.TabStop = false;
         _newTabButton.Click += async (_, _) => await CreateTabAsync(DefaultHomeUrl, activate: true);
 
         tabsLayout.Controls.Add(_tabsFlowPanel, 0, 0);
@@ -873,6 +872,7 @@ public class MainForm : Form
         _addressBarTextBox.Text = tab.CurrentUrl;
         UpdateNavigationButtons();
         UpdateFavoriteButtonState();
+        UpdateZoomControlsForActiveTab();
         UpdateTabHeaderVisuals();
         UpdateTabLayout();
 
