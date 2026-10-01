@@ -11,8 +11,8 @@
     <ApplicationHighDpiMode>PerMonitorV2</ApplicationHighDpiMode>
     <AssemblyName>PhantomHaze</AssemblyName>
     <RootNamespace>PhantomHaze</RootNamespace>
-    <Version>1.2.4-beta</Version>
-    <InformationalVersion>v1.2.4 beta</InformationalVersion>
+    <Version>1.2.5-beta</Version>
+    <InformationalVersion>v1.2.5 beta</InformationalVersion>
   </PropertyGroup>
 
   <ItemGroup>
