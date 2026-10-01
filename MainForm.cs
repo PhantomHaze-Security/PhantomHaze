@@ -24,6 +24,7 @@ public class MainForm : Form
             CloseButton = closeButton;
             CurrentUrl = DefaultHomeUrl;
             Title = "New Tab";
+            ZoomPercent = 100;
         }
 
         public int Id { get; }
@@ -35,6 +36,7 @@ public class MainForm : Form
         public string CurrentUrl { get; set; }
         public string Title { get; set; }
         public Image? OwnedFaviconImage { get; set; }
+        public int ZoomPercent { get; set; }
     }
 
     private readonly Label _contentLabel = new();
@@ -89,9 +91,10 @@ public class MainForm : Form
 
     public MainForm()
     {
-        Text = "PhantomHaze v1.2.4 Beta";
+        Text = "PhantomHaze v1.2.5 Beta";
         Width = 980;
         Height = 620;
+        MinimumSize = new Size(860, 560);
         StartPosition = FormStartPosition.CenterScreen;
         KeyPreview = true;
         KeyDown += OnMainFormKeyDown;
@@ -114,7 +117,11 @@ public class MainForm : Form
         };
 
         FormClosing += (_, _) => CleanupWebSession();
-        Resize += (_, _) => UpdateTabLayout();
+        Resize += (_, _) =>
+        {
+            UpdateTabLayout();
+            UpdateResponsiveLayout();
+        };
     }
 
     private static string InitializeLogFilePath()
@@ -163,7 +170,7 @@ public class MainForm : Form
 
     private void BuildUi()
     {
-        _contentLabel.Text = "PhantomHaze Beta v1.2.4";
+        _contentLabel.Text = "PhantomHaze Beta v1.2.5";
         _contentLabel.Font = new Font("Segoe UI", 16, FontStyle.Bold);
         _contentLabel.ForeColor = Color.Firebrick;
         _contentLabel.TextAlign = ContentAlignment.MiddleCenter;
@@ -212,12 +219,14 @@ public class MainForm : Form
         Controls.Add(_statusLabel);
         Controls.Add(_contentLabel);
         Controls.Add(_webViewToggleButton);
+
+        UpdateResponsiveLayout();
     }
 
     private void BuildAddressBar()
     {
         _addressBarPanel.Dock = DockStyle.Top;
-        _addressBarPanel.Height = 96;
+        _addressBarPanel.Height = 104;
         _addressBarPanel.Padding = new Padding(8, 8, 8, 6);
         _addressBarPanel.Visible = false;
         _addressBarPanel.SizeChanged += (_, _) => UpdateTabLayout();
@@ -230,8 +239,8 @@ public class MainForm : Form
             Margin = new Padding(0),
             Padding = new Padding(0),
         };
-        rootLayout.RowStyles.Add(new RowStyle(SizeType.Absolute, 36f));
-        rootLayout.RowStyles.Add(new RowStyle(SizeType.Absolute, 34f));
+        rootLayout.RowStyles.Add(new RowStyle(SizeType.Absolute, 38f));
+        rootLayout.RowStyles.Add(new RowStyle(SizeType.Percent, 100f));
 
         var stripLayout = new TableLayoutPanel
         {
@@ -273,7 +282,7 @@ public class MainForm : Form
             }
         };
 
-        _favoriteButton.Text = "*";
+        _favoriteButton.Text = "✩";
         _favoriteButton.Dock = DockStyle.Fill;
         _favoriteButton.Margin = new Padding(3, 2, 0, 2);
         _favoriteButton.Font = new Font("Segoe UI", 11, FontStyle.Bold);
@@ -335,11 +344,12 @@ public class MainForm : Form
             Dock = DockStyle.Fill,
             ColumnCount = 2,
             RowCount = 1,
-            Margin = new Padding(0, 6, 0, 0),
+            Margin = new Padding(0, 4, 0, 0),
             Padding = new Padding(0),
         };
         tabsLayout.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100f));
-        tabsLayout.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 34f));
+        tabsLayout.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 40f));
+        tabsLayout.RowStyles.Add(new RowStyle(SizeType.Percent, 100f));
 
         _tabsFlowPanel.Dock = DockStyle.Fill;
         _tabsFlowPanel.FlowDirection = FlowDirection.LeftToRight;
@@ -351,8 +361,15 @@ public class MainForm : Form
 
         _newTabButton.Text = "+";
         _newTabButton.Dock = DockStyle.Fill;
-        _newTabButton.Font = new Font("Segoe UI", 10, FontStyle.Bold);
-        _newTabButton.Margin = new Padding(3, 0, 0, 0);
+        _newTabButton.Font = new Font("Segoe UI", 12, FontStyle.Bold);
+        _newTabButton.TextAlign = ContentAlignment.MiddleCenter;
+        _newTabButton.FlatStyle = FlatStyle.Flat;
+        _newTabButton.FlatAppearance.BorderColor = SystemColors.ControlDark;
+        _newTabButton.FlatAppearance.BorderSize = 1;
+        _newTabButton.AutoSize = false;
+        _newTabButton.MinimumSize = new Size(36, 28);
+        _newTabButton.Padding = new Padding(0);
+        _newTabButton.Margin = new Padding(2, 0, 0, 0);
         _newTabButton.Click += async (_, _) => await CreateTabAsync(DefaultHomeUrl, activate: true);
 
         tabsLayout.Controls.Add(_tabsFlowPanel, 0, 0);
@@ -546,6 +563,7 @@ public class MainForm : Form
             }
 
             PositionFindPanel();
+            UpdateZoomControlsForActiveTab();
             Log("Web View mode enabled.");
             return;
         }
@@ -565,6 +583,7 @@ public class MainForm : Form
         _logBox.Visible = true;
         _logBox.BringToFront();
         UpdateWebViewToggleVisual();
+        UpdateZoomControlsForActiveTab();
         UpdateNavigationButtons();
         UpdateFavoriteButtonState();
         Log("Web View mode disabled; log panel restored.");
@@ -651,7 +670,7 @@ public class MainForm : Form
                 _sessionDataCleared = true;
             }
 
-            webView.ZoomFactor = _zoomSlider.Value / 100.0;
+            webView.ZoomFactor = tab.ZoomPercent / 100.0;
         }
         catch (Exception ex)
         {
@@ -853,6 +872,7 @@ public class MainForm : Form
         _addressBarTextBox.Text = tab.CurrentUrl;
         UpdateNavigationButtons();
         UpdateFavoriteButtonState();
+        UpdateZoomControlsForActiveTab();
         UpdateTabHeaderVisuals();
         UpdateTabLayout();
 
@@ -1210,18 +1230,16 @@ public class MainForm : Form
     private void ApplyZoom()
     {
         _zoomLabel.Text = $"Zoom {_zoomSlider.Value}%";
-        if (!_webViewInitialized)
+        if (!_webViewInitialized || _activeTab?.WebView.CoreWebView2 is null)
         {
             return;
         }
 
         double zoom = _zoomSlider.Value / 100.0;
-        foreach (BrowserTab tab in _tabs)
-        {
-            tab.WebView.ZoomFactor = zoom;
-        }
+        _activeTab.ZoomPercent = _zoomSlider.Value;
+        _activeTab.WebView.ZoomFactor = zoom;
 
-        Log($"Web zoom set to {_zoomSlider.Value}%.");
+        Log($"Tab {_activeTab.Id} zoom set to {_zoomSlider.Value}%.");
     }
 
     private void UpdateNavigationButtons()
@@ -1312,6 +1330,7 @@ public class MainForm : Form
             _addressBarTextBox.Text = tab.CurrentUrl;
             UpdateNavigationButtons();
             UpdateFavoriteButtonState();
+            UpdateZoomControlsForActiveTab();
         }
     }
 
@@ -1791,6 +1810,7 @@ public class MainForm : Form
     {
         bool enabled = _webViewModeEnabled && _activeTab is not null;
         _favoriteButton.Enabled = enabled;
+        _favoriteButton.Text = "✩";
         if (!enabled)
         {
             _favoriteButton.BackColor = SystemColors.Control;
@@ -1804,6 +1824,7 @@ public class MainForm : Form
 
         _favoriteButton.BackColor = isFavorite ? Color.Gold : SystemColors.Control;
         _favoriteButton.ForeColor = isFavorite ? Color.Black : SystemColors.ControlText;
+        _favoriteButton.Text = isFavorite ? "★" : "✩";
     }
 
     private void LoadFavorites()
@@ -2093,11 +2114,21 @@ public class MainForm : Form
         {
             _protectionEnabled = current == NativeMethods.WDA_EXCLUDEFROMCAPTURE;
             Log($"Current window affinity: {NativeMethods.Describe(current)}.");
+
+            if (enable && !_protectionEnabled)
+            {
+                Log("ALERT: Capture protection request is being blocked or downgraded; the window is not using WDA_EXCLUDEFROMCAPTURE.");
+            }
         }
         else
         {
             _protectionEnabled = ok && enable;
             Log("GetWindowDisplayAffinity failed to read back the current state.");
+
+            if (enable && !_protectionEnabled)
+            {
+                Log("ALERT: Could not confirm capture protection state and protection is currently not active.");
+            }
         }
 
         _statusLabel.Text = _protectionEnabled
@@ -2108,6 +2139,26 @@ public class MainForm : Form
         _toggleButton.Text = _protectionEnabled
             ? "Disable Protection"
             : "Enable Protection";
+    }
+
+    private void UpdateZoomControlsForActiveTab()
+    {
+        bool enabled = _webViewModeEnabled && _activeTab is not null;
+        _zoomSlider.Enabled = enabled;
+
+        int zoomPercent = enabled ? Math.Clamp(_activeTab!.ZoomPercent, _zoomSlider.Minimum, _zoomSlider.Maximum) : 100;
+        if (_zoomSlider.Value != zoomPercent)
+        {
+            _zoomSlider.Value = zoomPercent;
+        }
+
+        _zoomLabel.Text = $"Zoom {zoomPercent}%";
+    }
+
+    private void UpdateResponsiveLayout()
+    {
+        int preferredHistoryWidth = ClientSize.Width / 3;
+        _historyPanel.Width = Math.Clamp(preferredHistoryWidth, 260, 420);
     }
 
     private void Log(string message)
