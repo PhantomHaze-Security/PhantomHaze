@@ -75,6 +75,11 @@ public class MainForm : Form
     private readonly List<string> _favoriteUrls = new();
     private readonly List<BrowserTab> _tabs = new();
     private readonly Dictionary<CoreWebView2, BrowserTab> _tabByCore = new();
+    private TableLayoutPanel? _addressRootLayout;
+    private TableLayoutPanel? _addressStripLayout;
+    private TableLayoutPanel? _tabsLayout;
+    private TableLayoutPanel? _historyLayout;
+    private TableLayoutPanel? _findLayout;
 
     private CoreWebView2Environment? _webEnvironment;
     private BrowserTab? _activeTab;
@@ -87,6 +92,18 @@ public class MainForm : Form
 
     private const string DefaultHomeUrl = "https://www.google.com";
     private const string FindShortcutMessage = "__PH_FIND__";
+    private const int DefaultBackButtonWidth = 64;
+    private const int DefaultGoButtonWidth = 56;
+    private const int DefaultRefreshButtonWidth = 80;
+    private const int DefaultHistoryButtonWidth = 80;
+    private const int DefaultZoomLabelWidth = 96;
+    private const int DefaultZoomSliderWidth = 185;
+    private const int CompactBackButtonWidth = 56;
+    private const int CompactGoButtonWidth = 48;
+    private const int CompactRefreshButtonWidth = 70;
+    private const int CompactHistoryButtonWidth = 70;
+    private const int CompactZoomSliderWidth = 135;
+    private const int MinimumAddressInputWidth = 180;
     private static readonly Image DefaultTabIcon = SystemIcons.Application.ToBitmap();
 
     public MainForm()
@@ -95,9 +112,11 @@ public class MainForm : Form
         Width = 980;
         Height = 620;
         MinimumSize = new Size(860, 560);
+        AutoScaleMode = AutoScaleMode.Dpi;
         StartPosition = FormStartPosition.CenterScreen;
         KeyPreview = true;
         KeyDown += OnMainFormKeyDown;
+        TrySetWindowIcon();
 
         _logFilePath = InitializeLogFilePath();
         _webSessionPath = InitializeWebSessionPath();
@@ -109,6 +128,7 @@ public class MainForm : Form
 
         Load += (_, _) =>
         {
+            ApplyDpiAwareMetrics();
             Log($"Log file: {_logFilePath}");
             Log($"Web session path: {_webSessionPath}");
             Log($"Favorites file: {_favoritesFilePath}");
@@ -122,6 +142,112 @@ public class MainForm : Form
             UpdateTabLayout();
             UpdateResponsiveLayout();
         };
+        DpiChanged += (_, _) =>
+        {
+            ApplyDpiAwareMetrics();
+            UpdateResponsiveLayout();
+            UpdateTabLayout();
+        };
+    }
+
+    private int ScaleByDpi(int logicalPixels)
+    {
+        int dpi = DeviceDpi > 0 ? DeviceDpi : 96;
+        return Math.Max(1, (int)Math.Round(logicalPixels * (dpi / 96.0)));
+    }
+
+    private Padding ScalePadding(int left, int top, int right, int bottom)
+    {
+        return new Padding(
+            ScaleByDpi(left),
+            ScaleByDpi(top),
+            ScaleByDpi(right),
+            ScaleByDpi(bottom));
+    }
+
+    private void ApplyDpiAwareMetrics()
+    {
+        MinimumSize = new Size(ScaleByDpi(860), ScaleByDpi(560));
+
+        _contentLabel.Height = ScaleByDpi(80);
+        _statusLabel.Height = ScaleByDpi(34);
+        _toggleButton.Height = ScaleByDpi(36);
+        _webViewToggleButton.Height = ScaleByDpi(38);
+
+        _addressBarPanel.Height = ScaleByDpi(104);
+        _addressBarPanel.Padding = ScalePadding(8, 8, 8, 6);
+
+        if (_addressRootLayout is not null && _addressRootLayout.RowStyles.Count > 0)
+        {
+            _addressRootLayout.RowStyles[0].Height = ScaleByDpi(38);
+        }
+
+        if (_addressStripLayout is not null && _addressStripLayout.RowStyles.Count > 0)
+        {
+            _addressStripLayout.RowStyles[0].Height = ScaleByDpi(36);
+        }
+
+        if (_tabsLayout is not null)
+        {
+            _tabsLayout.Margin = ScalePadding(0, 4, 0, 0);
+            if (_tabsLayout.ColumnStyles.Count > 1)
+            {
+                _tabsLayout.ColumnStyles[1].Width = ScaleByDpi(40);
+            }
+        }
+
+        if (_historyLayout is not null && _historyLayout.RowStyles.Count >= 5)
+        {
+            _historyLayout.RowStyles[0].Height = ScaleByDpi(30);
+            _historyLayout.RowStyles[2].Height = ScaleByDpi(30);
+            _historyLayout.RowStyles[3].Height = ScaleByDpi(150);
+            _historyLayout.RowStyles[4].Height = ScaleByDpi(36);
+        }
+
+        _historyPanel.Padding = new Padding(ScaleByDpi(8));
+        _historyClearButton.Height = ScaleByDpi(32);
+
+        if (_findLayout is not null)
+        {
+            _findLayout.Padding = new Padding(ScaleByDpi(6));
+            if (_findLayout.ColumnStyles.Count >= 3)
+            {
+                _findLayout.ColumnStyles[1].Width = ScaleByDpi(80);
+                _findLayout.ColumnStyles[2].Width = ScaleByDpi(28);
+            }
+        }
+
+        _findPanel.Height = ScaleByDpi(42);
+        _findTextBox.Margin = ScalePadding(0, 0, 6, 0);
+
+        Padding stripButtonMargin = ScalePadding(3, 2, 3, 2);
+        _backButton.Margin = stripButtonMargin;
+        _goButton.Margin = stripButtonMargin;
+        _refreshButton.Margin = stripButtonMargin;
+        _historyButton.Margin = stripButtonMargin;
+
+        _favoriteButton.Margin = ScalePadding(3, 2, 0, 2);
+        _zoomSlider.Margin = ScalePadding(3, 4, 3, 2);
+        _newTabButton.MinimumSize = new Size(ScaleByDpi(36), ScaleByDpi(28));
+        _newTabButton.Margin = ScalePadding(2, 0, 0, 0);
+
+        UpdateAddressStripLayout();
+    }
+
+    private void TrySetWindowIcon()
+    {
+        try
+        {
+            using Icon? exeIcon = Icon.ExtractAssociatedIcon(Application.ExecutablePath);
+            if (exeIcon is not null)
+            {
+                Icon = (Icon)exeIcon.Clone();
+            }
+        }
+        catch
+        {
+            // Keep the framework default icon if extraction is unavailable.
+        }
     }
 
     private static string InitializeLogFilePath()
@@ -220,18 +346,23 @@ public class MainForm : Form
         Controls.Add(_contentLabel);
         Controls.Add(_webViewToggleButton);
 
+        ApplyDpiAwareMetrics();
         UpdateResponsiveLayout();
     }
 
     private void BuildAddressBar()
     {
         _addressBarPanel.Dock = DockStyle.Top;
-        _addressBarPanel.Height = 104;
-        _addressBarPanel.Padding = new Padding(8, 8, 8, 6);
+        _addressBarPanel.Height = ScaleByDpi(104);
+        _addressBarPanel.Padding = ScalePadding(8, 8, 8, 6);
         _addressBarPanel.Visible = false;
-        _addressBarPanel.SizeChanged += (_, _) => UpdateTabLayout();
+        _addressBarPanel.SizeChanged += (_, _) =>
+        {
+            UpdateTabLayout();
+            UpdateAddressStripLayout();
+        };
 
-        var rootLayout = new TableLayoutPanel
+        _addressRootLayout = new TableLayoutPanel
         {
             Dock = DockStyle.Fill,
             ColumnCount = 1,
@@ -239,10 +370,11 @@ public class MainForm : Form
             Margin = new Padding(0),
             Padding = new Padding(0),
         };
+        TableLayoutPanel rootLayout = _addressRootLayout;
         rootLayout.RowStyles.Add(new RowStyle(SizeType.Absolute, 38f));
         rootLayout.RowStyles.Add(new RowStyle(SizeType.Percent, 100f));
 
-        var stripLayout = new TableLayoutPanel
+        _addressStripLayout = new TableLayoutPanel
         {
             Dock = DockStyle.Fill,
             ColumnCount = 7,
@@ -250,15 +382,16 @@ public class MainForm : Form
             Margin = new Padding(0),
             Padding = new Padding(0),
         };
+        TableLayoutPanel stripLayout = _addressStripLayout;
         stripLayout.RowStyles.Add(new RowStyle(SizeType.Absolute, 36f));
 
         stripLayout.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100f));
-        stripLayout.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 64f));
-        stripLayout.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 56f));
-        stripLayout.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 80f));
-        stripLayout.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 80f));
-        stripLayout.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 82f));
-        stripLayout.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 185f));
+        stripLayout.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, DefaultBackButtonWidth));
+        stripLayout.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, DefaultGoButtonWidth));
+        stripLayout.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, DefaultRefreshButtonWidth));
+        stripLayout.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, DefaultHistoryButtonWidth));
+        stripLayout.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, DefaultZoomLabelWidth));
+        stripLayout.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, DefaultZoomSliderWidth));
 
         var addressInputLayout = new TableLayoutPanel
         {
@@ -269,7 +402,7 @@ public class MainForm : Form
             Padding = new Padding(0),
         };
         addressInputLayout.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100f));
-        addressInputLayout.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 32f));
+        addressInputLayout.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, ScaleByDpi(32)));
 
         _addressBarTextBox.Dock = DockStyle.Fill;
         _addressBarTextBox.PlaceholderText = DefaultHomeUrl;
@@ -284,7 +417,7 @@ public class MainForm : Form
 
         _favoriteButton.Text = "✩";
         _favoriteButton.Dock = DockStyle.Fill;
-        _favoriteButton.Margin = new Padding(3, 2, 0, 2);
+        _favoriteButton.Margin = ScalePadding(3, 2, 0, 2);
         _favoriteButton.Font = new Font("Segoe UI", 11, FontStyle.Bold);
         _favoriteButton.FlatStyle = FlatStyle.Flat;
         _favoriteButton.FlatAppearance.BorderColor = SystemColors.ControlDark;
@@ -319,7 +452,7 @@ public class MainForm : Form
         _zoomLabel.Text = "Zoom 100%";
         _zoomLabel.Dock = DockStyle.Fill;
         _zoomLabel.TextAlign = ContentAlignment.MiddleCenter;
-        _zoomLabel.Margin = new Padding(3, 2, 3, 2);
+        _zoomLabel.Margin = ScalePadding(3, 2, 3, 2);
         _zoomLabel.Font = new Font("Segoe UI", 9, FontStyle.Regular);
 
         _zoomSlider.Minimum = 50;
@@ -328,7 +461,7 @@ public class MainForm : Form
         _zoomSlider.TickFrequency = 10;
         _zoomSlider.AutoSize = false;
         _zoomSlider.Dock = DockStyle.Fill;
-        _zoomSlider.Margin = new Padding(3, 4, 3, 2);
+        _zoomSlider.Margin = ScalePadding(3, 4, 3, 2);
         _zoomSlider.Scroll += (_, _) => ApplyZoom();
 
         stripLayout.Controls.Add(addressInputLayout, 0, 0);
@@ -339,7 +472,7 @@ public class MainForm : Form
         stripLayout.Controls.Add(_zoomLabel, 5, 0);
         stripLayout.Controls.Add(_zoomSlider, 6, 0);
 
-        var tabsLayout = new TableLayoutPanel
+        _tabsLayout = new TableLayoutPanel
         {
             Dock = DockStyle.Fill,
             ColumnCount = 2,
@@ -347,6 +480,7 @@ public class MainForm : Form
             Margin = new Padding(0, 4, 0, 0),
             Padding = new Padding(0),
         };
+        TableLayoutPanel tabsLayout = _tabsLayout;
         tabsLayout.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100f));
         tabsLayout.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 40f));
         tabsLayout.RowStyles.Add(new RowStyle(SizeType.Percent, 100f));
@@ -367,9 +501,9 @@ public class MainForm : Form
         _newTabButton.FlatAppearance.BorderColor = SystemColors.ControlDark;
         _newTabButton.FlatAppearance.BorderSize = 1;
         _newTabButton.AutoSize = false;
-        _newTabButton.MinimumSize = new Size(36, 28);
+        _newTabButton.MinimumSize = new Size(ScaleByDpi(36), ScaleByDpi(28));
         _newTabButton.Padding = new Padding(0);
-        _newTabButton.Margin = new Padding(2, 0, 0, 0);
+        _newTabButton.Margin = ScalePadding(2, 0, 0, 0);
         _newTabButton.Click += async (_, _) => await CreateTabAsync(DefaultHomeUrl, activate: true);
 
         tabsLayout.Controls.Add(_tabsFlowPanel, 0, 0);
@@ -379,21 +513,22 @@ public class MainForm : Form
         rootLayout.Controls.Add(tabsLayout, 0, 1);
 
         _addressBarPanel.Controls.Add(rootLayout);
+        UpdateAddressStripLayout();
         UpdateFavoriteButtonState();
     }
 
-    private static void ConfigureStripButton(Button button)
+    private void ConfigureStripButton(Button button)
     {
         button.AutoSize = false;
-        button.Margin = new Padding(3, 2, 3, 2);
+        button.Margin = ScalePadding(3, 2, 3, 2);
         button.Font = new Font("Segoe UI", 9, FontStyle.Regular);
     }
 
     private void BuildHistoryPanel()
     {
         _historyPanel.Dock = DockStyle.Right;
-        _historyPanel.Width = 380;
-        _historyPanel.Padding = new Padding(8);
+        _historyPanel.Width = ScaleByDpi(380);
+        _historyPanel.Padding = new Padding(ScaleByDpi(8));
         _historyPanel.Visible = false;
         _historyPanel.BackColor = Color.FromArgb(245, 248, 252);
 
@@ -449,7 +584,7 @@ public class MainForm : Form
             }
         };
 
-        var historyLayout = new TableLayoutPanel
+        _historyLayout = new TableLayoutPanel
         {
             Dock = DockStyle.Fill,
             ColumnCount = 1,
@@ -457,6 +592,7 @@ public class MainForm : Form
             Margin = new Padding(0),
             Padding = new Padding(0),
         };
+        TableLayoutPanel historyLayout = _historyLayout;
 
         historyLayout.RowStyles.Add(new RowStyle(SizeType.Absolute, 30f));
         historyLayout.RowStyles.Add(new RowStyle(SizeType.Percent, 100f));
@@ -479,26 +615,27 @@ public class MainForm : Form
     private void BuildFindPanel()
     {
         _findPanel.Visible = false;
-        _findPanel.Size = new Size(360, 42);
+        _findPanel.Size = new Size(ScaleByDpi(360), ScaleByDpi(42));
         _findPanel.BackColor = Color.FromArgb(250, 252, 255);
         _findPanel.BorderStyle = BorderStyle.FixedSingle;
         _findPanel.Anchor = AnchorStyles.Top | AnchorStyles.Right;
 
-        var findLayout = new TableLayoutPanel
+        _findLayout = new TableLayoutPanel
         {
             Dock = DockStyle.Fill,
             ColumnCount = 3,
             RowCount = 1,
             Margin = new Padding(0),
-            Padding = new Padding(6),
+            Padding = new Padding(ScaleByDpi(6)),
         };
+        TableLayoutPanel findLayout = _findLayout;
         findLayout.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100f));
-        findLayout.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 80f));
-        findLayout.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 28f));
+        findLayout.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, ScaleByDpi(80)));
+        findLayout.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, ScaleByDpi(28)));
 
         _findTextBox.Dock = DockStyle.Fill;
         _findTextBox.PlaceholderText = "Find in page";
-        _findTextBox.Margin = new Padding(0, 0, 6, 0);
+        _findTextBox.Margin = ScalePadding(0, 0, 6, 0);
         _findTextBox.TextChanged += async (_, _) => await ApplyFindQueryAsync();
         _findTextBox.KeyDown += (_, e) =>
         {
@@ -709,10 +846,10 @@ public class MainForm : Form
     {
         var header = new Panel
         {
-            Height = 28,
-            Width = 180,
-            Margin = new Padding(0, 0, 2, 0),
-            Padding = new Padding(4, 4, 4, 3),
+            Height = ScaleByDpi(28),
+            Width = ScaleByDpi(180),
+            Margin = ScalePadding(0, 0, 2, 0),
+            Padding = ScalePadding(4, 4, 4, 3),
             BackColor = Color.FromArgb(235, 240, 247),
             Cursor = Cursors.Hand,
         };
@@ -720,8 +857,8 @@ public class MainForm : Form
         faviconBox = new PictureBox
         {
             Dock = DockStyle.Left,
-            Width = 16,
-            Height = 16,
+            Width = ScaleByDpi(16),
+            Height = ScaleByDpi(16),
             SizeMode = PictureBoxSizeMode.StretchImage,
             Image = DefaultTabIcon,
             Margin = new Padding(0),
@@ -731,9 +868,11 @@ public class MainForm : Form
         closeButton = new Button
         {
             Dock = DockStyle.Right,
-            Width = 22,
-            Text = "x",
+            Width = ScaleByDpi(22),
+            Text = "X",
             Font = _tabCloseFontRegular,
+            TextAlign = ContentAlignment.MiddleCenter,
+            Padding = new Padding(0),
             Margin = new Padding(0),
             FlatStyle = FlatStyle.Flat,
             TabStop = false,
@@ -1006,41 +1145,47 @@ public class MainForm : Form
         }
 
         const int tabGap = 2;
-        int totalGap = (_tabs.Count - 1) * tabGap;
+        int scaledTabGap = ScaleByDpi(tabGap);
+        int compactCloseWidthMinimum = Math.Max(ScaleByDpi(14), TextRenderer.MeasureText("X", _tabCloseFontCompact).Width + ScaleByDpi(6));
+        int regularCloseWidth = Math.Max(ScaleByDpi(22), TextRenderer.MeasureText("X", _tabCloseFontRegular).Width + ScaleByDpi(8));
+        int minimumCompactTabWidth = compactCloseWidthMinimum + ScaleByDpi(10);
+        int totalGap = (_tabs.Count - 1) * scaledTabGap;
         int available = Math.Max(1, _tabsFlowPanel.ClientSize.Width - totalGap);
         int rawWidth = Math.Max(1, available / _tabs.Count);
-        bool compact = rawWidth < 130;
+        bool compact = rawWidth < ScaleByDpi(130);
         int targetWidth = compact
-            ? Math.Max(14, rawWidth)
-            : Math.Clamp(rawWidth, 130, 220);
+            ? Math.Max(minimumCompactTabWidth, rawWidth)
+            : Math.Clamp(rawWidth, ScaleByDpi(130), ScaleByDpi(220));
 
         for (int i = 0; i < _tabs.Count; i++)
         {
             BrowserTab tab = _tabs[i];
             tab.HeaderPanel.Width = targetWidth;
-            tab.HeaderPanel.Height = compact ? 26 : 28;
-            tab.HeaderPanel.Margin = new Padding(0, 0, i == _tabs.Count - 1 ? 0 : tabGap, 0);
+            tab.HeaderPanel.Height = compact ? ScaleByDpi(26) : ScaleByDpi(28);
+            tab.HeaderPanel.Margin = new Padding(0, 0, i == _tabs.Count - 1 ? 0 : scaledTabGap, 0);
 
             if (compact)
             {
-                int closeWidth = Math.Clamp(targetWidth / 2, 6, 12);
-                int iconWidth = Math.Clamp(targetWidth - closeWidth, 6, 14);
+                int closeWidth = Math.Clamp(targetWidth / 2, compactCloseWidthMinimum, compactCloseWidthMinimum + 4);
+                int iconWidth = Math.Clamp(targetWidth - closeWidth - ScaleByDpi(2), ScaleByDpi(8), ScaleByDpi(14));
 
-                tab.HeaderPanel.Padding = new Padding(0, 3, 0, 2);
+                tab.HeaderPanel.Padding = ScalePadding(0, 3, 0, 2);
                 tab.TitleLabel.Visible = false;
                 tab.CloseButton.Width = closeWidth;
                 tab.CloseButton.Font = _tabCloseFontCompact;
+                tab.CloseButton.FlatAppearance.BorderSize = 0;
                 tab.FaviconBox.Width = iconWidth;
                 tab.FaviconBox.Height = iconWidth;
             }
             else
             {
-                tab.HeaderPanel.Padding = new Padding(4, 4, 4, 3);
+                tab.HeaderPanel.Padding = ScalePadding(4, 4, 4, 3);
                 tab.TitleLabel.Visible = true;
-                tab.CloseButton.Width = 22;
+                tab.CloseButton.Width = regularCloseWidth;
                 tab.CloseButton.Font = _tabCloseFontRegular;
-                tab.FaviconBox.Width = 16;
-                tab.FaviconBox.Height = 16;
+                tab.CloseButton.FlatAppearance.BorderSize = 1;
+                tab.FaviconBox.Width = ScaleByDpi(16);
+                tab.FaviconBox.Height = ScaleByDpi(16);
             }
         }
     }
@@ -1753,10 +1898,18 @@ public class MainForm : Form
 
     private void PositionFindPanel()
     {
-        const int margin = 10;
+        int margin = ScaleByDpi(10);
+        int maxWidth = Math.Max(1, _contentHostPanel.ClientSize.Width - (margin * 2));
+        int targetWidth = maxWidth >= ScaleByDpi(220)
+            ? Math.Min(ScaleByDpi(360), maxWidth)
+            : maxWidth;
+        if (_findPanel.Width != targetWidth)
+        {
+            _findPanel.Width = targetWidth;
+        }
+
         int x = Math.Max(margin, _contentHostPanel.ClientSize.Width - _findPanel.Width - margin);
-        int y = margin;
-        _findPanel.Location = new Point(x, y);
+        _findPanel.Location = new Point(x, margin);
     }
 
     private void ToggleFavoriteForCurrentPage()
@@ -2158,7 +2311,44 @@ public class MainForm : Form
     private void UpdateResponsiveLayout()
     {
         int preferredHistoryWidth = ClientSize.Width / 3;
-        _historyPanel.Width = Math.Clamp(preferredHistoryWidth, 260, 420);
+        _historyPanel.Width = Math.Clamp(preferredHistoryWidth, ScaleByDpi(260), ScaleByDpi(420));
+
+        UpdateAddressStripLayout();
+        if (_findPanel.Visible)
+        {
+            PositionFindPanel();
+        }
+    }
+
+    private void UpdateAddressStripLayout()
+    {
+        if (_addressStripLayout is null || _addressStripLayout.ColumnStyles.Count < 7)
+        {
+            return;
+        }
+
+        int availableWidth = Math.Max(1, _addressBarPanel.ClientSize.Width - _addressBarPanel.Padding.Horizontal);
+        int compactThreshold = ScaleByDpi(MinimumAddressInputWidth) +
+                               ScaleByDpi(CompactBackButtonWidth) +
+                               ScaleByDpi(CompactGoButtonWidth) +
+                               ScaleByDpi(CompactRefreshButtonWidth) +
+                               ScaleByDpi(CompactHistoryButtonWidth) +
+                               ScaleByDpi(DefaultZoomLabelWidth) +
+                               ScaleByDpi(CompactZoomSliderWidth);
+
+        bool compact = availableWidth < compactThreshold;
+
+        _addressStripLayout.ColumnStyles[1].Width = ScaleByDpi(compact ? CompactBackButtonWidth : DefaultBackButtonWidth);
+        _addressStripLayout.ColumnStyles[2].Width = ScaleByDpi(compact ? CompactGoButtonWidth : DefaultGoButtonWidth);
+        _addressStripLayout.ColumnStyles[3].Width = ScaleByDpi(compact ? CompactRefreshButtonWidth : DefaultRefreshButtonWidth);
+        _addressStripLayout.ColumnStyles[4].Width = ScaleByDpi(compact ? CompactHistoryButtonWidth : DefaultHistoryButtonWidth);
+        _addressStripLayout.ColumnStyles[5].Width = ScaleByDpi(DefaultZoomLabelWidth);
+        _addressStripLayout.ColumnStyles[6].Width = ScaleByDpi(compact ? CompactZoomSliderWidth : DefaultZoomSliderWidth);
+
+        _zoomLabel.TextAlign = compact ? ContentAlignment.MiddleLeft : ContentAlignment.MiddleCenter;
+        _zoomLabel.Margin = compact
+            ? ScalePadding(0, 2, 3, 2)
+            : ScalePadding(3, 2, 3, 2);
     }
 
     private void Log(string message)

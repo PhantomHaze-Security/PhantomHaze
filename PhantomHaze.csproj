@@ -13,6 +13,7 @@
     <RootNamespace>PhantomHaze</RootNamespace>
     <Version>1.2.5-beta</Version>
     <InformationalVersion>v1.2.5 beta</InformationalVersion>
+    <ApplicationIcon>icon.ico</ApplicationIcon>
   </PropertyGroup>
 
   <ItemGroup>
