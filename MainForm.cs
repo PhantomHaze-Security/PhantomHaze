@@ -108,7 +108,7 @@ public class MainForm : Form
 
     public MainForm()
     {
-        Text = "PhantomHaze v1.2.5 Beta";
+        Text = "PhantomHaze v1.3.0";
         Width = 980;
         Height = 620;
         MinimumSize = new Size(860, 560);
@@ -296,7 +296,7 @@ public class MainForm : Form
 
     private void BuildUi()
     {
-        _contentLabel.Text = "PhantomHaze Beta v1.2.5";
+        _contentLabel.Text = "PhantomHaze v1.3.0";
         _contentLabel.Font = new Font("Segoe UI", 16, FontStyle.Bold);
         _contentLabel.ForeColor = Color.Firebrick;
         _contentLabel.TextAlign = ContentAlignment.MiddleCenter;
