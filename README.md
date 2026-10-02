@@ -1,33 +1,65 @@
+<div align="center">
+
 # PhantomHaze
 
-PhantomHaze is a .NET 10 WinForms app for Windows that keeps its own window
-hidden from many screen capture workflows by using
-`SetWindowDisplayAffinity(..., WDA_EXCLUDEFROMCAPTURE)`.
+### *Invisible Browsing for the Modern Desktop*
 
-https://linktr.ee/PhantomHaze57
+**The lightweight, .NET 10 Windows browser engineered to keep your screen activity strictly confidential during recordings, streams, and shares.**
 
-It includes:
-- Always-on protection toggle with status feedback.
-- Built-in logging for protection and browser events.
-- Optional Web View mode with tabs, favicon/title tab headers, and quick tab
-  creation/close controls.
-- Address bar favorites control with persisted favourites (the only browser data
-  saved across sessions).
-- Session-only web history and cookie storage for compatibility (both are kept
-  only for the current app session and cleared when the app exits).
-- Find in page via Ctrl+F with live match highlighting and a closeable search
-  panel.
+[![Download Latest Release](https://img.shields.io/badge/Download-PhantomHaze.exe-success?style=for-the-badge&logo=windows)](https://github.com/benandkim57-crypto/PhantomHaze/releases)
+[![Community Chat](https://img.shields.io/badge/WhatsApp-Join_Community-25D366?style=for-the-badge&logo=whatsapp)](https://chat.whatsapp.com/K0PJLcSlP2hAt2HTLXQjd8)
+[![Linktree Profile](https://img.shields.io/badge/Linktree-PhantomHaze57-39E09B?style=for-the-badge&logo=linktree)](https://linktr.ee/PhantomHaze57)
 
-## How to install
-Ready to get it up and running? We can help, here's a guide in case you haven't used GitHub before:
-1. Go to this link: [https://github.com/benandkim57-crypto/PhantomHaze/releases](https://github.com/benandkim57-crypto/PhantomHaze/releases)
-2. Find the latest release, then click on "Assets"
-3. Finally, click on the .exe file to download it. It should be named something like "PhantomHaze-v?-?-?" or if you're downloading a Pre-Release "PhantomHaze-v?-?-?-beta"
-4. And that's it! You can now launch PhantomHaze by double-clicking on the executable. It's as simple as that!
+---
 
-Alternatively, you can use a GitHub Codespace or a Linux machine to compile the latest _RAW version of PhantomHaze. This is not recommended for people who do not know how to use a terminal or command line. Please note that the latest _RAW version may have critical issues as _RAW versions are the latest possible version of PhantomHaze currently available. If you would like to download PhantomHaze using this method, follow the instructions below:
-1. Create a GitHub Codespace in this repository (or a fork of this repository) by clicking the green Code button, then Codespaces, then +.
-2. Once your Codespace has finished booting, open a terminal and run `bash compiler.sh`
-3. Once compiled, a `tmp` folder should appear in the Codespace's directory. Navigate to `tmp/publish/PhantomHaze.exe`
-4. Right-click this file, then click "Download"
-5. You should be able to execute this file from your Downloads folder. You can now close the Codespace and begin using PhantomHaze. Enjoy!
+</div>
+
+##  Why PhantomHaze?
+
+Ever needed to check sensitive documents, account details, or private notes while sharing your screen or recording a stream? **PhantomHaze** uses native Windows hardware affinity APIs to render your browser window invisible to screen capture software while remaining fully visible to you.
+---
+
+## Standout Features
+
+###  Stealth Capture Protection
+Leverages native Windows `WDA_EXCLUDEFROMCAPTURE` API to block screen recorders, screenshot utilities, and desktop-sharing apps from capturing your window.
+
+###  True Ephemeral Privacy
+* **Zero Session Footprint:** Web history and session cookies are stored strictly in memory and wiped automatically the moment you close the app.
+* **Persistent Favorites:** Keeps your bookmarked favorite sites safely saved across sessions without storing tracking cookies.
+
+###  Modern Browser Suite
+* **Tabbed Navigation:** Clean tab interface with live site favicons and title updates.
+* **In-Page Search (`Ctrl+F`):** Fast search panel with real-time match highlighting.
+* **Live Status Logging:** Instant visual feedback whenever protection is active or toggled.
+
+---
+
+##  Quick Start Comparison
+
+Choose the installation method that fits your workflow:
+
+| Method | Target User | Setup Time | Prerequisites |
+| :--- | :--- | :--- | :--- |
+| **Direct Executable** *(Recommended)* | Everyone | ⚡ **< 10 Seconds** | Windows 10/11 |
+| **Codespaces Build** | Developers / Testers | 🛠️ ~2 Minutes | GitHub Account & Terminal Knowledge |
+
+---
+
+## 🚀 Installation Guide
+
+### Option 1: Direct Download (Zero Setup - Recommended)
+
+1. Go to the [PhantomHaze Releases Page](https://github.com/benandkim57-crypto/PhantomHaze/releases).
+2. Expand the **Assets** section under the latest release.
+3. Download the executable file (e.g., `PhantomHaze-vX.X.X.exe`).
+4. Double-click `PhantomHaze.exe` to launch immediately. Check the top toolbar indicator to verify that capture protection is active.
+
+---
+
+### Option 2: Compile Raw Source via GitHub Codespaces (Advanced)
+
+1. Create a GitHub Codespace in this repository by clicking **Code** > **Codespaces** > **+**.
+2. Once the Codespace environment boots up, open a terminal and execute:
+   ```bash
+   bash compiler.sh
