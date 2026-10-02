@@ -53,7 +53,7 @@ Choose the installation method that fits your workflow:
 1. Go to the [PhantomHaze Releases Page](https://github.com/benandkim57-crypto/PhantomHaze/releases).
 2. Expand the **Assets** section under the latest release.
 3. Download the executable file (e.g., `PhantomHaze-vX.X.X.exe`).
-4. Double-click `PhantomHaze.exe` to launch immediately. Check the top toolbar indicator to verify that capture protection is active.
+4. Double-click the downloaded file to launch immediately. Check the top toolbar indicator to verify that capture protection is active.
 
 ---
 
