@@ -42,7 +42,7 @@ Choose the installation method that fits your workflow:
 | Method | Target User | Setup Time | Prerequisites |
 | :--- | :--- | :--- | :--- |
 | **Direct Executable** *(Recommended)* | Everyone | ⚡ **< 10 Seconds** | Windows 10/11 |
-| **Codespaces Build** | Developers / Testers | 🛠️ ~2 Minutes | GitHub Account & Terminal Knowledge |
+| **_RAW Download** | Developers / Testers | 🛠️ ~2 Minutes | GitHub Account & Terminal Knowledge |
 
 ---
 
@@ -57,7 +57,7 @@ Choose the installation method that fits your workflow:
 
 ---
 
-### Option 2: Compile Raw Source via GitHub Codespaces (Advanced)
+### Option 2: _RAW Download (Advanced)
 
 1. Create a GitHub Codespace in this repository by clicking **Code** > **Codespaces** > **+**.
 2. Once the Codespace environment boots up, open a terminal and execute:
