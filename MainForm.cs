@@ -108,12 +108,13 @@ public class MainForm : Form
 
     public MainForm()
     {
-        Text = "PhantomHaze v1.3.0";
+        Text = "PhantomHaze v1.3.1";
         Width = 980;
         Height = 620;
         MinimumSize = new Size(860, 560);
         AutoScaleMode = AutoScaleMode.Dpi;
         StartPosition = FormStartPosition.CenterScreen;
+        BackColor = Color.FromArgb(246, 249, 253);
         KeyPreview = true;
         KeyDown += OnMainFormKeyDown;
         TrySetWindowIcon();
@@ -296,21 +297,27 @@ public class MainForm : Form
 
     private void BuildUi()
     {
-        _contentLabel.Text = "PhantomHaze v1.3.0";
+        _contentLabel.Text = "PhantomHaze v1.3.1";
         _contentLabel.Font = new Font("Segoe UI", 16, FontStyle.Bold);
-        _contentLabel.ForeColor = Color.Firebrick;
+        _contentLabel.ForeColor = Color.FromArgb(44, 72, 111);
+        _contentLabel.BackColor = Color.FromArgb(232, 240, 250);
+        _contentLabel.Padding = ScalePadding(0, 2, 0, 2);
         _contentLabel.TextAlign = ContentAlignment.MiddleCenter;
         _contentLabel.Dock = DockStyle.Top;
         _contentLabel.Height = 80;
 
         _statusLabel.Dock = DockStyle.Top;
         _statusLabel.Height = 34;
+        _statusLabel.BorderStyle = BorderStyle.FixedSingle;
         _statusLabel.TextAlign = ContentAlignment.MiddleCenter;
         _statusLabel.Font = new Font("Segoe UI", 10, FontStyle.Bold);
 
         _toggleButton.Text = "Disable Protection";
         _toggleButton.Dock = DockStyle.Top;
         _toggleButton.Height = 36;
+        _toggleButton.FlatStyle = FlatStyle.Flat;
+        _toggleButton.FlatAppearance.BorderColor = Color.FromArgb(158, 177, 201);
+        _toggleButton.FlatAppearance.BorderSize = 1;
         _toggleButton.Click += (_, _) => ApplyProtection(enable: !_protectionEnabled);
 
         BuildAddressBar();
@@ -320,6 +327,9 @@ public class MainForm : Form
         _webViewToggleButton.Text = "Web View";
         _webViewToggleButton.Dock = DockStyle.Bottom;
         _webViewToggleButton.Height = 38;
+        _webViewToggleButton.FlatStyle = FlatStyle.Flat;
+        _webViewToggleButton.FlatAppearance.BorderColor = Color.FromArgb(158, 177, 201);
+        _webViewToggleButton.FlatAppearance.BorderSize = 1;
         _webViewToggleButton.Click += async (_, _) => await ToggleWebViewModeAsync();
         UpdateWebViewToggleVisual();
 
@@ -354,6 +364,7 @@ public class MainForm : Form
     {
         _addressBarPanel.Dock = DockStyle.Top;
         _addressBarPanel.Height = ScaleByDpi(104);
+        _addressBarPanel.BackColor = Color.FromArgb(243, 247, 252);
         _addressBarPanel.Padding = ScalePadding(8, 8, 8, 6);
         _addressBarPanel.Visible = false;
         _addressBarPanel.SizeChanged += (_, _) =>
@@ -2285,8 +2296,8 @@ public class MainForm : Form
         }
 
         _statusLabel.Text = _protectionEnabled
-            ? "Protection Enabled - Your screen is hidden from capture software. yipee :D"
-            : "Protection Disabled - Your screen is visible to capture software. oh noes :(";
+            ? "Protection Enabled - This window is excluded from supported capture software."
+            : "Protection Disabled - This window is visible to capture software.";
         _statusLabel.BackColor = _protectionEnabled ? Color.LightGreen : Color.LightSalmon;
 
         _toggleButton.Text = _protectionEnabled
