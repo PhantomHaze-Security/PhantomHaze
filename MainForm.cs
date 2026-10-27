@@ -6,6 +6,64 @@ namespace PhantomHaze;
 
 public class MainForm : Form
 {
+    private enum AppTheme
+    {
+        Light,
+        Dark,
+    }
+
+    private enum SearchEngine
+    {
+        Google,
+        Bing,
+        Yahoo,
+        DuckDuckGo,
+        Startpage,
+    }
+
+    private sealed class AppSettings
+    {
+        public AppTheme Theme { get; set; } = AppTheme.Light;
+        public bool RenderWebViewInBackground { get; set; }
+        public bool PersistHistoryAcrossSessions { get; set; }
+        public int HistoryRetentionDays { get; set; } = 1;
+        public SearchEngine DefaultSearchEngine { get; set; } = SearchEngine.Google;
+        public string StartingPage { get; set; } = DefaultHomeUrl;
+
+        public AppSettings Clone()
+        {
+            return new AppSettings
+            {
+                Theme = Theme,
+                RenderWebViewInBackground = RenderWebViewInBackground,
+                PersistHistoryAcrossSessions = PersistHistoryAcrossSessions,
+                HistoryRetentionDays = HistoryRetentionDays,
+                DefaultSearchEngine = DefaultSearchEngine,
+                StartingPage = StartingPage,
+            };
+        }
+    }
+
+    private sealed class HistoryEntry
+    {
+        public string Url { get; set; } = string.Empty;
+        public DateTimeOffset VisitedAtUtc { get; set; }
+    }
+
+    private sealed class OptionItem<T>
+    {
+        public OptionItem(T value, string label)
+        {
+            Value = value;
+            Label = label;
+        }
+
+        public T Value { get; }
+        public string Label { get; }
+
+        public override string ToString() => Label;
+    }
+
     private sealed class BrowserTab
     {
         public BrowserTab(
@@ -39,10 +97,16 @@ public class MainForm : Form
         public int ZoomPercent { get; set; }
     }
 
-    private readonly Label _contentLabel = new();
+    private readonly Panel _menuBarPanel = new();
+    private readonly PictureBox _menuLogoPictureBox = new();
+    private readonly Label _menuLogoLabel = new();
+    private readonly Button _logsViewButton = new();
     private readonly Label _statusLabel = new();
     private readonly Button _toggleButton = new();
     private readonly Button _webViewToggleButton = new();
+    private readonly Button _settingsButton = new();
+    private readonly ContextMenuStrip _disableProtectionMenu = new();
+    private readonly System.Windows.Forms.Timer _protectionRestoreTimer = new();
     private readonly Panel _addressBarPanel = new();
     private readonly TextBox _addressBarTextBox = new();
     private readonly Button _favoriteButton = new();
@@ -60,6 +124,8 @@ public class MainForm : Form
     private readonly ListBox _historyListBox = new();
     private readonly ListBox _favoritesListBox = new();
     private readonly Button _historyClearButton = new();
+    private readonly Label _historyTitleLabel = new();
+    private readonly Label _favoritesTitleLabel = new();
     private readonly Panel _findPanel = new();
     private readonly TextBox _findTextBox = new();
     private readonly Label _findCountLabel = new();
@@ -68,13 +134,18 @@ public class MainForm : Form
     private readonly HttpClient _faviconHttpClient = new();
     private readonly Font _tabCloseFontRegular = new("Segoe UI", 8, FontStyle.Bold);
     private readonly Font _tabCloseFontCompact = new("Segoe UI", 6.5f, FontStyle.Bold);
+    private readonly Font _menuButtonFontRegular = new("Segoe UI", 10, FontStyle.Regular);
+    private readonly Font _menuButtonFontBold = new("Segoe UI", 10, FontStyle.Bold);
     private readonly string _logFilePath;
     private readonly string _webSessionPath;
     private readonly string _favoritesFilePath;
-    private readonly List<string> _sessionHistory = new();
+    private readonly string _historyFilePath;
+    private readonly string _settingsFilePath;
+    private readonly List<HistoryEntry> _historyEntries = new();
     private readonly List<string> _favoriteUrls = new();
     private readonly List<BrowserTab> _tabs = new();
     private readonly Dictionary<CoreWebView2, BrowserTab> _tabByCore = new();
+    private AppSettings _settings = new();
     private TableLayoutPanel? _addressRootLayout;
     private TableLayoutPanel? _addressStripLayout;
     private TableLayoutPanel? _tabsLayout;
@@ -89,6 +160,7 @@ public class MainForm : Form
     private bool _sessionDataCleared;
     private int _nextTabId = 1;
     private int _findRequestVersion;
+    private DateTimeOffset? _protectionResumeAtUtc;
 
     private const string DefaultHomeUrl = "https://www.google.com";
     private const string FindShortcutMessage = "__PH_FIND__";
@@ -105,10 +177,11 @@ public class MainForm : Form
     private const int CompactZoomSliderWidth = 135;
     private const int MinimumAddressInputWidth = 180;
     private static readonly Image DefaultTabIcon = SystemIcons.Application.ToBitmap();
+    private static readonly int[] ValidHistoryRetentionDays = new[] { 1, 7, 14, 30, 80, -1 };
 
     public MainForm()
     {
-        Text = "PhantomHaze v1.3.1";
+        Text = "PhantomHaze v1.3.2 Beta";
         Width = 980;
         Height = 620;
         MinimumSize = new Size(860, 560);
@@ -122,10 +195,17 @@ public class MainForm : Form
         _logFilePath = InitializeLogFilePath();
         _webSessionPath = InitializeWebSessionPath();
         _favoritesFilePath = InitializeFavoritesFilePath();
+        _historyFilePath = InitializeHistoryFilePath();
+        _settingsFilePath = InitializeSettingsFilePath();
         _faviconHttpClient.Timeout = TimeSpan.FromSeconds(5);
+        _protectionRestoreTimer.Tick += OnProtectionRestoreTimerTick;
+
+        LoadSettings();
+        NormalizeSettings();
 
         BuildUi();
         LoadFavorites();
+        LoadHistory();
 
         Load += (_, _) =>
         {
@@ -133,6 +213,8 @@ public class MainForm : Form
             Log($"Log file: {_logFilePath}");
             Log($"Web session path: {_webSessionPath}");
             Log($"Favorites file: {_favoritesFilePath}");
+            Log($"History file: {_historyFilePath}");
+            Log($"Settings file: {_settingsFilePath}");
             LogTrueOsBuild();
             ApplyProtection(enable: true);
         };
@@ -170,10 +252,18 @@ public class MainForm : Form
     {
         MinimumSize = new Size(ScaleByDpi(860), ScaleByDpi(560));
 
-        _contentLabel.Height = ScaleByDpi(80);
+        _menuBarPanel.Height = ScaleByDpi(52);
+        _menuBarPanel.Padding = ScalePadding(12, 8, 12, 8);
+        int menuLogoSize = ScaleByDpi(24);
+        _menuLogoPictureBox.Size = new Size(menuLogoSize, menuLogoSize);
         _statusLabel.Height = ScaleByDpi(34);
         _toggleButton.Height = ScaleByDpi(36);
-        _webViewToggleButton.Height = ScaleByDpi(38);
+        _logsViewButton.Width = ScaleByDpi(90);
+        _webViewToggleButton.Width = ScaleByDpi(90);
+        _settingsButton.Width = ScaleByDpi(95);
+        _logsViewButton.Height = ScaleByDpi(30);
+        _webViewToggleButton.Height = ScaleByDpi(30);
+        _settingsButton.Height = ScaleByDpi(30);
 
         _addressBarPanel.Height = ScaleByDpi(104);
         _addressBarPanel.Padding = ScalePadding(8, 8, 8, 6);
@@ -270,14 +360,181 @@ public class MainForm : Form
         return sessionPath;
     }
 
-    private static string InitializeFavoritesFilePath()
+    private static string InitializeFavoritesFilePath() => InitializeAppDataFilePath("favorites.json");
+
+    private static string InitializeHistoryFilePath() => InitializeAppDataFilePath("history.json");
+
+    private static string InitializeSettingsFilePath() => InitializeAppDataFilePath("settings.json");
+
+    private static string InitializeAppDataFilePath(string fileName)
     {
-        string favoritesDir = Path.Combine(
+        string appDataDir = Path.Combine(
             Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
             "PhantomHaze");
 
-        Directory.CreateDirectory(favoritesDir);
-        return Path.Combine(favoritesDir, "favorites.json");
+        Directory.CreateDirectory(appDataDir);
+        return Path.Combine(appDataDir, fileName);
+    }
+
+    private void LoadSettings()
+    {
+        _settings = new AppSettings();
+
+        try
+        {
+            if (!File.Exists(_settingsFilePath))
+            {
+                return;
+            }
+
+            string rawJson = File.ReadAllText(_settingsFilePath);
+            AppSettings? loaded = JsonSerializer.Deserialize<AppSettings>(rawJson);
+            if (loaded is null)
+            {
+                return;
+            }
+
+            _settings = loaded;
+        }
+        catch (Exception ex)
+        {
+            Log($"Settings load failed: {ex.Message}");
+            _settings = new AppSettings();
+        }
+    }
+
+    private void NormalizeSettings()
+    {
+        if (!Enum.IsDefined(_settings.Theme))
+        {
+            _settings.Theme = AppTheme.Light;
+        }
+
+        if (!Enum.IsDefined(_settings.DefaultSearchEngine))
+        {
+            _settings.DefaultSearchEngine = SearchEngine.Google;
+        }
+
+        if (!ValidHistoryRetentionDays.Contains(_settings.HistoryRetentionDays))
+        {
+            _settings.HistoryRetentionDays = 1;
+        }
+
+        _settings.StartingPage = NormalizeStartPage(_settings.StartingPage);
+    }
+
+    private void SaveSettings()
+    {
+        try
+        {
+            string json = JsonSerializer.Serialize(
+                _settings,
+                new JsonSerializerOptions { WriteIndented = true });
+
+            File.WriteAllText(_settingsFilePath, json);
+        }
+        catch (Exception ex)
+        {
+            Log($"Settings save failed: {ex.Message}");
+        }
+    }
+
+    private void LoadHistory()
+    {
+        _historyEntries.Clear();
+
+        if (_settings.PersistHistoryAcrossSessions)
+        {
+            try
+            {
+                if (File.Exists(_historyFilePath))
+                {
+                    string rawJson = File.ReadAllText(_historyFilePath);
+                    List<HistoryEntry>? loadedEntries = JsonSerializer.Deserialize<List<HistoryEntry>>(rawJson);
+                    if (loadedEntries is not null)
+                    {
+                        foreach (HistoryEntry entry in loadedEntries)
+                        {
+                            if (!TryNormalizeUrl(entry.Url, out string normalizedUrl))
+                            {
+                                continue;
+                            }
+
+                            DateTimeOffset visitedAt = entry.VisitedAtUtc == default
+                                ? DateTimeOffset.UtcNow
+                                : entry.VisitedAtUtc;
+
+                            _historyEntries.Add(new HistoryEntry
+                            {
+                                Url = normalizedUrl,
+                                VisitedAtUtc = visitedAt,
+                            });
+                        }
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                Log($"History load failed: {ex.Message}");
+            }
+        }
+
+        PruneHistoryByRetention();
+        RefreshHistoryPanelItems();
+        SaveHistory();
+    }
+
+    private void SaveHistory()
+    {
+        if (!_settings.PersistHistoryAcrossSessions)
+        {
+            TryDeleteFile(_historyFilePath);
+            return;
+        }
+
+        PruneHistoryByRetention();
+
+        try
+        {
+            string json = JsonSerializer.Serialize(
+                _historyEntries,
+                new JsonSerializerOptions { WriteIndented = true });
+
+            File.WriteAllText(_historyFilePath, json);
+        }
+        catch (Exception ex)
+        {
+            Log($"History save failed: {ex.Message}");
+        }
+    }
+
+    private void PruneHistoryByRetention()
+    {
+        int retentionDays = _settings.HistoryRetentionDays;
+        if (retentionDays < 0)
+        {
+            return;
+        }
+
+        DateTimeOffset cutoff = DateTimeOffset.UtcNow.AddDays(-retentionDays);
+        _historyEntries.RemoveAll(entry => entry.VisitedAtUtc < cutoff);
+    }
+
+    private static void TryDeleteFile(string filePath)
+    {
+        try
+        {
+            if (!File.Exists(filePath))
+            {
+                return;
+            }
+
+            File.Delete(filePath);
+        }
+        catch
+        {
+            // Best effort only; keeping the app functional is preferred.
+        }
     }
 
     private void LogTrueOsBuild()
@@ -297,14 +554,8 @@ public class MainForm : Form
 
     private void BuildUi()
     {
-        _contentLabel.Text = "PhantomHaze v1.3.1";
-        _contentLabel.Font = new Font("Segoe UI", 16, FontStyle.Bold);
-        _contentLabel.ForeColor = Color.FromArgb(44, 72, 111);
-        _contentLabel.BackColor = Color.FromArgb(232, 240, 250);
-        _contentLabel.Padding = ScalePadding(0, 2, 0, 2);
-        _contentLabel.TextAlign = ContentAlignment.MiddleCenter;
-        _contentLabel.Dock = DockStyle.Top;
-        _contentLabel.Height = 80;
+        BuildMenuBar();
+        BuildProtectionDisableMenu();
 
         _statusLabel.Dock = DockStyle.Top;
         _statusLabel.Height = 34;
@@ -312,26 +563,17 @@ public class MainForm : Form
         _statusLabel.TextAlign = ContentAlignment.MiddleCenter;
         _statusLabel.Font = new Font("Segoe UI", 10, FontStyle.Bold);
 
-        _toggleButton.Text = "Disable Protection";
         _toggleButton.Dock = DockStyle.Top;
         _toggleButton.Height = 36;
         _toggleButton.FlatStyle = FlatStyle.Flat;
         _toggleButton.FlatAppearance.BorderColor = Color.FromArgb(158, 177, 201);
         _toggleButton.FlatAppearance.BorderSize = 1;
-        _toggleButton.Click += (_, _) => ApplyProtection(enable: !_protectionEnabled);
+        _toggleButton.Text = "Enable Protection";
+        _toggleButton.Click += (_, _) => OnProtectionButtonClick();
 
         BuildAddressBar();
         BuildHistoryPanel();
         BuildFindPanel();
-
-        _webViewToggleButton.Text = "Web View";
-        _webViewToggleButton.Dock = DockStyle.Bottom;
-        _webViewToggleButton.Height = 38;
-        _webViewToggleButton.FlatStyle = FlatStyle.Flat;
-        _webViewToggleButton.FlatAppearance.BorderColor = Color.FromArgb(158, 177, 201);
-        _webViewToggleButton.FlatAppearance.BorderSize = 1;
-        _webViewToggleButton.Click += async (_, _) => await ToggleWebViewModeAsync();
-        UpdateWebViewToggleVisual();
 
         _logBox.Multiline = true;
         _logBox.ReadOnly = true;
@@ -353,11 +595,115 @@ public class MainForm : Form
         Controls.Add(_addressBarPanel);
         Controls.Add(_toggleButton);
         Controls.Add(_statusLabel);
-        Controls.Add(_contentLabel);
-        Controls.Add(_webViewToggleButton);
+        Controls.Add(_menuBarPanel);
 
         ApplyDpiAwareMetrics();
+        ApplyTheme();
+        UpdateWebViewToggleVisual();
         UpdateResponsiveLayout();
+    }
+
+    private void BuildMenuBar()
+    {
+        _menuBarPanel.Dock = DockStyle.Top;
+        _menuBarPanel.Height = ScaleByDpi(52);
+        _menuBarPanel.Padding = ScalePadding(12, 8, 12, 8);
+
+        var menuLayout = new TableLayoutPanel
+        {
+            Dock = DockStyle.Fill,
+            ColumnCount = 5,
+            RowCount = 1,
+            Margin = new Padding(0),
+            Padding = new Padding(0),
+        };
+        menuLayout.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
+        menuLayout.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
+        menuLayout.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
+        menuLayout.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100f));
+        menuLayout.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
+
+        var logoLayout = new TableLayoutPanel
+        {
+            Dock = DockStyle.Fill,
+            ColumnCount = 2,
+            RowCount = 1,
+            Margin = new Padding(0),
+            Padding = new Padding(0),
+            AutoSize = true,
+        };
+        logoLayout.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
+        logoLayout.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
+
+        _menuLogoPictureBox.SizeMode = PictureBoxSizeMode.Zoom;
+        _menuLogoPictureBox.Size = new Size(ScaleByDpi(24), ScaleByDpi(24));
+        _menuLogoPictureBox.Margin = ScalePadding(0, 3, 8, 3);
+        _menuLogoPictureBox.Image = Icon?.ToBitmap() ?? DefaultTabIcon;
+
+        _menuLogoLabel.Text = "PhantomHaze";
+        _menuLogoLabel.Dock = DockStyle.Fill;
+        _menuLogoLabel.Font = new Font("Segoe UI", 10, FontStyle.Bold);
+        _menuLogoLabel.TextAlign = ContentAlignment.MiddleLeft;
+        _menuLogoLabel.Margin = ScalePadding(0, 0, 10, 0);
+
+        logoLayout.Controls.Add(_menuLogoPictureBox, 0, 0);
+        logoLayout.Controls.Add(_menuLogoLabel, 1, 0);
+
+        ConfigureMenuButton(_logsViewButton, "Logs");
+        _logsViewButton.Click += async (_, _) => await SetWebViewModeAsync(enableWebView: false);
+
+        ConfigureMenuButton(_webViewToggleButton, "Web View");
+        _webViewToggleButton.Click += async (_, _) => await SetWebViewModeAsync(enableWebView: true);
+
+        _settingsButton.Text = "Settings";
+        _settingsButton.AutoSize = false;
+        _settingsButton.Dock = DockStyle.Fill;
+        _settingsButton.Width = ScaleByDpi(95);
+        _settingsButton.Height = ScaleByDpi(30);
+        _settingsButton.Margin = new Padding(0);
+        _settingsButton.FlatStyle = FlatStyle.Flat;
+        _settingsButton.FlatAppearance.BorderSize = 1;
+        _settingsButton.Click += (_, _) => OpenSettingsWindow();
+
+        menuLayout.Controls.Add(logoLayout, 0, 0);
+        menuLayout.Controls.Add(_logsViewButton, 1, 0);
+        menuLayout.Controls.Add(_webViewToggleButton, 2, 0);
+        menuLayout.Controls.Add(new Panel { Dock = DockStyle.Fill }, 3, 0);
+        menuLayout.Controls.Add(_settingsButton, 4, 0);
+
+        _menuBarPanel.Controls.Add(menuLayout);
+    }
+
+    private void ConfigureMenuButton(Button button, string text)
+    {
+        button.Text = text;
+        button.AutoSize = false;
+        button.Dock = DockStyle.Fill;
+        button.Width = ScaleByDpi(90);
+        button.Height = ScaleByDpi(30);
+        button.Margin = ScalePadding(0, 0, 6, 0);
+        button.FlatStyle = FlatStyle.Flat;
+        button.FlatAppearance.BorderSize = 1;
+    }
+
+    private void BuildProtectionDisableMenu()
+    {
+        _disableProtectionMenu.Items.Clear();
+
+        AddProtectionDisableOption("5 mins", TimeSpan.FromMinutes(5));
+        AddProtectionDisableOption("10 mins", TimeSpan.FromMinutes(10));
+        AddProtectionDisableOption("30 mins", TimeSpan.FromMinutes(30));
+        AddProtectionDisableOption("1 hour", TimeSpan.FromHours(1));
+        AddProtectionDisableOption("8 hours", TimeSpan.FromHours(8));
+        AddProtectionDisableOption("1 day", TimeSpan.FromDays(1));
+        AddProtectionDisableOption("Until I turn it on again", null);
+    }
+
+    private void AddProtectionDisableOption(string label, TimeSpan? duration)
+    {
+        var item = new ToolStripMenuItem(label);
+        item.Click += (_, _) => DisableProtectionForDuration(label, duration);
+        _disableProtectionMenu.Items.Add(item);
     }
 
     private void BuildAddressBar()
@@ -416,7 +762,7 @@ public class MainForm : Form
         addressInputLayout.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, ScaleByDpi(32)));
 
         _addressBarTextBox.Dock = DockStyle.Fill;
-        _addressBarTextBox.PlaceholderText = DefaultHomeUrl;
+        _addressBarTextBox.PlaceholderText = _settings.StartingPage;
         _addressBarTextBox.KeyDown += (_, e) =>
         {
             if (e.KeyCode == Keys.Enter)
@@ -515,7 +861,7 @@ public class MainForm : Form
         _newTabButton.MinimumSize = new Size(ScaleByDpi(36), ScaleByDpi(28));
         _newTabButton.Padding = new Padding(0);
         _newTabButton.Margin = ScalePadding(2, 0, 0, 0);
-        _newTabButton.Click += async (_, _) => await CreateTabAsync(DefaultHomeUrl, activate: true);
+        _newTabButton.Click += async (_, _) => await CreateTabAsync(GetConfiguredStartPage(), activate: true);
 
         tabsLayout.Controls.Add(_tabsFlowPanel, 0, 0);
         tabsLayout.Controls.Add(_newTabButton, 1, 0);
@@ -543,31 +889,26 @@ public class MainForm : Form
         _historyPanel.Visible = false;
         _historyPanel.BackColor = Color.FromArgb(245, 248, 252);
 
-        var historyTitle = new Label
-        {
-            Text = "Session History",
-            Dock = DockStyle.Fill,
-            Height = 28,
-            TextAlign = ContentAlignment.MiddleLeft,
-            Font = new Font("Segoe UI", 10, FontStyle.Bold),
-        };
+        _historyTitleLabel.Text = GetHistoryTitleText();
+        _historyTitleLabel.Dock = DockStyle.Fill;
+        _historyTitleLabel.Height = 28;
+        _historyTitleLabel.TextAlign = ContentAlignment.MiddleLeft;
+        _historyTitleLabel.Font = new Font("Segoe UI", 10, FontStyle.Bold);
 
-        var favoritesTitle = new Label
-        {
-            Text = "Favourites",
-            Dock = DockStyle.Fill,
-            Height = 28,
-            TextAlign = ContentAlignment.MiddleLeft,
-            Font = new Font("Segoe UI", 10, FontStyle.Bold),
-        };
+        _favoritesTitleLabel.Text = "Favourites";
+        _favoritesTitleLabel.Dock = DockStyle.Fill;
+        _favoritesTitleLabel.Height = 28;
+        _favoritesTitleLabel.TextAlign = ContentAlignment.MiddleLeft;
+        _favoritesTitleLabel.Font = new Font("Segoe UI", 10, FontStyle.Bold);
 
         _historyClearButton.Text = "Clear History";
         _historyClearButton.Dock = DockStyle.Fill;
         _historyClearButton.Height = 32;
         _historyClearButton.Click += (_, _) =>
         {
-            _sessionHistory.Clear();
+            _historyEntries.Clear();
             RefreshHistoryPanelItems();
+            SaveHistory();
             Log("Web history cleared manually.");
         };
 
@@ -611,9 +952,9 @@ public class MainForm : Form
         historyLayout.RowStyles.Add(new RowStyle(SizeType.Absolute, 150f));
         historyLayout.RowStyles.Add(new RowStyle(SizeType.Absolute, 36f));
 
-        historyLayout.Controls.Add(historyTitle, 0, 0);
+        historyLayout.Controls.Add(_historyTitleLabel, 0, 0);
         historyLayout.Controls.Add(_historyListBox, 0, 1);
-        historyLayout.Controls.Add(favoritesTitle, 0, 2);
+        historyLayout.Controls.Add(_favoritesTitleLabel, 0, 2);
         historyLayout.Controls.Add(_favoritesListBox, 0, 3);
         historyLayout.Controls.Add(_historyClearButton, 0, 4);
 
@@ -673,9 +1014,14 @@ public class MainForm : Form
         _findPanel.Controls.Add(findLayout);
     }
 
-    private async Task ToggleWebViewModeAsync()
+    private async Task SetWebViewModeAsync(bool enableWebView)
     {
-        bool enableWebView = !_webViewModeEnabled;
+        if (_webViewModeEnabled == enableWebView)
+        {
+            UpdateWebViewToggleVisual();
+            return;
+        }
+
         if (enableWebView)
         {
             await EnsureWebViewInitializedAsync();
@@ -686,7 +1032,7 @@ public class MainForm : Form
 
             if (_tabs.Count == 0)
             {
-                BrowserTab? firstTab = await CreateTabAsync(DefaultHomeUrl, activate: true);
+                BrowserTab? firstTab = await CreateTabAsync(GetConfiguredStartPage(), activate: true);
                 if (firstTab is null)
                 {
                     return;
@@ -698,8 +1044,7 @@ public class MainForm : Form
             _webViewHostPanel.Visible = true;
             _logBox.Visible = false;
             _historyPanel.Visible = false;
-            _historyButton.BackColor = SystemColors.Control;
-            UpdateWebViewToggleVisual();
+            _historyButton.BackColor = GetCommandButtonBackColor();
 
             if (_activeTab is null && _tabs.Count > 0)
             {
@@ -710,6 +1055,8 @@ public class MainForm : Form
                 ActivateTab(_activeTab);
             }
 
+            UpdateTabVisibilityAndRendering();
+            UpdateWebViewToggleVisual();
             PositionFindPanel();
             UpdateZoomControlsForActiveTab();
             Log("Web View mode enabled.");
@@ -718,18 +1065,14 @@ public class MainForm : Form
 
         _webViewModeEnabled = false;
         _historyPanel.Visible = false;
-        _historyButton.BackColor = SystemColors.Control;
+        _historyButton.BackColor = GetCommandButtonBackColor();
         HideFindPanel(clearHighlights: true);
-
-        foreach (BrowserTab tab in _tabs)
-        {
-            tab.WebView.Visible = false;
-        }
 
         _addressBarPanel.Visible = false;
         _webViewHostPanel.Visible = false;
         _logBox.Visible = true;
         _logBox.BringToFront();
+        UpdateTabVisibilityAndRendering();
         UpdateWebViewToggleVisual();
         UpdateZoomControlsForActiveTab();
         UpdateNavigationButtons();
@@ -739,7 +1082,44 @@ public class MainForm : Form
 
     private void UpdateWebViewToggleVisual()
     {
-        _webViewToggleButton.BackColor = _webViewModeEnabled ? Color.LightSkyBlue : SystemColors.Control;
+        bool darkTheme = IsDarkTheme();
+        Color selectedBackColor = darkTheme ? Color.FromArgb(73, 84, 100) : Color.FromArgb(201, 214, 232);
+        Color normalBackColor = darkTheme ? Color.FromArgb(52, 60, 72) : Color.FromArgb(224, 228, 235);
+        Color selectedTextColor = darkTheme ? Color.White : Color.FromArgb(30, 36, 43);
+        Color normalTextColor = darkTheme ? Color.FromArgb(210, 220, 232) : Color.FromArgb(72, 77, 86);
+
+        _logsViewButton.Font = _webViewModeEnabled ? _menuButtonFontRegular : _menuButtonFontBold;
+        _webViewToggleButton.Font = _webViewModeEnabled ? _menuButtonFontBold : _menuButtonFontRegular;
+
+        _logsViewButton.BackColor = _webViewModeEnabled ? normalBackColor : selectedBackColor;
+        _webViewToggleButton.BackColor = _webViewModeEnabled ? selectedBackColor : normalBackColor;
+
+        _logsViewButton.ForeColor = _webViewModeEnabled ? normalTextColor : selectedTextColor;
+        _webViewToggleButton.ForeColor = _webViewModeEnabled ? selectedTextColor : normalTextColor;
+    }
+
+    private void UpdateTabVisibilityAndRendering()
+    {
+        foreach (BrowserTab tab in _tabs)
+        {
+            bool isActiveTab = _webViewModeEnabled && ReferenceEquals(tab, _activeTab);
+            tab.WebView.Visible = isActiveTab;
+
+            if (tab.WebView.CoreWebView2 is null)
+            {
+                continue;
+            }
+
+            bool shouldRender = isActiveTab || _settings.RenderWebViewInBackground;
+            if (shouldRender)
+            {
+                tab.WebView.CoreWebView2.Resume();
+            }
+            else
+            {
+                _ = tab.WebView.CoreWebView2.TrySuspendAsync();
+            }
+        }
     }
 
     private async Task EnsureWebViewInitializedAsync()
@@ -844,6 +1224,7 @@ public class MainForm : Form
         {
             UpdateTabHeaderVisuals();
             UpdateTabLayout();
+            UpdateTabVisibilityAndRendering();
         }
 
         NavigateTabToUrl(tab, normalizedUrl, "Tab opened");
@@ -996,17 +1377,12 @@ public class MainForm : Form
             _ = ClearFindHighlightsAsync(previous);
         }
 
-        if (previous is not null && !ReferenceEquals(previous, tab))
-        {
-            previous.WebView.Visible = false;
-        }
-
         _activeTab = tab;
         RefreshTabTitle(tab);
+        UpdateTabVisibilityAndRendering();
 
         if (_webViewModeEnabled)
         {
-            tab.WebView.Visible = true;
             tab.WebView.BringToFront();
             if (_historyPanel.Visible)
             {
@@ -1051,17 +1427,18 @@ public class MainForm : Form
 
             if (_webViewModeEnabled)
             {
-                BrowserTab? replacement = await CreateTabAsync(DefaultHomeUrl, activate: true);
+                BrowserTab? replacement = await CreateTabAsync(GetConfiguredStartPage(), activate: true);
                 if (replacement is null)
                 {
                     _webViewModeEnabled = false;
                     _historyPanel.Visible = false;
-                    _historyButton.BackColor = SystemColors.Control;
+                    _historyButton.BackColor = GetCommandButtonBackColor();
                     HideFindPanel(clearHighlights: true);
                     _addressBarPanel.Visible = false;
                     _webViewHostPanel.Visible = false;
                     _logBox.Visible = true;
                     _logBox.BringToFront();
+                    UpdateTabVisibilityAndRendering();
                     UpdateNavigationButtons();
                     UpdateFavoriteButtonState();
                     UpdateWebViewToggleVisual();
@@ -1080,6 +1457,7 @@ public class MainForm : Form
         {
             UpdateTabHeaderVisuals();
             UpdateTabLayout();
+            UpdateTabVisibilityAndRendering();
         }
     }
 
@@ -1133,18 +1511,26 @@ public class MainForm : Form
 
     private void UpdateTabHeaderVisuals()
     {
+        bool darkTheme = IsDarkTheme();
+        Color activeTabColor = darkTheme ? Color.FromArgb(69, 81, 97) : Color.FromArgb(221, 233, 255);
+        Color inactiveTabColor = darkTheme ? Color.FromArgb(53, 61, 73) : Color.FromArgb(235, 240, 247);
+        Color activeCloseColor = darkTheme ? Color.FromArgb(76, 87, 103) : Color.FromArgb(228, 235, 247);
+        Color inactiveCloseColor = darkTheme ? Color.FromArgb(63, 72, 85) : Color.FromArgb(243, 244, 247);
+        Color activeTextColor = darkTheme ? Color.FromArgb(240, 245, 252) : Color.Black;
+        Color inactiveTextColor = darkTheme ? Color.FromArgb(200, 211, 226) : Color.FromArgb(35, 35, 35);
+
         foreach (BrowserTab tab in _tabs)
         {
             bool active = ReferenceEquals(tab, _activeTab);
             tab.HeaderPanel.BackColor = active
-                ? Color.FromArgb(221, 233, 255)
-                : Color.FromArgb(235, 240, 247);
+                ? activeTabColor
+                : inactiveTabColor;
 
             tab.CloseButton.BackColor = active
-                ? Color.FromArgb(228, 235, 247)
-                : Color.FromArgb(243, 244, 247);
+                ? activeCloseColor
+                : inactiveCloseColor;
 
-            tab.TitleLabel.ForeColor = active ? Color.Black : Color.FromArgb(35, 35, 35);
+            tab.TitleLabel.ForeColor = active ? activeTextColor : inactiveTextColor;
         }
     }
 
@@ -1209,14 +1595,17 @@ public class MainForm : Form
             return;
         }
 
-        string rawUrl = _addressBarTextBox.Text.Trim();
-        if (!TryNormalizeUrl(rawUrl, out string normalizedUrl))
+        string rawInput = _addressBarTextBox.Text.Trim();
+        if (!TryResolveNavigationTarget(rawInput, out string targetUrl, out bool isSearchQuery))
         {
-            Log($"Invalid web address: {rawUrl}");
+            Log($"Invalid web address: {rawInput}");
             return;
         }
 
-        NavigateTabToUrl(_activeTab, normalizedUrl, "Navigate requested");
+        NavigateTabToUrl(
+            _activeTab,
+            targetUrl,
+            isSearchQuery ? $"Search requested ({_settings.DefaultSearchEngine})" : "Navigate requested");
     }
 
     private void NavigateTabToUrl(BrowserTab tab, string normalizedUrl, string reason)
@@ -1267,10 +1656,105 @@ public class MainForm : Form
         return true;
     }
 
-    private static string NormalizeOrDefaultUrl(string? rawUrl)
+    private bool TryResolveNavigationTarget(string rawInput, out string targetUrl, out bool isSearchQuery)
+    {
+        targetUrl = string.Empty;
+        isSearchQuery = false;
+
+        if (string.IsNullOrWhiteSpace(rawInput))
+        {
+            return false;
+        }
+
+        string candidate = rawInput.Trim();
+        bool hasExplicitHttpScheme = candidate.StartsWith("http://", StringComparison.OrdinalIgnoreCase) ||
+                                     candidate.StartsWith("https://", StringComparison.OrdinalIgnoreCase);
+
+        if (hasExplicitHttpScheme || LooksLikeDirectAddress(candidate))
+        {
+            return TryNormalizeUrl(candidate, out targetUrl);
+        }
+
+        targetUrl = BuildSearchUrl(candidate);
+        isSearchQuery = true;
+        return true;
+    }
+
+    private static bool LooksLikeDirectAddress(string candidate)
+    {
+        if (string.IsNullOrWhiteSpace(candidate))
+        {
+            return false;
+        }
+
+        if (candidate.IndexOfAny(new[] { ' ', '\t', '\r', '\n' }) >= 0)
+        {
+            return false;
+        }
+
+        if (!Uri.TryCreate($"https://{candidate}", UriKind.Absolute, out Uri? parsed))
+        {
+            return false;
+        }
+
+        string host = parsed.Host;
+        if (string.IsNullOrWhiteSpace(host))
+        {
+            return false;
+        }
+
+        UriHostNameType hostType = Uri.CheckHostName(host);
+        if (hostType is UriHostNameType.IPv4 or UriHostNameType.IPv6)
+        {
+            return true;
+        }
+
+        int lastDotIndex = host.LastIndexOf('.');
+        if (lastDotIndex <= 0 || lastDotIndex >= host.Length - 1)
+        {
+            return false;
+        }
+
+        string extension = host[(lastDotIndex + 1)..];
+        if (extension.Length is < 2 or > 24)
+        {
+            return false;
+        }
+
+        return extension.All(ch => char.IsLetterOrDigit(ch) || ch == '-');
+    }
+
+    private string BuildSearchUrl(string query)
+    {
+        string encodedQuery = Uri.EscapeDataString(query.Trim());
+        return _settings.DefaultSearchEngine switch
+        {
+            SearchEngine.Bing => $"https://www.bing.com/search?q={encodedQuery}",
+            SearchEngine.Yahoo => $"https://search.yahoo.com/search?p={encodedQuery}",
+            SearchEngine.DuckDuckGo => $"https://duckduckgo.com/?q={encodedQuery}",
+            SearchEngine.Startpage => $"https://www.startpage.com/sp/search?query={encodedQuery}",
+            _ => $"https://www.google.com/search?q={encodedQuery}",
+        };
+    }
+
+    private string NormalizeOrDefaultUrl(string? rawUrl)
     {
         return TryNormalizeUrl(rawUrl, out string normalizedUrl)
             ? normalizedUrl
+            : GetConfiguredStartPage();
+    }
+
+    private string GetConfiguredStartPage()
+    {
+        string normalizedStartPage = NormalizeStartPage(_settings.StartingPage);
+        _settings.StartingPage = normalizedStartPage;
+        return normalizedStartPage;
+    }
+
+    private static string NormalizeStartPage(string? rawValue)
+    {
+        return TryNormalizeUrl(rawValue, out string normalizedStartPage)
+            ? normalizedStartPage
             : DefaultHomeUrl;
     }
 
@@ -1314,7 +1798,7 @@ public class MainForm : Form
         if (_historyPanel.Visible)
         {
             _historyPanel.Visible = false;
-            _historyButton.BackColor = SystemColors.Control;
+            _historyButton.BackColor = GetCommandButtonBackColor();
             Log("Web history panel closed.");
             return;
         }
@@ -1328,7 +1812,7 @@ public class MainForm : Form
             _findPanel.BringToFront();
         }
 
-        _historyButton.BackColor = Color.LightSteelBlue;
+        _historyButton.BackColor = GetHistoryButtonActiveBackColor();
         Log("Web history panel opened.");
     }
 
@@ -1346,7 +1830,7 @@ public class MainForm : Form
 
         NavigateToHistoryUrl(selectedUrl);
         _historyPanel.Visible = false;
-        _historyButton.BackColor = SystemColors.Control;
+        _historyButton.BackColor = GetCommandButtonBackColor();
     }
 
     private void NavigateFromFavoritesSelection()
@@ -1363,7 +1847,7 @@ public class MainForm : Form
 
         NavigateToHistoryUrl(selectedUrl);
         _historyPanel.Visible = false;
-        _historyButton.BackColor = SystemColors.Control;
+        _historyButton.BackColor = GetCommandButtonBackColor();
     }
 
     private void NavigateToHistoryUrl(string url)
@@ -1407,16 +1891,17 @@ public class MainForm : Form
 
     private void RefreshHistoryPanelItems()
     {
+        _historyTitleLabel.Text = GetHistoryTitleText();
         _historyListBox.Items.Clear();
-        if (_sessionHistory.Count == 0)
+        if (_historyEntries.Count == 0)
         {
-            _historyListBox.Items.Add("(No history in this session)");
+            _historyListBox.Items.Add(GetNoHistoryMessage());
             return;
         }
 
-        for (int i = _sessionHistory.Count - 1; i >= 0; i--)
+        for (int i = _historyEntries.Count - 1; i >= 0; i--)
         {
-            _historyListBox.Items.Add(_sessionHistory[i]);
+            _historyListBox.Items.Add(_historyEntries[i].Url);
         }
     }
 
@@ -1972,13 +2457,17 @@ public class MainForm : Form
 
     private void UpdateFavoriteButtonState()
     {
+        bool darkTheme = IsDarkTheme();
+        Color idleBackColor = darkTheme ? Color.FromArgb(67, 76, 90) : SystemColors.Control;
+        Color idleForeColor = darkTheme ? Color.FromArgb(225, 233, 244) : SystemColors.ControlText;
+
         bool enabled = _webViewModeEnabled && _activeTab is not null;
         _favoriteButton.Enabled = enabled;
         _favoriteButton.Text = "✩";
         if (!enabled)
         {
-            _favoriteButton.BackColor = SystemColors.Control;
-            _favoriteButton.ForeColor = SystemColors.ControlText;
+            _favoriteButton.BackColor = idleBackColor;
+            _favoriteButton.ForeColor = idleForeColor;
             return;
         }
 
@@ -1986,8 +2475,8 @@ public class MainForm : Form
         bool isFavorite = TryNormalizeUrl(currentUrl, out string normalizedCurrentUrl) &&
             _favoriteUrls.Any(url => url.Equals(normalizedCurrentUrl, StringComparison.OrdinalIgnoreCase));
 
-        _favoriteButton.BackColor = isFavorite ? Color.Gold : SystemColors.Control;
-        _favoriteButton.ForeColor = isFavorite ? Color.Black : SystemColors.ControlText;
+        _favoriteButton.BackColor = isFavorite ? Color.Gold : idleBackColor;
+        _favoriteButton.ForeColor = isFavorite ? Color.Black : idleForeColor;
         _favoriteButton.Text = isFavorite ? "★" : "✩";
     }
 
@@ -2074,10 +2563,21 @@ public class MainForm : Form
             return;
         }
 
-        if (_sessionHistory.Count == 0 ||
-            !_sessionHistory[^1].Equals(url, StringComparison.OrdinalIgnoreCase))
+        if (_historyEntries.Count == 0 ||
+            !_historyEntries[^1].Url.Equals(url, StringComparison.OrdinalIgnoreCase))
         {
-            _sessionHistory.Add(url);
+            _historyEntries.Add(new HistoryEntry
+            {
+                Url = url,
+                VisitedAtUtc = DateTimeOffset.UtcNow,
+            });
+
+            PruneHistoryByRetention();
+            if (_settings.PersistHistoryAcrossSessions)
+            {
+                SaveHistory();
+            }
+
             if (_historyPanel.Visible)
             {
                 RefreshHistoryPanelItems();
@@ -2187,11 +2687,14 @@ public class MainForm : Form
 
     private void CleanupWebSession()
     {
-        _sessionHistory.Clear();
+        SaveSettings();
+        SaveHistory();
+        SaveFavorites();
+
+        _historyEntries.Clear();
         _historyPanel.Visible = false;
         _findPanel.Visible = false;
-
-        SaveFavorites();
+        _protectionRestoreTimer.Stop();
 
         foreach (BrowserTab tab in _tabs.ToArray())
         {
@@ -2214,6 +2717,8 @@ public class MainForm : Form
         {
             _tabCloseFontRegular.Dispose();
             _tabCloseFontCompact.Dispose();
+            _menuButtonFontRegular.Dispose();
+            _menuButtonFontBold.Dispose();
         }
         catch
         {
@@ -2295,14 +2800,87 @@ public class MainForm : Form
             }
         }
 
+        if (_protectionEnabled)
+        {
+            _protectionRestoreTimer.Stop();
+            _protectionResumeAtUtc = null;
+        }
+
+        UpdateProtectionStatusVisual();
+        _toggleButton.Text = _protectionEnabled
+            ? "Disable Protection ▼"
+            : "Enable Protection";
+    }
+
+    private void OnProtectionButtonClick()
+    {
+        if (_protectionEnabled)
+        {
+            _disableProtectionMenu.Show(_toggleButton, new Point(0, _toggleButton.Height));
+            return;
+        }
+
+        _protectionRestoreTimer.Stop();
+        _protectionResumeAtUtc = null;
+        ApplyProtection(enable: true);
+        if (_protectionEnabled)
+        {
+            Log("Protection re-enabled manually.");
+        }
+    }
+
+    private void DisableProtectionForDuration(string label, TimeSpan? duration)
+    {
+        ApplyProtection(enable: false);
+        if (_protectionEnabled)
+        {
+            Log($"Protection disable request failed for duration: {label}.");
+            return;
+        }
+
+        if (duration is null)
+        {
+            _protectionRestoreTimer.Stop();
+            _protectionResumeAtUtc = null;
+            Log("Protection disabled until manually re-enabled.");
+            return;
+        }
+
+        _protectionResumeAtUtc = DateTimeOffset.UtcNow.Add(duration.Value);
+        _protectionRestoreTimer.Stop();
+        _protectionRestoreTimer.Interval = (int)Math.Clamp(duration.Value.TotalMilliseconds, 1, int.MaxValue);
+        _protectionRestoreTimer.Start();
+        Log($"Protection disabled for {label} (until {_protectionResumeAtUtc.Value.LocalDateTime:yyyy-MM-dd HH:mm:ss}).");
+    }
+
+    private void OnProtectionRestoreTimerTick(object? sender, EventArgs e)
+    {
+        _protectionRestoreTimer.Stop();
+        _protectionResumeAtUtc = null;
+        ApplyProtection(enable: true);
+        if (_protectionEnabled)
+        {
+            Log("Timed protection disable period has ended; protection re-enabled automatically.");
+        }
+    }
+
+    private void UpdateProtectionStatusVisual()
+    {
         _statusLabel.Text = _protectionEnabled
             ? "Protection Enabled - This window is excluded from supported capture software."
             : "Protection Disabled - This window is visible to capture software.";
-        _statusLabel.BackColor = _protectionEnabled ? Color.LightGreen : Color.LightSalmon;
 
-        _toggleButton.Text = _protectionEnabled
-            ? "Disable Protection"
-            : "Enable Protection";
+        if (IsDarkTheme())
+        {
+            _statusLabel.BackColor = _protectionEnabled
+                ? Color.FromArgb(58, 123, 85)
+                : Color.FromArgb(133, 76, 73);
+            _statusLabel.ForeColor = Color.White;
+            return;
+        }
+
+        _statusLabel.BackColor = _protectionEnabled ? Color.LightGreen : Color.LightSalmon;
+        _statusLabel.ForeColor = Color.Black;
     }
 
     private void UpdateZoomControlsForActiveTab()
@@ -2360,6 +2938,359 @@ public class MainForm : Form
         _zoomLabel.Margin = compact
             ? ScalePadding(0, 2, 3, 2)
             : ScalePadding(3, 2, 3, 2);
+    }
+
+    private string GetHistoryTitleText()
+    {
+        return _settings.PersistHistoryAcrossSessions
+            ? "Saved History"
+            : "Session History";
+    }
+
+    private string GetNoHistoryMessage()
+    {
+        return _settings.PersistHistoryAcrossSessions
+            ? "(No saved history yet)"
+            : "(No history in this session)";
+    }
+
+    private bool IsDarkTheme() => _settings.Theme == AppTheme.Dark;
+
+    private Color GetCommandButtonBackColor()
+    {
+        return IsDarkTheme()
+            ? Color.FromArgb(67, 76, 90)
+            : SystemColors.Control;
+    }
+
+    private Color GetHistoryButtonActiveBackColor()
+    {
+        return IsDarkTheme()
+            ? Color.FromArgb(86, 96, 111)
+            : Color.LightSteelBlue;
+    }
+
+    private void ApplyTheme()
+    {
+        bool darkTheme = IsDarkTheme();
+        Color appBackColor = darkTheme ? Color.FromArgb(31, 36, 43) : Color.FromArgb(246, 249, 253);
+        Color panelBackColor = darkTheme ? Color.FromArgb(40, 45, 53) : Color.FromArgb(243, 247, 252);
+        Color menuBackColor = darkTheme ? Color.FromArgb(52, 60, 72) : Color.FromArgb(224, 228, 235);
+        Color textColor = darkTheme ? Color.FromArgb(224, 233, 245) : Color.FromArgb(25, 25, 25);
+        Color inputBackColor = darkTheme ? Color.FromArgb(54, 62, 74) : Color.White;
+        Color inputTextColor = darkTheme ? Color.FromArgb(234, 241, 252) : Color.Black;
+        Color buttonBackColor = GetCommandButtonBackColor();
+        Color buttonTextColor = darkTheme ? Color.FromArgb(225, 233, 244) : SystemColors.ControlText;
+        Color buttonBorderColor = darkTheme ? Color.FromArgb(105, 116, 132) : Color.FromArgb(158, 177, 201);
+
+        BackColor = appBackColor;
+        _menuBarPanel.BackColor = menuBackColor;
+        _menuLogoLabel.ForeColor = textColor;
+        _addressBarPanel.BackColor = panelBackColor;
+        _contentHostPanel.BackColor = appBackColor;
+        _webViewHostPanel.BackColor = appBackColor;
+        _historyPanel.BackColor = panelBackColor;
+        _findPanel.BackColor = panelBackColor;
+
+        _addressBarTextBox.BackColor = inputBackColor;
+        _addressBarTextBox.ForeColor = inputTextColor;
+        _historyListBox.BackColor = inputBackColor;
+        _historyListBox.ForeColor = inputTextColor;
+        _favoritesListBox.BackColor = inputBackColor;
+        _favoritesListBox.ForeColor = inputTextColor;
+        _findTextBox.BackColor = inputBackColor;
+        _findTextBox.ForeColor = inputTextColor;
+        _logBox.BackColor = darkTheme ? Color.FromArgb(23, 27, 33) : Color.White;
+        _logBox.ForeColor = darkTheme ? Color.FromArgb(210, 225, 240) : Color.Black;
+
+        _historyTitleLabel.ForeColor = textColor;
+        _favoritesTitleLabel.ForeColor = textColor;
+        _zoomLabel.ForeColor = textColor;
+        _findCountLabel.ForeColor = textColor;
+
+        foreach (Button button in new[] { _toggleButton, _backButton, _goButton, _refreshButton, _historyButton, _newTabButton, _historyClearButton, _findCloseButton, _settingsButton })
+        {
+            button.BackColor = buttonBackColor;
+            button.ForeColor = buttonTextColor;
+            button.FlatAppearance.BorderColor = buttonBorderColor;
+        }
+
+        _historyButton.BackColor = _historyPanel.Visible
+            ? GetHistoryButtonActiveBackColor()
+            : buttonBackColor;
+
+        _favoriteButton.FlatAppearance.BorderColor = buttonBorderColor;
+        _webViewToggleButton.FlatAppearance.BorderColor = buttonBorderColor;
+        _logsViewButton.FlatAppearance.BorderColor = buttonBorderColor;
+
+        UpdateProtectionStatusVisual();
+        UpdateWebViewToggleVisual();
+        UpdateFavoriteButtonState();
+        UpdateTabHeaderVisuals();
+    }
+
+    private void OpenSettingsWindow()
+    {
+        AppSettings draftSettings = _settings.Clone();
+
+        using var settingsWindow = new Form
+        {
+            Text = "PhantomHaze Settings",
+            StartPosition = FormStartPosition.CenterParent,
+            FormBorderStyle = FormBorderStyle.FixedDialog,
+            MinimizeBox = false,
+            MaximizeBox = false,
+            ShowInTaskbar = false,
+            ClientSize = new Size(ScaleByDpi(520), ScaleByDpi(330)),
+            AutoScaleMode = AutoScaleMode.Dpi,
+        };
+
+        var contentLayout = new TableLayoutPanel
+        {
+            Dock = DockStyle.Fill,
+            ColumnCount = 2,
+            RowCount = 7,
+            Padding = ScalePadding(12, 12, 12, 12),
+        };
+        contentLayout.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, ScaleByDpi(220)));
+        contentLayout.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100f));
+        contentLayout.RowStyles.Add(new RowStyle(SizeType.Absolute, ScaleByDpi(36)));
+        contentLayout.RowStyles.Add(new RowStyle(SizeType.Absolute, ScaleByDpi(36)));
+        contentLayout.RowStyles.Add(new RowStyle(SizeType.Absolute, ScaleByDpi(36)));
+        contentLayout.RowStyles.Add(new RowStyle(SizeType.Absolute, ScaleByDpi(36)));
+        contentLayout.RowStyles.Add(new RowStyle(SizeType.Absolute, ScaleByDpi(36)));
+        contentLayout.RowStyles.Add(new RowStyle(SizeType.Absolute, ScaleByDpi(36)));
+        contentLayout.RowStyles.Add(new RowStyle(SizeType.Percent, 100f));
+
+        static Label BuildSettingsLabel(string text)
+        {
+            return new Label
+            {
+                Text = text,
+                Dock = DockStyle.Fill,
+                TextAlign = ContentAlignment.MiddleLeft,
+                Font = new Font("Segoe UI", 9, FontStyle.Regular),
+            };
+        }
+
+        var themeComboBox = new ComboBox
+        {
+            Dock = DockStyle.Fill,
+            DropDownStyle = ComboBoxStyle.DropDownList,
+        };
+        themeComboBox.Items.Add(new OptionItem<AppTheme>(AppTheme.Light, "Light"));
+        themeComboBox.Items.Add(new OptionItem<AppTheme>(AppTheme.Dark, "Dark"));
+        themeComboBox.SelectedIndex = draftSettings.Theme == AppTheme.Dark ? 1 : 0;
+
+        var renderInBackgroundCheckBox = new CheckBox
+        {
+            Text = "Render web pages in the background",
+            Dock = DockStyle.Fill,
+            Checked = draftSettings.RenderWebViewInBackground,
+            TextAlign = ContentAlignment.MiddleLeft,
+        };
+
+        var persistHistoryCheckBox = new CheckBox
+        {
+            Text = "Save history across sessions",
+            Dock = DockStyle.Fill,
+            Checked = draftSettings.PersistHistoryAcrossSessions,
+            TextAlign = ContentAlignment.MiddleLeft,
+        };
+
+        var retentionComboBox = new ComboBox
+        {
+            Dock = DockStyle.Fill,
+            DropDownStyle = ComboBoxStyle.DropDownList,
+            Enabled = draftSettings.PersistHistoryAcrossSessions,
+        };
+        OptionItem<int>[] retentionOptions =
+        [
+            new OptionItem<int>(1, "1 day"),
+            new OptionItem<int>(7, "7 days"),
+            new OptionItem<int>(14, "14 days"),
+            new OptionItem<int>(30, "30 days"),
+            new OptionItem<int>(80, "80 days"),
+            new OptionItem<int>(-1, "Forever"),
+        ];
+
+        foreach (OptionItem<int> option in retentionOptions)
+        {
+            retentionComboBox.Items.Add(option);
+        }
+
+        OptionItem<int>? selectedRetentionOption = retentionOptions.FirstOrDefault(option => option.Value == draftSettings.HistoryRetentionDays) ?? retentionOptions[0];
+        retentionComboBox.SelectedItem = selectedRetentionOption;
+
+        persistHistoryCheckBox.CheckedChanged += (_, _) =>
+        {
+            retentionComboBox.Enabled = persistHistoryCheckBox.Checked;
+        };
+
+        var searchEngineComboBox = new ComboBox
+        {
+            Dock = DockStyle.Fill,
+            DropDownStyle = ComboBoxStyle.DropDownList,
+        };
+        OptionItem<SearchEngine>[] searchOptions =
+        [
+            new OptionItem<SearchEngine>(SearchEngine.Google, "Google"),
+            new OptionItem<SearchEngine>(SearchEngine.Bing, "Bing"),
+            new OptionItem<SearchEngine>(SearchEngine.Yahoo, "Yahoo"),
+            new OptionItem<SearchEngine>(SearchEngine.DuckDuckGo, "DuckDuckGo"),
+            new OptionItem<SearchEngine>(SearchEngine.Startpage, "Startpage"),
+        ];
+
+        foreach (OptionItem<SearchEngine> option in searchOptions)
+        {
+            searchEngineComboBox.Items.Add(option);
+        }
+
+        OptionItem<SearchEngine>? selectedSearchOption = searchOptions.FirstOrDefault(option => option.Value == draftSettings.DefaultSearchEngine) ?? searchOptions[0];
+        searchEngineComboBox.SelectedItem = selectedSearchOption;
+
+        var startPageTextBox = new TextBox
+        {
+            Dock = DockStyle.Fill,
+            Text = draftSettings.StartingPage,
+        };
+
+        var buttonsPanel = new FlowLayoutPanel
+        {
+            Dock = DockStyle.Fill,
+            FlowDirection = FlowDirection.RightToLeft,
+            WrapContents = false,
+        };
+
+        var saveButton = new Button
+        {
+            Text = "Save",
+            DialogResult = DialogResult.OK,
+            Width = ScaleByDpi(90),
+            Height = ScaleByDpi(30),
+            Margin = ScalePadding(8, 0, 0, 0),
+        };
+
+        var cancelButton = new Button
+        {
+            Text = "Cancel",
+            DialogResult = DialogResult.Cancel,
+            Width = ScaleByDpi(90),
+            Height = ScaleByDpi(30),
+        };
+
+        buttonsPanel.Controls.Add(saveButton);
+        buttonsPanel.Controls.Add(cancelButton);
+
+        contentLayout.Controls.Add(BuildSettingsLabel("Theme"), 0, 0);
+        contentLayout.Controls.Add(themeComboBox, 1, 0);
+
+        contentLayout.Controls.Add(renderInBackgroundCheckBox, 0, 1);
+        contentLayout.SetColumnSpan(renderInBackgroundCheckBox, 2);
+
+        contentLayout.Controls.Add(persistHistoryCheckBox, 0, 2);
+        contentLayout.SetColumnSpan(persistHistoryCheckBox, 2);
+
+        contentLayout.Controls.Add(BuildSettingsLabel("Saved history retention"), 0, 3);
+        contentLayout.Controls.Add(retentionComboBox, 1, 3);
+
+        contentLayout.Controls.Add(BuildSettingsLabel("Default search engine"), 0, 4);
+        contentLayout.Controls.Add(searchEngineComboBox, 1, 4);
+
+        contentLayout.Controls.Add(BuildSettingsLabel("Web View starting page"), 0, 5);
+        contentLayout.Controls.Add(startPageTextBox, 1, 5);
+
+        contentLayout.Controls.Add(buttonsPanel, 0, 6);
+        contentLayout.SetColumnSpan(buttonsPanel, 2);
+
+        settingsWindow.AcceptButton = saveButton;
+        settingsWindow.CancelButton = cancelButton;
+        settingsWindow.Controls.Add(contentLayout);
+
+        if (IsDarkTheme())
+        {
+            settingsWindow.BackColor = Color.FromArgb(38, 44, 52);
+            foreach (Control control in contentLayout.Controls)
+            {
+                control.BackColor = Color.FromArgb(38, 44, 52);
+                control.ForeColor = Color.FromArgb(228, 236, 247);
+            }
+
+            themeComboBox.BackColor = Color.FromArgb(55, 64, 77);
+            themeComboBox.ForeColor = Color.FromArgb(228, 236, 247);
+            retentionComboBox.BackColor = Color.FromArgb(55, 64, 77);
+            retentionComboBox.ForeColor = Color.FromArgb(228, 236, 247);
+            searchEngineComboBox.BackColor = Color.FromArgb(55, 64, 77);
+            searchEngineComboBox.ForeColor = Color.FromArgb(228, 236, 247);
+            startPageTextBox.BackColor = Color.FromArgb(55, 64, 77);
+            startPageTextBox.ForeColor = Color.FromArgb(228, 236, 247);
+            saveButton.BackColor = Color.FromArgb(67, 76, 90);
+            saveButton.ForeColor = Color.FromArgb(228, 236, 247);
+            cancelButton.BackColor = Color.FromArgb(67, 76, 90);
+            cancelButton.ForeColor = Color.FromArgb(228, 236, 247);
+        }
+
+        settingsWindow.Shown += (_, _) => ApplyProtectionToSettingsWindow(settingsWindow);
+
+        if (settingsWindow.ShowDialog(this) != DialogResult.OK)
+        {
+            return;
+        }
+
+        if (themeComboBox.SelectedItem is OptionItem<AppTheme> themeOption)
+        {
+            draftSettings.Theme = themeOption.Value;
+        }
+
+        draftSettings.RenderWebViewInBackground = renderInBackgroundCheckBox.Checked;
+        draftSettings.PersistHistoryAcrossSessions = persistHistoryCheckBox.Checked;
+
+        if (retentionComboBox.SelectedItem is OptionItem<int> retentionOption)
+        {
+            draftSettings.HistoryRetentionDays = retentionOption.Value;
+        }
+
+        if (searchEngineComboBox.SelectedItem is OptionItem<SearchEngine> searchOption)
+        {
+            draftSettings.DefaultSearchEngine = searchOption.Value;
+        }
+
+        draftSettings.StartingPage = NormalizeStartPage(startPageTextBox.Text.Trim());
+        _settings = draftSettings;
+        NormalizeSettings();
+        SaveSettings();
+
+        if (_settings.PersistHistoryAcrossSessions)
+        {
+            SaveHistory();
+        }
+        else
+        {
+            TryDeleteFile(_historyFilePath);
+        }
+
+        _addressBarTextBox.PlaceholderText = _settings.StartingPage;
+        RefreshHistoryPanelItems();
+        UpdateTabVisibilityAndRendering();
+        ApplyTheme();
+        Log("Settings updated and saved.");
+    }
+
+    private void ApplyProtectionToSettingsWindow(Form settingsWindow)
+    {
+        if (!_protectionEnabled)
+        {
+            return;
+        }
+
+        var (ok, error) = NativeMethods.ExcludeFromCapture(settingsWindow.Handle, enable: true);
+        if (!ok)
+        {
+            Log($"Settings window protection failed. Win32 error {error}: {NativeMethods.DescribeError(error)}.");
+            return;
+        }
+
+        Log("Settings window protection applied.");
     }
 
     private void Log(string message)
