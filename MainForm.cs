@@ -95,6 +95,7 @@ public class MainForm : Form
         public string Title { get; set; }
         public Image? OwnedFaviconImage { get; set; }
         public int ZoomPercent { get; set; }
+        public bool IsNavigationPending { get; set; }
     }
 
     private readonly Panel _menuBarPanel = new();
@@ -120,6 +121,8 @@ public class MainForm : Form
     private readonly Button _newTabButton = new();
     private readonly Panel _contentHostPanel = new();
     private readonly Panel _webViewHostPanel = new();
+    private readonly Panel _webViewLoadingOverlayPanel = new();
+    private readonly Label _webViewLoadingLabel = new();
     private readonly Panel _historyPanel = new();
     private readonly ListBox _historyListBox = new();
     private readonly ListBox _favoritesListBox = new();
@@ -157,9 +160,11 @@ public class MainForm : Form
     private bool _protectionEnabled;
     private bool _webViewInitialized;
     private bool _webViewModeEnabled;
+    private bool _webViewModeSwitchInProgress;
     private bool _sessionDataCleared;
     private int _nextTabId = 1;
     private int _findRequestVersion;
+    private int _webViewModeSwitchVersion;
     private DateTimeOffset? _protectionResumeAtUtc;
 
     private const string DefaultHomeUrl = "https://www.google.com";
@@ -198,6 +203,7 @@ public class MainForm : Form
         _historyFilePath = InitializeHistoryFilePath();
         _settingsFilePath = InitializeSettingsFilePath();
         _faviconHttpClient.Timeout = TimeSpan.FromSeconds(5);
+        _protectionRestoreTimer.Interval = 1000;
         _protectionRestoreTimer.Tick += OnProtectionRestoreTimerTick;
 
         LoadSettings();
@@ -252,18 +258,24 @@ public class MainForm : Form
     {
         MinimumSize = new Size(ScaleByDpi(860), ScaleByDpi(560));
 
-        _menuBarPanel.Height = ScaleByDpi(52);
+        _menuBarPanel.MinimumSize = new Size(0, ScaleByDpi(52));
         _menuBarPanel.Padding = ScalePadding(12, 8, 12, 8);
         int menuLogoSize = ScaleByDpi(24);
         _menuLogoPictureBox.Size = new Size(menuLogoSize, menuLogoSize);
+        _menuLogoPictureBox.Margin = ScalePadding(0, 2, 8, 2);
+        _menuLogoLabel.Margin = ScalePadding(0, 0, 10, 0);
         _statusLabel.Height = ScaleByDpi(34);
         _toggleButton.Height = ScaleByDpi(36);
-        _logsViewButton.Width = ScaleByDpi(90);
-        _webViewToggleButton.Width = ScaleByDpi(90);
-        _settingsButton.Width = ScaleByDpi(95);
-        _logsViewButton.Height = ScaleByDpi(30);
-        _webViewToggleButton.Height = ScaleByDpi(30);
-        _settingsButton.Height = ScaleByDpi(30);
+        _logsViewButton.MinimumSize = new Size(ScaleByDpi(90), 0);
+        _webViewToggleButton.MinimumSize = new Size(ScaleByDpi(90), 0);
+        _settingsButton.MinimumSize = new Size(ScaleByDpi(95), 0);
+        Padding menuButtonPadding = ScalePadding(12, 4, 12, 4);
+        _logsViewButton.Padding = menuButtonPadding;
+        _webViewToggleButton.Padding = menuButtonPadding;
+        _settingsButton.Padding = menuButtonPadding;
+        _logsViewButton.Margin = ScalePadding(0, 0, 6, 0);
+        _webViewToggleButton.Margin = ScalePadding(0, 0, 6, 0);
+        _settingsButton.Margin = new Padding(0);
 
         _addressBarPanel.Height = ScaleByDpi(104);
         _addressBarPanel.Padding = ScalePadding(8, 8, 8, 6);
@@ -310,6 +322,7 @@ public class MainForm : Form
 
         _findPanel.Height = ScaleByDpi(42);
         _findTextBox.Margin = ScalePadding(0, 0, 6, 0);
+        _webViewLoadingLabel.Margin = ScalePadding(24, 0, 24, 0);
 
         Padding stripButtonMargin = ScalePadding(3, 2, 3, 2);
         _backButton.Margin = stripButtonMargin;
@@ -574,6 +587,7 @@ public class MainForm : Form
         BuildAddressBar();
         BuildHistoryPanel();
         BuildFindPanel();
+        BuildWebViewLoadingOverlay();
 
         _logBox.Multiline = true;
         _logBox.ReadOnly = true;
@@ -589,6 +603,7 @@ public class MainForm : Form
         _contentHostPanel.Controls.Add(_logBox);
         _contentHostPanel.Controls.Add(_historyPanel);
         _contentHostPanel.Controls.Add(_findPanel);
+        _contentHostPanel.Controls.Add(_webViewLoadingOverlayPanel);
         _contentHostPanel.Resize += (_, _) => PositionFindPanel();
 
         Controls.Add(_contentHostPanel);
@@ -606,7 +621,9 @@ public class MainForm : Form
     private void BuildMenuBar()
     {
         _menuBarPanel.Dock = DockStyle.Top;
-        _menuBarPanel.Height = ScaleByDpi(52);
+        _menuBarPanel.AutoSize = true;
+        _menuBarPanel.AutoSizeMode = AutoSizeMode.GrowAndShrink;
+        _menuBarPanel.MinimumSize = new Size(0, ScaleByDpi(52));
         _menuBarPanel.Padding = ScalePadding(12, 8, 12, 8);
 
         var menuLayout = new TableLayoutPanel
@@ -616,7 +633,10 @@ public class MainForm : Form
             RowCount = 1,
             Margin = new Padding(0),
             Padding = new Padding(0),
+            AutoSize = true,
+            AutoSizeMode = AutoSizeMode.GrowAndShrink,
         };
+        menuLayout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
         menuLayout.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
         menuLayout.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
         menuLayout.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
@@ -631,7 +651,9 @@ public class MainForm : Form
             Margin = new Padding(0),
             Padding = new Padding(0),
             AutoSize = true,
+            AutoSizeMode = AutoSizeMode.GrowAndShrink,
         };
+        logoLayout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
         logoLayout.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
         logoLayout.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
 
@@ -656,10 +678,12 @@ public class MainForm : Form
         _webViewToggleButton.Click += async (_, _) => await SetWebViewModeAsync(enableWebView: true);
 
         _settingsButton.Text = "Settings";
-        _settingsButton.AutoSize = false;
-        _settingsButton.Dock = DockStyle.Fill;
-        _settingsButton.Width = ScaleByDpi(95);
-        _settingsButton.Height = ScaleByDpi(30);
+        _settingsButton.AutoSize = true;
+        _settingsButton.AutoSizeMode = AutoSizeMode.GrowAndShrink;
+        _settingsButton.Dock = DockStyle.None;
+        _settingsButton.Anchor = AnchorStyles.Left;
+        _settingsButton.MinimumSize = new Size(ScaleByDpi(95), 0);
+        _settingsButton.Padding = ScalePadding(12, 4, 12, 4);
         _settingsButton.Margin = new Padding(0);
         _settingsButton.FlatStyle = FlatStyle.Flat;
         _settingsButton.FlatAppearance.BorderSize = 1;
@@ -677,13 +701,30 @@ public class MainForm : Form
     private void ConfigureMenuButton(Button button, string text)
     {
         button.Text = text;
-        button.AutoSize = false;
-        button.Dock = DockStyle.Fill;
-        button.Width = ScaleByDpi(90);
-        button.Height = ScaleByDpi(30);
+        button.AutoSize = true;
+        button.AutoSizeMode = AutoSizeMode.GrowAndShrink;
+        button.Dock = DockStyle.None;
+        button.Anchor = AnchorStyles.Left;
+        button.MinimumSize = new Size(ScaleByDpi(90), 0);
+        button.Padding = ScalePadding(12, 4, 12, 4);
         button.Margin = ScalePadding(0, 0, 6, 0);
         button.FlatStyle = FlatStyle.Flat;
         button.FlatAppearance.BorderSize = 1;
+    }
+
+    private void BuildWebViewLoadingOverlay()
+    {
+        _webViewLoadingOverlayPanel.Dock = DockStyle.Fill;
+        _webViewLoadingOverlayPanel.Visible = false;
+        _webViewLoadingOverlayPanel.Padding = ScalePadding(24, 24, 24, 24);
+
+        _webViewLoadingLabel.Dock = DockStyle.Fill;
+        _webViewLoadingLabel.TextAlign = ContentAlignment.MiddleCenter;
+        _webViewLoadingLabel.Font = new Font("Segoe UI", 11, FontStyle.Bold);
+        _webViewLoadingLabel.Text = "Loading Web View...";
+        _webViewLoadingLabel.Margin = ScalePadding(24, 0, 24, 0);
+
+        _webViewLoadingOverlayPanel.Controls.Add(_webViewLoadingLabel);
     }
 
     private void BuildProtectionDisableMenu()
@@ -1016,68 +1057,173 @@ public class MainForm : Form
 
     private async Task SetWebViewModeAsync(bool enableWebView)
     {
+        if (_webViewModeSwitchInProgress)
+        {
+            return;
+        }
+
         if (_webViewModeEnabled == enableWebView)
         {
             UpdateWebViewToggleVisual();
             return;
         }
 
-        if (enableWebView)
+        _webViewModeSwitchInProgress = true;
+        try
         {
-            await EnsureWebViewInitializedAsync();
-            if (!_webViewInitialized)
+            if (enableWebView)
             {
-                return;
-            }
-
-            if (_tabs.Count == 0)
-            {
-                BrowserTab? firstTab = await CreateTabAsync(GetConfiguredStartPage(), activate: true);
-                if (firstTab is null)
+                await EnsureWebViewInitializedAsync();
+                if (!_webViewInitialized)
                 {
                     return;
                 }
+
+                if (_tabs.Count == 0)
+                {
+                    BrowserTab? firstTab = await CreateTabAsync(GetConfiguredStartPage(), activate: true);
+                    if (firstTab is null)
+                    {
+                        return;
+                    }
+                }
+
+                _webViewModeEnabled = true;
+                _addressBarPanel.Visible = true;
+                _webViewHostPanel.Visible = true;
+                _logBox.Visible = false;
+                _historyPanel.Visible = false;
+                _historyButton.BackColor = GetCommandButtonBackColor();
+
+                if (_activeTab is null && _tabs.Count > 0)
+                {
+                    ActivateTab(_tabs[0]);
+                }
+                else if (_activeTab is not null)
+                {
+                    ActivateTab(_activeTab);
+                }
+
+                UpdateTabVisibilityAndRendering();
+                UpdateWebViewToggleVisual();
+                PositionFindPanel();
+                UpdateZoomControlsForActiveTab();
+
+                int switchVersion = ++_webViewModeSwitchVersion;
+                ShowWebViewLoadingOverlay();
+                await WaitForActiveWebViewDisplayReadinessAsync(switchVersion);
+
+                if (_webViewModeEnabled && switchVersion == _webViewModeSwitchVersion)
+                {
+                    HideWebViewLoadingOverlay();
+                }
+
+                Log("Web View mode enabled.");
+                return;
             }
 
-            _webViewModeEnabled = true;
-            _addressBarPanel.Visible = true;
-            _webViewHostPanel.Visible = true;
-            _logBox.Visible = false;
+            _webViewModeSwitchVersion++;
+            HideWebViewLoadingOverlay();
+            _webViewModeEnabled = false;
             _historyPanel.Visible = false;
             _historyButton.BackColor = GetCommandButtonBackColor();
+            HideFindPanel(clearHighlights: true);
 
-            if (_activeTab is null && _tabs.Count > 0)
-            {
-                ActivateTab(_tabs[0]);
-            }
-            else if (_activeTab is not null)
-            {
-                ActivateTab(_activeTab);
-            }
-
+            _addressBarPanel.Visible = false;
+            _webViewHostPanel.Visible = false;
+            _logBox.Visible = true;
+            _logBox.BringToFront();
             UpdateTabVisibilityAndRendering();
             UpdateWebViewToggleVisual();
-            PositionFindPanel();
             UpdateZoomControlsForActiveTab();
-            Log("Web View mode enabled.");
+            UpdateNavigationButtons();
+            UpdateFavoriteButtonState();
+            Log("Web View mode disabled; log panel restored.");
+        }
+        finally
+        {
+            _webViewModeSwitchInProgress = false;
+        }
+    }
+
+    private void ShowWebViewLoadingOverlay()
+    {
+        _webViewLoadingOverlayPanel.Visible = true;
+        _webViewLoadingOverlayPanel.BringToFront();
+    }
+
+    private void HideWebViewLoadingOverlay()
+    {
+        _webViewLoadingOverlayPanel.Visible = false;
+    }
+
+    private async Task WaitForActiveWebViewDisplayReadinessAsync(int switchVersion)
+    {
+        BrowserTab? tab = _activeTab;
+        if (!_webViewModeEnabled || tab?.WebView.CoreWebView2 is null)
+        {
             return;
         }
 
-        _webViewModeEnabled = false;
-        _historyPanel.Visible = false;
-        _historyButton.BackColor = GetCommandButtonBackColor();
-        HideFindPanel(clearHighlights: true);
+        Task minimumOverlayTask = Task.Delay(180);
+        bool mustWaitForNavigation = tab.IsNavigationPending || IsTabShowingPlaceholder(tab);
+        if (mustWaitForNavigation)
+        {
+            await Task.WhenAll(
+                minimumOverlayTask,
+                WaitForNavigationCompletionAsync(tab, TimeSpan.FromSeconds(8)));
+        }
+        else
+        {
+            int stabilizationDelay = _settings.RenderWebViewInBackground ? 75 : 220;
+            await Task.WhenAll(minimumOverlayTask, Task.Delay(stabilizationDelay));
+        }
 
-        _addressBarPanel.Visible = false;
-        _webViewHostPanel.Visible = false;
-        _logBox.Visible = true;
-        _logBox.BringToFront();
-        UpdateTabVisibilityAndRendering();
-        UpdateWebViewToggleVisual();
-        UpdateZoomControlsForActiveTab();
-        UpdateNavigationButtons();
-        UpdateFavoriteButtonState();
-        Log("Web View mode disabled; log panel restored.");
+        if (switchVersion != _webViewModeSwitchVersion || !_webViewModeEnabled)
+        {
+            return;
+        }
+    }
+
+    private async Task WaitForNavigationCompletionAsync(BrowserTab tab, TimeSpan timeout)
+    {
+        if (tab.WebView.CoreWebView2 is null || !tab.IsNavigationPending)
+        {
+            return;
+        }
+
+        CoreWebView2 core = tab.WebView.CoreWebView2;
+        var completionSource = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        void OnNavigationCompleted(object? sender, CoreWebView2NavigationCompletedEventArgs args)
+        {
+            if (ReferenceEquals(sender, core))
+            {
+                completionSource.TrySetResult(true);
+            }
+        }
+
+        core.NavigationCompleted += OnNavigationCompleted;
+        try
+        {
+            using var timeoutToken = new CancellationTokenSource(timeout);
+            using CancellationTokenRegistration registration = timeoutToken.Token.Register(() => completionSource.TrySetResult(false));
+            await completionSource.Task;
+        }
+        finally
+        {
+            core.NavigationCompleted -= OnNavigationCompleted;
+        }
+    }
+
+    private static bool IsTabShowingPlaceholder(BrowserTab tab)
+    {
+        string source = tab.WebView.Source?.ToString() ??
+                        tab.WebView.CoreWebView2?.Source ??
+                        tab.CurrentUrl;
+
+        return string.IsNullOrWhiteSpace(source) ||
+               source.Equals("about:blank", StringComparison.OrdinalIgnoreCase);
     }
 
     private void UpdateWebViewToggleVisual()
@@ -1617,6 +1763,7 @@ public class MainForm : Form
         }
 
         tab.CurrentUrl = normalizedUrl;
+        tab.IsNavigationPending = true;
         if (ReferenceEquals(_activeTab, tab))
         {
             _addressBarTextBox.Text = normalizedUrl;
@@ -1928,6 +2075,7 @@ public class MainForm : Form
         }
 
         tab.CurrentUrl = e.Uri;
+        tab.IsNavigationPending = true;
         if (_webViewModeEnabled && ReferenceEquals(_activeTab, tab))
         {
             _addressBarTextBox.Text = e.Uri;
@@ -1943,6 +2091,8 @@ public class MainForm : Form
         {
             return;
         }
+
+        tab.IsNavigationPending = false;
 
         if (e.IsSuccess)
         {
@@ -2842,19 +2992,33 @@ public class MainForm : Form
         {
             _protectionRestoreTimer.Stop();
             _protectionResumeAtUtc = null;
+            UpdateProtectionStatusVisual();
             Log("Protection disabled until manually re-enabled.");
             return;
         }
 
         _protectionResumeAtUtc = DateTimeOffset.UtcNow.Add(duration.Value);
         _protectionRestoreTimer.Stop();
-        _protectionRestoreTimer.Interval = (int)Math.Clamp(duration.Value.TotalMilliseconds, 1, int.MaxValue);
+        _protectionRestoreTimer.Interval = 1000;
         _protectionRestoreTimer.Start();
+        UpdateProtectionStatusVisual();
         Log($"Protection disabled for {label} (until {_protectionResumeAtUtc.Value.LocalDateTime:yyyy-MM-dd HH:mm:ss}).");
     }
 
     private void OnProtectionRestoreTimerTick(object? sender, EventArgs e)
     {
+        if (_protectionResumeAtUtc is null)
+        {
+            _protectionRestoreTimer.Stop();
+            return;
+        }
+
+        if (DateTimeOffset.UtcNow < _protectionResumeAtUtc.Value)
+        {
+            UpdateProtectionStatusVisual();
+            return;
+        }
+
         _protectionRestoreTimer.Stop();
         _protectionResumeAtUtc = null;
         ApplyProtection(enable: true);
@@ -2866,9 +3030,24 @@ public class MainForm : Form
 
     private void UpdateProtectionStatusVisual()
     {
-        _statusLabel.Text = _protectionEnabled
-            ? "Protection Enabled - This window is excluded from supported capture software."
-            : "Protection Disabled - This window is visible to capture software.";
+        if (_protectionEnabled)
+        {
+            _statusLabel.Text = "Protection Enabled - This window is excluded from supported capture software.";
+        }
+        else if (_protectionResumeAtUtc is not null)
+        {
+            TimeSpan remaining = _protectionResumeAtUtc.Value - DateTimeOffset.UtcNow;
+            if (remaining < TimeSpan.Zero)
+            {
+                remaining = TimeSpan.Zero;
+            }
+
+            _statusLabel.Text = $"Protection Disabled - This window is visible to capture software. Auto re-enables in {FormatProtectionCountdown(remaining)}.";
+        }
+        else
+        {
+            _statusLabel.Text = "Protection Disabled - This window is visible to capture software.";
+        }
 
         if (IsDarkTheme())
         {
@@ -2881,6 +3060,24 @@ public class MainForm : Form
 
         _statusLabel.BackColor = _protectionEnabled ? Color.LightGreen : Color.LightSalmon;
         _statusLabel.ForeColor = Color.Black;
+    }
+
+    private static string FormatProtectionCountdown(TimeSpan remaining)
+    {
+        int totalHours = (int)Math.Floor(remaining.TotalHours);
+        if (totalHours >= 24)
+        {
+            int days = totalHours / 24;
+            int hours = totalHours % 24;
+            return $"{days}d {hours:00}h {remaining.Minutes:00}m {remaining.Seconds:00}s";
+        }
+
+        if (totalHours > 0)
+        {
+            return $"{totalHours:00}:{remaining.Minutes:00}:{remaining.Seconds:00}";
+        }
+
+        return $"{remaining.Minutes:00}:{remaining.Seconds:00}";
     }
 
     private void UpdateZoomControlsForActiveTab()
@@ -2989,6 +3186,10 @@ public class MainForm : Form
         _addressBarPanel.BackColor = panelBackColor;
         _contentHostPanel.BackColor = appBackColor;
         _webViewHostPanel.BackColor = appBackColor;
+        _webViewLoadingOverlayPanel.BackColor = darkTheme
+            ? Color.FromArgb(31, 36, 43)
+            : Color.FromArgb(246, 249, 253);
+        _webViewLoadingLabel.ForeColor = textColor;
         _historyPanel.BackColor = panelBackColor;
         _findPanel.BackColor = panelBackColor;
 

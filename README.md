@@ -25,6 +25,7 @@
 
 ###  Stealth Capture Protection
 Leverages native Windows `WDA_EXCLUDEFROMCAPTURE` API to block screen recorders, screenshot utilities, and desktop-sharing apps from capturing your window.
+Includes timed disable options with a live countdown banner so you always know when protection will automatically resume.
 
 ###  True Ephemeral Privacy
 * **Zero Session Footprint:** Web history and session cookies are stored strictly in memory and wiped automatically the moment you close the app.
@@ -34,6 +35,7 @@ Leverages native Windows `WDA_EXCLUDEFROMCAPTURE` API to block screen recorders,
 * **Tabbed Navigation:** Clean tab interface with live site favicons and title updates.
 * **In-Page Search (`Ctrl+F`):** Fast search panel with real-time match highlighting.
 * **Live Status Logging:** Instant visual feedback whenever protection is active or toggled.
+* **Smooth View Switching:** Web View transitions wait for the page surface to be ready, with an inline loading state to prevent partial renders.
 
 ---
 
