@@ -186,7 +186,7 @@ public class MainForm : Form
 
     public MainForm()
     {
-        Text = "PhantomHaze v1.3.2 Beta";
+        Text = "PhantomHaze v1.3.3 Beta";
         Width = 980;
         Height = 620;
         MinimumSize = new Size(860, 560);
