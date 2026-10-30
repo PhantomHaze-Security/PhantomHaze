@@ -14,6 +14,7 @@ internal static class NativeMethods
     public const uint WDA_MONITOR = 0x00000001;
     public const uint WDA_EXCLUDEFROMCAPTURE = 0x00000011; // Windows 10 2004+ (build 19041)
     public const int MinimumBuildForExcludeFromCapture = 19041;
+    private const int SM_REMOTESESSION = 0x1000;
 
     [DllImport("user32.dll", SetLastError = true)]
     [return: MarshalAs(UnmanagedType.Bool)]
@@ -22,6 +23,11 @@ internal static class NativeMethods
     [DllImport("user32.dll", SetLastError = true)]
     [return: MarshalAs(UnmanagedType.Bool)]
     private static extern bool GetWindowDisplayAffinity(IntPtr hWnd, out uint pdwAffinity);
+
+    [DllImport("user32.dll")]
+    private static extern int GetSystemMetrics(int nIndex);
+
+    public static bool IsRemoteSession() => GetSystemMetrics(SM_REMOTESESSION) != 0;
 
     // .NET's Environment.OSVersion / the classic GetVersionEx API get lied to
     // by Windows' app-compatibility shim unless the .exe ships a manifest

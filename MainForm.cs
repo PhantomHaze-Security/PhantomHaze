@@ -102,6 +102,7 @@ public class MainForm : Form
     private readonly PictureBox _menuLogoPictureBox = new();
     private readonly Label _menuLogoLabel = new();
     private readonly Button _logsViewButton = new();
+    private readonly Button _networkViewButton = new();
     private readonly Label _statusLabel = new();
     private readonly Button _toggleButton = new();
     private readonly Button _webViewToggleButton = new();
@@ -268,13 +269,16 @@ public class MainForm : Form
         _toggleButton.Height = ScaleByDpi(36);
         _logsViewButton.MinimumSize = new Size(ScaleByDpi(90), 0);
         _webViewToggleButton.MinimumSize = new Size(ScaleByDpi(90), 0);
+        _networkViewButton.MinimumSize = new Size(ScaleByDpi(90), 0);
         _settingsButton.MinimumSize = new Size(ScaleByDpi(95), 0);
         Padding menuButtonPadding = ScalePadding(12, 4, 12, 4);
         _logsViewButton.Padding = menuButtonPadding;
         _webViewToggleButton.Padding = menuButtonPadding;
+        _networkViewButton.Padding = menuButtonPadding;
         _settingsButton.Padding = menuButtonPadding;
         _logsViewButton.Margin = ScalePadding(0, 0, 6, 0);
         _webViewToggleButton.Margin = ScalePadding(0, 0, 6, 0);
+        _networkViewButton.Margin = ScalePadding(0, 0, 6, 0);
         _settingsButton.Margin = new Padding(0);
 
         _addressBarPanel.Height = ScaleByDpi(104);
@@ -629,7 +633,7 @@ public class MainForm : Form
         var menuLayout = new TableLayoutPanel
         {
             Dock = DockStyle.Fill,
-            ColumnCount = 5,
+            ColumnCount = 6,
             RowCount = 1,
             Margin = new Padding(0),
             Padding = new Padding(0),
@@ -641,6 +645,9 @@ public class MainForm : Form
         menuLayout.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
         menuLayout.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
         menuLayout.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100f));
+        menuLayout.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
+        menuLayout.ColumnStyles[3] = new ColumnStyle(SizeType.AutoSize);
+        menuLayout.ColumnStyles[4] = new ColumnStyle(SizeType.Percent, 100f);
         menuLayout.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
 
         var logoLayout = new TableLayoutPanel
@@ -677,6 +684,13 @@ public class MainForm : Form
         ConfigureMenuButton(_webViewToggleButton, "Web View");
         _webViewToggleButton.Click += async (_, _) => await SetWebViewModeAsync(enableWebView: true);
 
+        ConfigureMenuButton(_networkViewButton, "Network");
+        _networkViewButton.Click += (_, _) =>
+        {
+            using var connectionsForm = new AbTutorConnectionsForm(IsDarkTheme());
+            connectionsForm.ShowDialog(this);
+        };
+
         _settingsButton.Text = "Settings";
         _settingsButton.AutoSize = true;
         _settingsButton.AutoSizeMode = AutoSizeMode.GrowAndShrink;
@@ -692,8 +706,9 @@ public class MainForm : Form
         menuLayout.Controls.Add(logoLayout, 0, 0);
         menuLayout.Controls.Add(_logsViewButton, 1, 0);
         menuLayout.Controls.Add(_webViewToggleButton, 2, 0);
-        menuLayout.Controls.Add(new Panel { Dock = DockStyle.Fill }, 3, 0);
-        menuLayout.Controls.Add(_settingsButton, 4, 0);
+        menuLayout.Controls.Add(_networkViewButton, 3, 0);
+        menuLayout.Controls.Add(new Panel { Dock = DockStyle.Fill }, 4, 0);
+        menuLayout.Controls.Add(_settingsButton, 5, 0);
 
         _menuBarPanel.Controls.Add(menuLayout);
     }
@@ -3209,7 +3224,7 @@ public class MainForm : Form
         _zoomLabel.ForeColor = textColor;
         _findCountLabel.ForeColor = textColor;
 
-        foreach (Button button in new[] { _toggleButton, _backButton, _goButton, _refreshButton, _historyButton, _newTabButton, _historyClearButton, _findCloseButton, _settingsButton })
+        foreach (Button button in new[] { _toggleButton, _backButton, _goButton, _refreshButton, _historyButton, _newTabButton, _historyClearButton, _findCloseButton, _settingsButton, _networkViewButton })
         {
             button.BackColor = buttonBackColor;
             button.ForeColor = buttonTextColor;
