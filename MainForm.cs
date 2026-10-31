@@ -1,3 +1,4 @@
+using System.Net;
 using System.Text.Json;
 using Microsoft.Web.WebView2.Core;
 using Microsoft.Web.WebView2.WinForms;
@@ -186,7 +187,7 @@ public class MainForm : Form
 
     public MainForm()
     {
-        Text = "PhantomHaze v1.3.3 Beta";
+        Text = "PhantomHaze v1.3.4 Beta";
         Width = 980;
         Height = 620;
         MinimumSize = new Size(860, 560);
@@ -1817,7 +1818,7 @@ public class MainForm : Form
         bool hasExplicitHttpScheme = candidate.StartsWith("http://", StringComparison.OrdinalIgnoreCase) ||
                                      candidate.StartsWith("https://", StringComparison.OrdinalIgnoreCase);
 
-        if (hasExplicitHttpScheme || LooksLikeDirectAddress(candidate))
+        if (hasExplicitHttpScheme || LooksLikeLocalAddress(candidate) || LooksLikeDirectAddress(candidate))
         {
             return TryNormalizeUrl(candidate, out targetUrl);
         }
@@ -1856,6 +1857,12 @@ public class MainForm : Form
             return true;
         }
 
+        if (host.Equals("localhost", StringComparison.OrdinalIgnoreCase) ||
+            host.EndsWith(".localhost", StringComparison.OrdinalIgnoreCase))
+        {
+            return true;
+        }
+
         int lastDotIndex = host.LastIndexOf('.');
         if (lastDotIndex <= 0 || lastDotIndex >= host.Length - 1)
         {
@@ -1869,6 +1876,59 @@ public class MainForm : Form
         }
 
         return extension.All(ch => char.IsLetterOrDigit(ch) || ch == '-');
+    }
+
+    private static bool LooksLikeLocalAddress(string candidate)
+    {
+        if (string.IsNullOrWhiteSpace(candidate))
+        {
+            return false;
+        }
+
+        string authority = candidate;
+        int splitIndex = authority.IndexOfAny(new[] { '/', '?', '#' });
+        if (splitIndex >= 0)
+        {
+            authority = authority[..splitIndex];
+        }
+
+        string host = authority;
+        if (host.StartsWith("[", StringComparison.Ordinal))
+        {
+            int endBracket = host.IndexOf(']');
+            if (endBracket > 1)
+            {
+                host = host[1..endBracket];
+            }
+        }
+        else
+        {
+            int colonIndex = host.IndexOf(':');
+            if (colonIndex > 0)
+            {
+                host = host[..colonIndex];
+            }
+        }
+
+        if (string.IsNullOrWhiteSpace(host))
+        {
+            return false;
+        }
+
+        if (host.Equals("localhost", StringComparison.OrdinalIgnoreCase) ||
+            host.EndsWith(".localhost", StringComparison.OrdinalIgnoreCase))
+        {
+            return true;
+        }
+
+        if (!IPAddress.TryParse(host, out IPAddress? parsedIp))
+        {
+            return false;
+        }
+
+        return IPAddress.IsLoopback(parsedIp) ||
+               parsedIp.Equals(IPAddress.Any) ||
+               parsedIp.Equals(IPAddress.IPv6Any);
     }
 
     private string BuildSearchUrl(string query)
@@ -2094,29 +2154,40 @@ public class MainForm : Form
 
         tab.IsNavigationPending = false;
 
-        if (e.IsSuccess)
+        try
         {
-            string currentUrl = tab.WebView.Source?.ToString() ?? tab.WebView.CoreWebView2?.Source ?? tab.CurrentUrl;
-            if (!string.IsNullOrWhiteSpace(currentUrl))
+            if (e.IsSuccess)
             {
-                tab.CurrentUrl = currentUrl;
-                if (!currentUrl.Equals("about:blank", StringComparison.OrdinalIgnoreCase))
+                string currentUrl = tab.WebView.Source?.ToString() ?? tab.WebView.CoreWebView2?.Source ?? tab.CurrentUrl;
+                if (!string.IsNullOrWhiteSpace(currentUrl))
                 {
-                    AddHistoryEntry(currentUrl);
+                    tab.CurrentUrl = currentUrl;
+                    if (!currentUrl.Equals("about:blank", StringComparison.OrdinalIgnoreCase))
+                    {
+                        AddHistoryEntry(currentUrl);
+                    }
                 }
+
+                RefreshTabTitle(tab);
+                await RefreshTabFaviconAsync(tab);
+                Log($"Tab {tab.Id} navigation completed: {currentUrl}");
+                await LogCookieJarSnapshotAsync(currentUrl, tab);
             }
-
-            RefreshTabTitle(tab);
-            await RefreshTabFaviconAsync(tab);
-            Log($"Tab {tab.Id} navigation completed: {currentUrl}");
-            await LogCookieJarSnapshotAsync(currentUrl, tab);
+            else
+            {
+                Log($"Tab {tab.Id} navigation failed: {e.WebErrorStatus}");
+            }
         }
-        else
+        catch (ObjectDisposedException)
         {
-            Log($"Tab {tab.Id} navigation failed: {e.WebErrorStatus}");
+            // Late async callback while tab/form is closing; ignore.
+        }
+        catch (Exception ex)
+        {
+            Log($"Tab {tab.Id} navigation completion handling failed: {ex.Message}");
         }
 
-        if (_webViewModeEnabled && ReferenceEquals(_activeTab, tab))
+        if (!IsDisposed && !_addressBarTextBox.IsDisposed && _webViewModeEnabled && ReferenceEquals(_activeTab, tab))
         {
             _addressBarTextBox.Text = tab.CurrentUrl;
             UpdateNavigationButtons();
@@ -2185,10 +2256,23 @@ public class MainForm : Form
         e.Handled = true;
         string popupUrl = NormalizeOrDefaultUrl(e.Uri);
 
-        _ = BeginInvoke(new Action(() =>
+        try
         {
-            _ = CreateTabAsync(popupUrl, activate: true);
-        }));
+            _ = BeginInvoke(new Action(() =>
+            {
+                _ = CreateTabAsync(popupUrl, activate: true);
+            }));
+        }
+        catch (ObjectDisposedException)
+        {
+            // Form is closing; ignore late popup dispatch.
+            return;
+        }
+        catch (InvalidOperationException)
+        {
+            // Handle may be unavailable while shutting down.
+            return;
+        }
 
         Log($"Web popup opened in new tab: {popupUrl}");
     }
