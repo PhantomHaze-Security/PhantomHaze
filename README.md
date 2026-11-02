@@ -46,6 +46,7 @@ Choose the installation method that fits your workflow:
 | Method | Target User | Setup Time | Prerequisites |
 | :--- | :--- | :--- | :--- |
 | **Direct Download** *(Recommended)* | Everyone | ⚡ **< 10 Seconds** | Windows 10/11 |
+| **Installer Download** *✨NEW✨* | Everyone | ✨ **1 minute** | Windows 10/11 |
 | **_RAW Download** | Developers / Testers | 🛠️ ~2 Minutes | GitHub Account & Terminal Knowledge |
 
 ---
@@ -61,7 +62,19 @@ Choose the installation method that fits your workflow:
 
 ---
 
-### Option 2: _RAW Download (Advanced users only)
+### Option 2: Installer Download
+*Please note that this method is relatively new and will only be available on newer stable releases. This method may not be compatible with some devices. This installation method is powered by IZArc*
+
+1. Go to the [PhantomHaze Releases Page](https://github.com/benandkim57-crypto/PhantomHaze/releases).
+2. Expand the **Assets** section under the latest release.
+3. Download the executable file (e.g., `PhantomHaze-installer-vX.X.X.exe`).
+4. Double-click the downloaded file.
+5. Follow the installation steps, including selecting the directory for the installation. We strongly recommend you use `C:/Program Files/PhantomHaze Security/` as the installation directory.
+6. When the installer is complete, you can safely close and delete the installer, the app will be available by searching for `PhantomHaze` in the search bar on your taskbar if you installed the app to `C:/Program Files/PhantomHaze Security/`. Enjoy your app!
+
+---
+
+### Option 3: _RAW Download (Advanced users only)
 
 1. Create a GitHub Codespace in this repository by clicking **Code** > **Codespaces** > **+**. Or you can download the code onto your computer.
 2. Once the Codespace environment or PC is ready, open a terminal and run one of the following:
