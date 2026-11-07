@@ -22,7 +22,7 @@
   </ItemGroup>
 
   <ItemGroup>
-    <Compile Include="**/*.cs" Exclude="bin/**;obj/**;tmp/**;compiler/tmp/**" />
+    <Compile Include="**/*.cs" Exclude="bin/**;obj/**;tmp/**;compiler/tmp/**;PhantomHaze_MainForm.cs" />
   </ItemGroup>
 
   <Target Name="RemoveWebView2WpfReference" BeforeTargets="ResolveAssemblyReferences">
