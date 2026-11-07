@@ -4605,9 +4605,10 @@ public class MainForm : Form
         {
             Dock = DockStyle.Fill,
             FixedPanel = FixedPanel.Panel1,
-            SplitterDistance = ScaleByDpi(300),
+            Size = new Size(ScaleByDpi(700), ScaleByDpi(300)),
             Panel1MinSize = ScaleByDpi(220),
             Panel2MinSize = ScaleByDpi(280),
+            SplitterDistance = ScaleByDpi(300),
         };
 
         var extensionsListBox = new CheckedListBox
