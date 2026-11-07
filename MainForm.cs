@@ -624,7 +624,8 @@ public class MainForm : Form
 
     private static string BuildExtensionFileName(string extensionId)
     {
-        string id = extensionId.ToLowerInvariant();
+        string id = extensionId.ToLowerInvariant();
+
         if (string.IsNullOrWhiteSpace(id))
         {
             id = $"extension-{Guid.NewGuid():N}";
@@ -4306,7 +4307,6 @@ public class MainForm : Form
                 PhantomExtensionDefinition definition = PhextParser.Parse(source, installed.FileName);
                 if (!definition.Id.Equals(installed.Id, StringComparison.OrdinalIgnoreCase))
                 {
-                    installed.Id = definition.Id;
                     installed.FileName = BuildExtensionFileName(definition.Id);
                 }
 
