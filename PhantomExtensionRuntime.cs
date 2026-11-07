@@ -525,6 +525,12 @@ internal static class PhextParser
             if (character == '"')
             {
                 inQuotes = !inQuotes;
+                if (!inQuotes && current.Length == 0 &&
+                    (i + 1 == line.Length || char.IsWhiteSpace(line[i + 1])))
+                {
+                    tokens.Add(string.Empty);
+                }
+
                 continue;
             }
 

@@ -767,7 +767,11 @@ public class MainForm : Form
                 return true;
 
             case PhantomExtensionSettingType.Number:
-                if (!int.TryParse(candidate, out int number))
+                if (!int.TryParse(
+                        candidate,
+                        System.Globalization.NumberStyles.Integer,
+                        System.Globalization.CultureInfo.InvariantCulture,
+                        out int number))
                 {
                     return false;
                 }
@@ -782,7 +786,7 @@ public class MainForm : Form
                     return false;
                 }
 
-                normalized = number.ToString();
+                normalized = number.ToString(System.Globalization.CultureInfo.InvariantCulture);
                 return true;
 
             case PhantomExtensionSettingType.Select:
@@ -915,6 +919,7 @@ public class MainForm : Form
                 FlatStyle = FlatStyle.Flat,
                 ImageAlign = ContentAlignment.MiddleCenter,
                 Text = string.Empty,
+                AccessibleName = extension.Definition.Name,
                 Tag = extension,
             };
 
@@ -3378,7 +3383,22 @@ public class MainForm : Form
         string idJson = JsonSerializer.Serialize(extension.Definition.Id);
         string nameJson = JsonSerializer.Serialize(extension.Definition.Name);
         string versionJson = JsonSerializer.Serialize(extension.Definition.Version);
-        string settingsJson = JsonSerializer.Serialize(extension.Installation.SettingValues);
+        var runtimeSettings = new Dictionary<string, object>(StringComparer.Ordinal);
+        foreach (PhantomExtensionSettingDefinition setting in extension.Definition.Settings)
+        {
+            string value = extension.Installation.SettingValues[setting.Key];
+            runtimeSettings[setting.Key] = setting.Type switch
+            {
+                PhantomExtensionSettingType.Toggle => TryParseBooleanSetting(value, out bool toggleValue) && toggleValue,
+                PhantomExtensionSettingType.Number =>
+                    int.TryParse(value, System.Globalization.NumberStyles.Integer,
+                        System.Globalization.CultureInfo.InvariantCulture, out int numberValue) ||
+                    int.TryParse(value, out numberValue) ? numberValue : 0,
+                _ => value,
+            };
+        }
+
+        string settingsJson = JsonSerializer.Serialize(runtimeSettings);
 
         string bootstrapScript = $$"""
 (() => {
@@ -3424,7 +3444,7 @@ public class MainForm : Form
 
     private static string BuildCssInjectionScript(string extensionId, string scriptId, string css)
     {
-        string domId = $"ph-ext-style-{SanitizeDomToken(extensionId)}-{SanitizeDomToken(scriptId)}";
+        string domId = $"ph-ext-style-{extensionId.Length}-{extensionId}-{scriptId.Length}-{scriptId}";
         string domIdJson = JsonSerializer.Serialize(domId);
         string cssJson = JsonSerializer.Serialize(css);
         return $$"""
@@ -4605,10 +4625,12 @@ public class MainForm : Form
         {
             Dock = DockStyle.Fill,
             FixedPanel = FixedPanel.Panel1,
-            Size = new Size(ScaleByDpi(700), ScaleByDpi(300)),
+            Size = new Size(ScaleByDpi(700), ScaleByDpi(300)),
+
             Panel1MinSize = ScaleByDpi(220),
             Panel2MinSize = ScaleByDpi(280),
-            SplitterDistance = ScaleByDpi(300),
+            SplitterDistance = ScaleByDpi(300),
+
         };
 
         var extensionsListBox = new CheckedListBox
@@ -5119,6 +5141,25 @@ public class MainForm : Form
 
         _settings = draftSettings;
         NormalizeSettings();
+        foreach ((string extensionId, Form window) in _openExtensionWindowsById.ToArray())
+        {
+            InstalledExtensionEntry? previous = previousExtensions.FirstOrDefault(entry =>
+                entry.Id.Equals(extensionId, StringComparison.OrdinalIgnoreCase));
+            if (!_settings.ExtensionsEnabled ||
+                !_loadedExtensionById.TryGetValue(extensionId, out LoadedExtension? current) ||
+                !current.Installation.Enabled ||
+                stagedSourcesByExtensionId.ContainsKey(extensionId) ||
+                previous is null ||
+                current.Installation.SettingValues.Count != previous.SettingValues.Count ||
+                current.Installation.SettingValues.Any(pair =>
+                    !previous.SettingValues.TryGetValue(pair.Key, out string? oldValue) || pair.Value != oldValue))
+            {
+                if (!window.IsDisposed)
+                {
+                    window.Close();
+                }
+            }
+        }
         SaveSettings();
         LoadInstalledExtensions();
         RefreshExtensionSurface();
