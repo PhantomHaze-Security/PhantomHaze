@@ -624,7 +624,7 @@ public class MainForm : Form
 
     private static string BuildExtensionFileName(string extensionId)
     {
-        string id = BuildExtensionIdFromFileName(extensionId);
+        string id = extensionId.ToLowerInvariant();
         if (string.IsNullOrWhiteSpace(id))
         {
             id = $"extension-{Guid.NewGuid():N}";
