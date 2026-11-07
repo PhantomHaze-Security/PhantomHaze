@@ -1,4 +1,5 @@
 using System.Net;
+using System.Text;
 using System.Text.Json;
 using Microsoft.Web.WebView2.Core;
 using Microsoft.Web.WebView2.WinForms;
@@ -30,6 +31,8 @@ public class MainForm : Form
         public int HistoryRetentionDays { get; set; } = 1;
         public SearchEngine DefaultSearchEngine { get; set; } = SearchEngine.Google;
         public string StartingPage { get; set; } = DefaultHomeUrl;
+        public bool ExtensionsEnabled { get; set; } = true;
+        public List<InstalledExtensionEntry> Extensions { get; set; } = new();
 
         public AppSettings Clone()
         {
@@ -41,7 +44,75 @@ public class MainForm : Form
                 HistoryRetentionDays = HistoryRetentionDays,
                 DefaultSearchEngine = DefaultSearchEngine,
                 StartingPage = StartingPage,
+                ExtensionsEnabled = ExtensionsEnabled,
+                Extensions = Extensions.Select(entry => entry.Clone()).ToList(),
             };
+        }
+    }
+
+    private sealed class InstalledExtensionEntry
+    {
+        public string Id { get; set; } = string.Empty;
+        public string DisplayName { get; set; } = string.Empty;
+        public string FileName { get; set; } = string.Empty;
+        public bool Enabled { get; set; } = true;
+        public Dictionary<string, string> SettingValues { get; set; } = new(StringComparer.OrdinalIgnoreCase);
+
+        public InstalledExtensionEntry Clone()
+        {
+            return new InstalledExtensionEntry
+            {
+                Id = Id,
+                DisplayName = DisplayName,
+                FileName = FileName,
+                Enabled = Enabled,
+                SettingValues = new Dictionary<string, string>(SettingValues, StringComparer.OrdinalIgnoreCase),
+            };
+        }
+    }
+
+    private sealed class LoadedExtension
+    {
+        public LoadedExtension(InstalledExtensionEntry installation, PhantomExtensionDefinition definition, string sourcePath)
+        {
+            Installation = installation;
+            Definition = definition;
+            SourcePath = sourcePath;
+        }
+
+        public InstalledExtensionEntry Installation { get; }
+        public PhantomExtensionDefinition Definition { get; }
+        public string SourcePath { get; }
+    }
+
+    private sealed class ExtensionListItem
+    {
+        public ExtensionListItem(InstalledExtensionEntry installation, PhantomExtensionDefinition? definition, string? loadError)
+        {
+            Installation = installation;
+            Definition = definition;
+            LoadError = loadError;
+        }
+
+        public InstalledExtensionEntry Installation { get; }
+        public PhantomExtensionDefinition? Definition { get; }
+        public string? LoadError { get; }
+
+        public override string ToString()
+        {
+            string displayName = !string.IsNullOrWhiteSpace(Definition?.Name)
+                ? Definition.Name
+                : (!string.IsNullOrWhiteSpace(Installation.DisplayName) ? Installation.DisplayName : Installation.Id);
+
+            if (!string.IsNullOrWhiteSpace(LoadError))
+            {
+                return $"{displayName} (load failed)";
+            }
+
+            string? version = Definition?.Version;
+            return string.IsNullOrWhiteSpace(version)
+                ? displayName
+                : $"{displayName} v{version}";
         }
     }
 
@@ -103,6 +174,7 @@ public class MainForm : Form
     private readonly PictureBox _menuLogoPictureBox = new();
     private readonly Label _menuLogoLabel = new();
     private readonly Button _logsViewButton = new();
+    private readonly FlowLayoutPanel _extensionMenuButtonsPanel = new();
     private readonly Label _statusLabel = new();
     private readonly Button _toggleButton = new();
     private readonly Button _webViewToggleButton = new();
@@ -121,6 +193,7 @@ public class MainForm : Form
     private readonly FlowLayoutPanel _tabsFlowPanel = new();
     private readonly Button _newTabButton = new();
     private readonly Panel _contentHostPanel = new();
+    private readonly FlowLayoutPanel _extensionLauncherPanel = new();
     private readonly Panel _webViewHostPanel = new();
     private readonly Panel _webViewLoadingOverlayPanel = new();
     private readonly Label _webViewLoadingLabel = new();
@@ -145,9 +218,13 @@ public class MainForm : Form
     private readonly string _favoritesFilePath;
     private readonly string _historyFilePath;
     private readonly string _settingsFilePath;
+    private readonly string _extensionsRootPath;
     private readonly List<HistoryEntry> _historyEntries = new();
     private readonly List<string> _favoriteUrls = new();
     private readonly List<BrowserTab> _tabs = new();
+    private readonly List<LoadedExtension> _loadedExtensions = new();
+    private readonly Dictionary<string, LoadedExtension> _loadedExtensionById = new(StringComparer.OrdinalIgnoreCase);
+    private readonly Dictionary<string, Form> _openExtensionWindowsById = new(StringComparer.OrdinalIgnoreCase);
     private readonly Dictionary<CoreWebView2, BrowserTab> _tabByCore = new();
     private AppSettings _settings = new();
     private TableLayoutPanel? _addressRootLayout;
@@ -203,6 +280,7 @@ public class MainForm : Form
         _favoritesFilePath = InitializeFavoritesFilePath();
         _historyFilePath = InitializeHistoryFilePath();
         _settingsFilePath = InitializeSettingsFilePath();
+        _extensionsRootPath = InitializeExtensionsDirectoryPath();
         _faviconHttpClient.Timeout = TimeSpan.FromSeconds(5);
         _protectionRestoreTimer.Interval = 1000;
         _protectionRestoreTimer.Tick += OnProtectionRestoreTimerTick;
@@ -211,6 +289,9 @@ public class MainForm : Form
         NormalizeSettings();
 
         BuildUi();
+        LoadInstalledExtensions();
+        RefreshExtensionSurface();
+        _addressBarTextBox.PlaceholderText = NormalizeStartPage(GetEffectiveStartPage());
         LoadFavorites();
         LoadHistory();
 
@@ -222,6 +303,7 @@ public class MainForm : Form
             Log($"Favorites file: {_favoritesFilePath}");
             Log($"History file: {_historyFilePath}");
             Log($"Settings file: {_settingsFilePath}");
+            Log($"Extensions root: {_extensionsRootPath}");
             LogTrueOsBuild();
             ApplyProtection(enable: true);
         };
@@ -237,6 +319,7 @@ public class MainForm : Form
             ApplyDpiAwareMetrics();
             UpdateResponsiveLayout();
             UpdateTabLayout();
+            RefreshExtensionSurface();
         };
     }
 
@@ -380,6 +463,17 @@ public class MainForm : Form
 
     private static string InitializeSettingsFilePath() => InitializeAppDataFilePath("settings.json");
 
+    private static string InitializeExtensionsDirectoryPath()
+    {
+        string extensionsDir = Path.Combine(
+            Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+            "PhantomHaze",
+            "extensions");
+
+        Directory.CreateDirectory(extensionsDir);
+        return extensionsDir;
+    }
+
     private static string InitializeAppDataFilePath(string fileName)
     {
         string appDataDir = Path.Combine(
@@ -435,6 +529,119 @@ public class MainForm : Form
         }
 
         _settings.StartingPage = NormalizeStartPage(_settings.StartingPage);
+
+        _settings.Extensions ??= new List<InstalledExtensionEntry>();
+
+        var normalizedExtensions = new List<InstalledExtensionEntry>();
+        var seenIds = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
+        foreach (InstalledExtensionEntry entry in _settings.Extensions)
+        {
+            if (entry is null)
+            {
+                continue;
+            }
+
+            string idCandidate = entry.Id;
+            if (string.IsNullOrWhiteSpace(idCandidate))
+            {
+                idCandidate = BuildExtensionIdFromFileName(entry.FileName);
+            }
+
+            if (!IsValidExtensionIdentifier(idCandidate))
+            {
+                continue;
+            }
+
+            if (!seenIds.Add(idCandidate))
+            {
+                continue;
+            }
+
+            entry.Id = idCandidate;
+            entry.FileName = NormalizeStoredExtensionFileName(entry.FileName, entry.Id);
+            if (string.IsNullOrWhiteSpace(entry.DisplayName))
+            {
+                entry.DisplayName = entry.Id;
+            }
+
+            entry.SettingValues ??= new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+            if (entry.SettingValues.Comparer != StringComparer.OrdinalIgnoreCase)
+            {
+                entry.SettingValues = new Dictionary<string, string>(entry.SettingValues, StringComparer.OrdinalIgnoreCase);
+            }
+
+            normalizedExtensions.Add(entry);
+        }
+
+        _settings.Extensions = normalizedExtensions;
+    }
+
+    private static bool IsValidExtensionIdentifier(string value)
+    {
+        if (string.IsNullOrWhiteSpace(value))
+        {
+            return false;
+        }
+
+        foreach (char character in value)
+        {
+            bool valid = (character >= 'a' && character <= 'z') ||
+                         (character >= 'A' && character <= 'Z') ||
+                         (character >= '0' && character <= '9') ||
+                         character is '.' or '_' or '-';
+            if (!valid)
+            {
+                return false;
+            }
+        }
+
+        return true;
+    }
+
+    private static string BuildExtensionIdFromFileName(string? fileName)
+    {
+        string candidate = Path.GetFileNameWithoutExtension(fileName ?? string.Empty);
+        if (string.IsNullOrWhiteSpace(candidate))
+        {
+            return string.Empty;
+        }
+
+        var normalized = new StringBuilder(candidate.Length);
+        foreach (char character in candidate.ToLowerInvariant())
+        {
+            normalized.Append(character switch
+            {
+                >= 'a' and <= 'z' => character,
+                >= '0' and <= '9' => character,
+                '.' or '_' or '-' => character,
+                _ => '-',
+            });
+        }
+
+        return normalized.ToString().Trim('-');
+    }
+
+    private static string BuildExtensionFileName(string extensionId)
+    {
+        string id = BuildExtensionIdFromFileName(extensionId);
+        if (string.IsNullOrWhiteSpace(id))
+        {
+            id = $"extension-{Guid.NewGuid():N}";
+        }
+
+        return $"{id}.phext";
+    }
+
+    private static string NormalizeStoredExtensionFileName(string fileName, string extensionId)
+    {
+        string candidate = Path.GetFileName(fileName ?? string.Empty);
+        if (string.IsNullOrWhiteSpace(candidate) || !candidate.EndsWith(".phext", StringComparison.OrdinalIgnoreCase))
+        {
+            return BuildExtensionFileName(extensionId);
+        }
+
+        return candidate;
     }
 
     private void SaveSettings()
@@ -451,6 +658,456 @@ public class MainForm : Form
         {
             Log($"Settings save failed: {ex.Message}");
         }
+    }
+
+    private void LoadInstalledExtensions()
+    {
+        _loadedExtensions.Clear();
+        _loadedExtensionById.Clear();
+
+        foreach (InstalledExtensionEntry installed in _settings.Extensions)
+        {
+            string extensionPath = Path.Combine(_extensionsRootPath, installed.FileName);
+            if (!File.Exists(extensionPath))
+            {
+                Log($"Extension '{installed.Id}' skipped because file is missing: {installed.FileName}");
+                continue;
+            }
+
+            try
+            {
+                string source = File.ReadAllText(extensionPath);
+                PhantomExtensionDefinition definition = PhextParser.Parse(source, installed.FileName);
+                if (!definition.Id.Equals(installed.Id, StringComparison.OrdinalIgnoreCase))
+                {
+                    Log($"Extension id corrected from '{installed.Id}' to '{definition.Id}' based on {installed.FileName}.");
+                    installed.Id = definition.Id;
+                }
+
+                installed.DisplayName = string.IsNullOrWhiteSpace(installed.DisplayName)
+                    ? definition.Name
+                    : installed.DisplayName;
+                installed.FileName = NormalizeStoredExtensionFileName(installed.FileName, installed.Id);
+                EnsureExtensionSettingValues(installed, definition);
+
+                var loaded = new LoadedExtension(installed, definition, extensionPath);
+                if (_loadedExtensionById.ContainsKey(loaded.Definition.Id))
+                {
+                    Log($"Duplicate extension id '{loaded.Definition.Id}' ignored.");
+                    continue;
+                }
+
+                _loadedExtensionById[loaded.Definition.Id] = loaded;
+                _loadedExtensions.Add(loaded);
+
+                foreach (string startupMessage in loaded.Definition.StartupLogMessages)
+                {
+                    string resolved = ResolveExtensionPlaceholders(startupMessage, loaded);
+                    Log($"[{loaded.Definition.Name}] {resolved}");
+                }
+            }
+            catch (Exception ex)
+            {
+                Log($"Extension '{installed.Id}' failed to load from '{installed.FileName}': {ex.Message}");
+            }
+        }
+    }
+
+    private IEnumerable<LoadedExtension> GetEnabledExtensions()
+    {
+        if (!_settings.ExtensionsEnabled)
+        {
+            return Enumerable.Empty<LoadedExtension>();
+        }
+
+        return _loadedExtensions.Where(extension => extension.Installation.Enabled);
+    }
+
+    private static bool TryParseBooleanSetting(string value, out bool parsed)
+    {
+        if (value.Equals("true", StringComparison.OrdinalIgnoreCase) ||
+            value.Equals("yes", StringComparison.OrdinalIgnoreCase) ||
+            value.Equals("1", StringComparison.Ordinal))
+        {
+            parsed = true;
+            return true;
+        }
+
+        if (value.Equals("false", StringComparison.OrdinalIgnoreCase) ||
+            value.Equals("no", StringComparison.OrdinalIgnoreCase) ||
+            value.Equals("0", StringComparison.Ordinal))
+        {
+            parsed = false;
+            return true;
+        }
+
+        parsed = false;
+        return false;
+    }
+
+    private static bool TryNormalizeSettingValue(PhantomExtensionSettingDefinition setting, string? input, out string normalized)
+    {
+        normalized = setting.DefaultValue;
+        string candidate = input?.Trim() ?? string.Empty;
+
+        switch (setting.Type)
+        {
+            case PhantomExtensionSettingType.Toggle:
+                if (!TryParseBooleanSetting(candidate, out bool toggleValue))
+                {
+                    return false;
+                }
+
+                normalized = toggleValue ? "true" : "false";
+                return true;
+
+            case PhantomExtensionSettingType.Text:
+                normalized = input ?? string.Empty;
+                return true;
+
+            case PhantomExtensionSettingType.Number:
+                if (!int.TryParse(candidate, out int number))
+                {
+                    return false;
+                }
+
+                if (setting.Minimum is int minimum && number < minimum)
+                {
+                    return false;
+                }
+
+                if (setting.Maximum is int maximum && number > maximum)
+                {
+                    return false;
+                }
+
+                normalized = number.ToString();
+                return true;
+
+            case PhantomExtensionSettingType.Select:
+                if (setting.SelectOptions.Count == 0)
+                {
+                    return false;
+                }
+
+                string? option = setting.SelectOptions.FirstOrDefault(value =>
+                    value.Equals(candidate, StringComparison.OrdinalIgnoreCase));
+                if (option is null)
+                {
+                    return false;
+                }
+
+                normalized = option;
+                return true;
+
+            default:
+                return false;
+        }
+    }
+
+    private static string GetDefaultSettingValue(PhantomExtensionSettingDefinition setting)
+    {
+        if (string.IsNullOrWhiteSpace(setting.DefaultValue))
+        {
+            return setting.Type switch
+            {
+                PhantomExtensionSettingType.Toggle => "false",
+                PhantomExtensionSettingType.Number => "0",
+                _ => string.Empty,
+            };
+        }
+
+        return setting.DefaultValue;
+    }
+
+    private static void EnsureExtensionSettingValues(InstalledExtensionEntry installation, PhantomExtensionDefinition definition)
+    {
+        installation.SettingValues ??= new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        if (installation.SettingValues.Comparer != StringComparer.OrdinalIgnoreCase)
+        {
+            installation.SettingValues = new Dictionary<string, string>(installation.SettingValues, StringComparer.OrdinalIgnoreCase);
+        }
+
+        HashSet<string> validKeys = definition.Settings
+            .Select(setting => setting.Key)
+            .ToHashSet(StringComparer.OrdinalIgnoreCase);
+
+        foreach (string staleKey in installation.SettingValues.Keys.Where(key => !validKeys.Contains(key)).ToArray())
+        {
+            installation.SettingValues.Remove(staleKey);
+        }
+
+        foreach (PhantomExtensionSettingDefinition setting in definition.Settings)
+        {
+            if (!installation.SettingValues.TryGetValue(setting.Key, out string? existingValue))
+            {
+                installation.SettingValues[setting.Key] = GetDefaultSettingValue(setting);
+                continue;
+            }
+
+            if (!TryNormalizeSettingValue(setting, existingValue, out string normalized))
+            {
+                installation.SettingValues[setting.Key] = GetDefaultSettingValue(setting);
+                continue;
+            }
+
+            installation.SettingValues[setting.Key] = normalized;
+        }
+    }
+
+    private void RefreshExtensionSurface()
+    {
+        RebuildExtensionMenuButtons();
+        RebuildExtensionLauncherButtons();
+        PositionExtensionLauncherPanel();
+    }
+
+    private void RebuildExtensionMenuButtons()
+    {
+        foreach (Control control in _extensionMenuButtonsPanel.Controls.OfType<Control>().ToArray())
+        {
+            control.Dispose();
+        }
+
+        _extensionMenuButtonsPanel.Controls.Clear();
+
+        foreach (LoadedExtension extension in GetEnabledExtensions())
+        {
+            foreach (PhantomExtensionAppButtonDefinition appButton in extension.Definition.AppButtons)
+            {
+                var button = new Button();
+                ConfigureMenuButton(button, appButton.Label);
+                button.MinimumSize = new Size(ScaleByDpi(64), 0);
+                button.Click += (_, _) => ExecuteExtensionAppButton(extension, appButton);
+                button.Tag = appButton;
+                _extensionMenuButtonsPanel.Controls.Add(button);
+            }
+        }
+
+        ApplyThemeToDynamicExtensionControls();
+    }
+
+    private void RebuildExtensionLauncherButtons()
+    {
+        foreach (Button button in _extensionLauncherPanel.Controls.OfType<Button>().ToArray())
+        {
+            Image? icon = button.Image;
+            button.Image = null;
+            icon?.Dispose();
+            button.Dispose();
+        }
+
+        _extensionLauncherPanel.Controls.Clear();
+
+        foreach (LoadedExtension extension in GetEnabledExtensions())
+        {
+            if (!extension.Definition.Ui.HasUi)
+            {
+                continue;
+            }
+
+            var button = new Button
+            {
+                Width = ScaleByDpi(42),
+                Height = ScaleByDpi(42),
+                Margin = ScalePadding(0, 0, 0, 6),
+                FlatStyle = FlatStyle.Flat,
+                ImageAlign = ContentAlignment.MiddleCenter,
+                Text = string.Empty,
+                Tag = extension,
+            };
+
+            Image icon = PhantomExtensionIconFactory.CreateIcon(extension.Definition.IconToken);
+            button.Image = new Bitmap(icon, new Size(ScaleByDpi(20), ScaleByDpi(20)));
+            icon.Dispose();
+
+            button.Click += (_, _) => OpenExtensionUiWindow(extension);
+            _extensionLauncherPanel.Controls.Add(button);
+        }
+
+        _extensionLauncherPanel.Visible = _settings.ExtensionsEnabled && _extensionLauncherPanel.Controls.Count > 0;
+        ApplyThemeToDynamicExtensionControls();
+    }
+
+    private void ApplyThemeToDynamicExtensionControls()
+    {
+        bool darkTheme = IsDarkTheme();
+        Color buttonBackColor = GetCommandButtonBackColor();
+        Color buttonTextColor = darkTheme ? Color.FromArgb(225, 233, 244) : SystemColors.ControlText;
+        Color buttonBorderColor = darkTheme ? Color.FromArgb(105, 116, 132) : Color.FromArgb(158, 177, 201);
+
+        foreach (Button button in _extensionMenuButtonsPanel.Controls.OfType<Button>())
+        {
+            button.BackColor = buttonBackColor;
+            button.ForeColor = buttonTextColor;
+            button.FlatAppearance.BorderColor = buttonBorderColor;
+            button.FlatAppearance.BorderSize = 1;
+        }
+
+        foreach (Button button in _extensionLauncherPanel.Controls.OfType<Button>())
+        {
+            button.BackColor = buttonBackColor;
+            button.ForeColor = buttonTextColor;
+            button.FlatAppearance.BorderColor = buttonBorderColor;
+            button.FlatAppearance.BorderSize = 1;
+        }
+    }
+
+    private void ExecuteExtensionAppButton(LoadedExtension extension, PhantomExtensionAppButtonDefinition appButton)
+    {
+        string resolvedMessage = ResolveExtensionPlaceholders(appButton.Message, extension);
+        Log($"[{extension.Definition.Name}] {appButton.Label}: {resolvedMessage}");
+
+        MessageBox.Show(
+            this,
+            resolvedMessage,
+            extension.Definition.Name,
+            MessageBoxButtons.OK,
+            MessageBoxIcon.Information);
+    }
+
+    private string ResolveExtensionPlaceholders(string template, LoadedExtension extension)
+    {
+        if (string.IsNullOrEmpty(template))
+        {
+            return string.Empty;
+        }
+
+        string resolved = template
+            .Replace("{{extension.id}}", extension.Definition.Id, StringComparison.OrdinalIgnoreCase)
+            .Replace("{{extension.name}}", extension.Definition.Name, StringComparison.OrdinalIgnoreCase)
+            .Replace("{{extension.version}}", extension.Definition.Version, StringComparison.OrdinalIgnoreCase);
+
+        foreach ((string key, string value) in extension.Installation.SettingValues)
+        {
+            resolved = resolved.Replace($"{{{{setting.{key}}}}}", value, StringComparison.OrdinalIgnoreCase);
+        }
+
+        return resolved;
+    }
+
+    private void OpenExtensionUiWindow(LoadedExtension extension)
+    {
+        if (!_settings.ExtensionsEnabled || !extension.Installation.Enabled || !extension.Definition.Ui.HasUi)
+        {
+            return;
+        }
+
+        if (_openExtensionWindowsById.TryGetValue(extension.Definition.Id, out Form? existingWindow) &&
+            !existingWindow.IsDisposed)
+        {
+            existingWindow.Activate();
+            return;
+        }
+
+        var extensionWindow = new Form
+        {
+            Text = extension.Definition.Ui.Title,
+            StartPosition = FormStartPosition.CenterParent,
+            ClientSize = new Size(
+                ScaleByDpi(Math.Clamp(extension.Definition.Ui.Width, 320, 2000)),
+                ScaleByDpi(Math.Clamp(extension.Definition.Ui.Height, 240, 1400))),
+            MinimizeBox = true,
+            MaximizeBox = true,
+            ShowInTaskbar = false,
+            AutoScaleMode = AutoScaleMode.Dpi,
+            BackColor = IsDarkTheme() ? Color.FromArgb(38, 44, 52) : Color.White,
+        };
+
+        _openExtensionWindowsById[extension.Definition.Id] = extensionWindow;
+        extensionWindow.FormClosed += (_, _) =>
+        {
+            _openExtensionWindowsById.Remove(extension.Definition.Id);
+        };
+
+        extensionWindow.Shown += async (_, _) =>
+        {
+            ApplyProtectionToSettingsWindow(extensionWindow);
+            await LoadExtensionWindowContentAsync(extensionWindow, extension);
+        };
+
+        extensionWindow.Show(this);
+    }
+
+    private async Task LoadExtensionWindowContentAsync(Form extensionWindow, LoadedExtension extension)
+    {
+        string html = BuildExtensionUiDocument(extension);
+        var webView = new WebView2
+        {
+            Dock = DockStyle.Fill,
+        };
+
+        extensionWindow.Controls.Clear();
+        extensionWindow.Controls.Add(webView);
+
+        try
+        {
+            CoreWebView2Environment environment = _webEnvironment ??
+                await CoreWebView2Environment.CreateAsync(
+                    browserExecutableFolder: null,
+                    userDataFolder: _webSessionPath,
+                    options: new CoreWebView2EnvironmentOptions("--inprivate"));
+
+            await webView.EnsureCoreWebView2Async(environment);
+            webView.CoreWebView2.Settings.AreDevToolsEnabled = false;
+            webView.CoreWebView2.Settings.AreDefaultContextMenusEnabled = true;
+            webView.CoreWebView2.NavigateToString(html);
+        }
+        catch (Exception ex)
+        {
+            webView.Dispose();
+            extensionWindow.Controls.Clear();
+
+            var fallbackBox = new RichTextBox
+            {
+                Dock = DockStyle.Fill,
+                ReadOnly = true,
+                WordWrap = true,
+                BorderStyle = BorderStyle.None,
+                BackColor = IsDarkTheme() ? Color.FromArgb(31, 36, 43) : Color.White,
+                ForeColor = IsDarkTheme() ? Color.FromArgb(228, 236, 247) : Color.Black,
+                Text = $"Extension UI fallback for '{extension.Definition.Name}'\n\n" +
+                       "WebView2 could not be initialized for this window.\n\n" +
+                       ResolveExtensionPlaceholders(extension.Definition.Ui.Html, extension),
+            };
+
+            extensionWindow.Controls.Add(fallbackBox);
+            Log($"Extension UI failed for '{extension.Definition.Id}': {ex.Message}");
+        }
+    }
+
+    private string BuildExtensionUiDocument(LoadedExtension extension)
+    {
+        string resolvedHtml = ResolveExtensionPlaceholders(extension.Definition.Ui.Html, extension);
+        if (resolvedHtml.Contains("<html", StringComparison.OrdinalIgnoreCase))
+        {
+            return resolvedHtml;
+        }
+
+        string textColor = IsDarkTheme() ? "#E4ECF7" : "#111111";
+        string backColor = IsDarkTheme() ? "#262C34" : "#FFFFFF";
+        return $$"""
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{{extension.Definition.Ui.Title}}</title>
+  <style>
+    body {
+      margin: 0;
+      padding: 16px;
+      font-family: "Segoe UI", sans-serif;
+      color: {{textColor}};
+      background: {{backColor}};
+    }
+  </style>
+</head>
+<body>
+{{resolvedHtml}}
+</body>
+</html>
+""";
     }
 
     private void LoadHistory()
@@ -589,6 +1246,7 @@ public class MainForm : Form
         BuildHistoryPanel();
         BuildFindPanel();
         BuildWebViewLoadingOverlay();
+        BuildExtensionLauncherPanel();
 
         _logBox.Multiline = true;
         _logBox.ReadOnly = true;
@@ -604,8 +1262,13 @@ public class MainForm : Form
         _contentHostPanel.Controls.Add(_logBox);
         _contentHostPanel.Controls.Add(_historyPanel);
         _contentHostPanel.Controls.Add(_findPanel);
+        _contentHostPanel.Controls.Add(_extensionLauncherPanel);
         _contentHostPanel.Controls.Add(_webViewLoadingOverlayPanel);
-        _contentHostPanel.Resize += (_, _) => PositionFindPanel();
+        _contentHostPanel.Resize += (_, _) =>
+        {
+            PositionFindPanel();
+            PositionExtensionLauncherPanel();
+        };
 
         Controls.Add(_contentHostPanel);
         Controls.Add(_addressBarPanel);
@@ -617,6 +1280,7 @@ public class MainForm : Form
         ApplyTheme();
         UpdateWebViewToggleVisual();
         UpdateResponsiveLayout();
+        PositionExtensionLauncherPanel();
     }
 
     private void BuildMenuBar()
@@ -630,7 +1294,7 @@ public class MainForm : Form
         var menuLayout = new TableLayoutPanel
         {
             Dock = DockStyle.Fill,
-            ColumnCount = 5,
+            ColumnCount = 6,
             RowCount = 1,
             Margin = new Padding(0),
             Padding = new Padding(0),
@@ -638,6 +1302,7 @@ public class MainForm : Form
             AutoSizeMode = AutoSizeMode.GrowAndShrink,
         };
         menuLayout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+        menuLayout.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
         menuLayout.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
         menuLayout.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
         menuLayout.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
@@ -678,6 +1343,14 @@ public class MainForm : Form
         ConfigureMenuButton(_webViewToggleButton, "Web View");
         _webViewToggleButton.Click += async (_, _) => await SetWebViewModeAsync(enableWebView: true);
 
+        _extensionMenuButtonsPanel.AutoSize = true;
+        _extensionMenuButtonsPanel.AutoSizeMode = AutoSizeMode.GrowAndShrink;
+        _extensionMenuButtonsPanel.Dock = DockStyle.Fill;
+        _extensionMenuButtonsPanel.WrapContents = false;
+        _extensionMenuButtonsPanel.Margin = new Padding(0);
+        _extensionMenuButtonsPanel.Padding = new Padding(0);
+        _extensionMenuButtonsPanel.FlowDirection = FlowDirection.LeftToRight;
+
         _settingsButton.Text = "Settings";
         _settingsButton.AutoSize = true;
         _settingsButton.AutoSizeMode = AutoSizeMode.GrowAndShrink;
@@ -693,8 +1366,9 @@ public class MainForm : Form
         menuLayout.Controls.Add(logoLayout, 0, 0);
         menuLayout.Controls.Add(_logsViewButton, 1, 0);
         menuLayout.Controls.Add(_webViewToggleButton, 2, 0);
-        menuLayout.Controls.Add(new Panel { Dock = DockStyle.Fill }, 3, 0);
-        menuLayout.Controls.Add(_settingsButton, 4, 0);
+        menuLayout.Controls.Add(_extensionMenuButtonsPanel, 3, 0);
+        menuLayout.Controls.Add(new Panel { Dock = DockStyle.Fill }, 4, 0);
+        menuLayout.Controls.Add(_settingsButton, 5, 0);
 
         _menuBarPanel.Controls.Add(menuLayout);
     }
@@ -726,6 +1400,37 @@ public class MainForm : Form
         _webViewLoadingLabel.Margin = ScalePadding(24, 0, 24, 0);
 
         _webViewLoadingOverlayPanel.Controls.Add(_webViewLoadingLabel);
+    }
+
+    private void BuildExtensionLauncherPanel()
+    {
+        _extensionLauncherPanel.Visible = false;
+        _extensionLauncherPanel.AutoSize = true;
+        _extensionLauncherPanel.AutoSizeMode = AutoSizeMode.GrowAndShrink;
+        _extensionLauncherPanel.WrapContents = false;
+        _extensionLauncherPanel.FlowDirection = FlowDirection.TopDown;
+        _extensionLauncherPanel.Padding = new Padding(0);
+        _extensionLauncherPanel.Margin = new Padding(0);
+        _extensionLauncherPanel.Anchor = AnchorStyles.Bottom | AnchorStyles.Right;
+    }
+
+    private void PositionExtensionLauncherPanel()
+    {
+        if (_contentHostPanel.IsDisposed)
+        {
+            return;
+        }
+
+        Size preferred = _extensionLauncherPanel.PreferredSize;
+        int margin = ScaleByDpi(12);
+        int x = Math.Max(margin, _contentHostPanel.ClientSize.Width - preferred.Width - margin);
+        int y = Math.Max(margin, _contentHostPanel.ClientSize.Height - preferred.Height - margin);
+        _extensionLauncherPanel.Location = new Point(x, y);
+
+        if (_extensionLauncherPanel.Visible)
+        {
+            _extensionLauncherPanel.BringToFront();
+        }
     }
 
     private void BuildProtectionDisableMenu()
@@ -1933,8 +2638,9 @@ public class MainForm : Form
 
     private string BuildSearchUrl(string query)
     {
+        SearchEngine effectiveEngine = GetEffectiveSearchEngine();
         string encodedQuery = Uri.EscapeDataString(query.Trim());
-        return _settings.DefaultSearchEngine switch
+        return effectiveEngine switch
         {
             SearchEngine.Bing => $"https://www.bing.com/search?q={encodedQuery}",
             SearchEngine.Yahoo => $"https://search.yahoo.com/search?p={encodedQuery}",
@@ -1953,9 +2659,59 @@ public class MainForm : Form
 
     private string GetConfiguredStartPage()
     {
-        string normalizedStartPage = NormalizeStartPage(_settings.StartingPage);
-        _settings.StartingPage = normalizedStartPage;
+        string sourceStartPage = GetEffectiveStartPage();
+        string normalizedStartPage = NormalizeStartPage(sourceStartPage);
+        if (string.IsNullOrWhiteSpace(GetExtensionStartPageOverride()))
+        {
+            _settings.StartingPage = normalizedStartPage;
+        }
+
         return normalizedStartPage;
+    }
+
+    private SearchEngine GetEffectiveSearchEngine()
+    {
+        PhantomExtensionSearchEngine? extensionOverride = GetExtensionSearchEngineOverride();
+        if (extensionOverride is null)
+        {
+            return _settings.DefaultSearchEngine;
+        }
+
+        return extensionOverride.Value switch
+        {
+            PhantomExtensionSearchEngine.Bing => SearchEngine.Bing,
+            PhantomExtensionSearchEngine.Yahoo => SearchEngine.Yahoo,
+            PhantomExtensionSearchEngine.DuckDuckGo => SearchEngine.DuckDuckGo,
+            PhantomExtensionSearchEngine.Startpage => SearchEngine.Startpage,
+            _ => SearchEngine.Google,
+        };
+    }
+
+    private string GetEffectiveStartPage()
+    {
+        string? extensionOverride = GetExtensionStartPageOverride();
+        if (!string.IsNullOrWhiteSpace(extensionOverride))
+        {
+            return extensionOverride;
+        }
+
+        return _settings.StartingPage;
+    }
+
+    private string? GetExtensionStartPageOverride()
+    {
+        LoadedExtension? extension = GetEnabledExtensions()
+            .FirstOrDefault(current => !string.IsNullOrWhiteSpace(current.Definition.StartPageOverride));
+
+        return extension?.Definition.StartPageOverride;
+    }
+
+    private PhantomExtensionSearchEngine? GetExtensionSearchEngineOverride()
+    {
+        LoadedExtension? extension = GetEnabledExtensions()
+            .FirstOrDefault(current => current.Definition.SearchEngineOverride is not null);
+
+        return extension?.Definition.SearchEngineOverride;
     }
 
     private static string NormalizeStartPage(string? rawValue)
@@ -2169,6 +2925,7 @@ public class MainForm : Form
                 }
 
                 RefreshTabTitle(tab);
+                await ApplyExtensionWebContentAsync(tab, currentUrl);
                 await RefreshTabFaviconAsync(tab);
                 Log($"Tab {tab.Id} navigation completed: {currentUrl}");
                 await LogCookieJarSnapshotAsync(currentUrl, tab);
@@ -2531,6 +3288,182 @@ public class MainForm : Form
             "}, true);";
     }
 
+    private bool TryGetBlockingExtensionRule(
+        string requestUri,
+        out LoadedExtension? matchingExtension,
+        out PhantomExtensionWebBlockDefinition? matchingRule)
+    {
+        matchingExtension = null;
+        matchingRule = null;
+
+        if (!_settings.ExtensionsEnabled || string.IsNullOrWhiteSpace(requestUri))
+        {
+            return false;
+        }
+
+        foreach (LoadedExtension extension in GetEnabledExtensions())
+        {
+            foreach (PhantomExtensionWebBlockDefinition rule in extension.Definition.WebBlocks)
+            {
+                if (!PhantomExtensionPatternMatcher.IsMatch(requestUri, rule.MatchPattern))
+                {
+                    continue;
+                }
+
+                matchingExtension = extension;
+                matchingRule = rule;
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    private async Task ApplyExtensionWebContentAsync(BrowserTab tab, string currentUrl)
+    {
+        if (!_settings.ExtensionsEnabled || tab.WebView.CoreWebView2 is null)
+        {
+            return;
+        }
+
+        await ApplyExtensionScriptsByTimingAsync(tab, currentUrl, PhantomExtensionScriptTiming.DocumentStart);
+        await ApplyExtensionScriptsByTimingAsync(tab, currentUrl, PhantomExtensionScriptTiming.DocumentEnd);
+    }
+
+    private async Task ApplyExtensionScriptsByTimingAsync(
+        BrowserTab tab,
+        string currentUrl,
+        PhantomExtensionScriptTiming timing)
+    {
+        if (tab.WebView.CoreWebView2 is null)
+        {
+            return;
+        }
+
+        foreach (LoadedExtension extension in GetEnabledExtensions())
+        {
+            foreach (PhantomExtensionWebScriptDefinition script in extension.Definition.WebScripts)
+            {
+                if (script.Timing != timing)
+                {
+                    continue;
+                }
+
+                if (!PhantomExtensionPatternMatcher.IsMatch(currentUrl, script.MatchPattern))
+                {
+                    continue;
+                }
+
+                try
+                {
+                    await EnsureExtensionContextObjectAsync(tab, extension);
+                    await ExecuteExtensionScriptAsync(tab, extension, script);
+                }
+                catch (Exception ex)
+                {
+                    Log($"Extension script failed [{extension.Definition.Id}/{script.Id}]: {ex.Message}");
+                }
+            }
+        }
+    }
+
+    private async Task EnsureExtensionContextObjectAsync(BrowserTab tab, LoadedExtension extension)
+    {
+        if (tab.WebView.CoreWebView2 is null)
+        {
+            return;
+        }
+
+        string idJson = JsonSerializer.Serialize(extension.Definition.Id);
+        string nameJson = JsonSerializer.Serialize(extension.Definition.Name);
+        string versionJson = JsonSerializer.Serialize(extension.Definition.Version);
+        string settingsJson = JsonSerializer.Serialize(extension.Installation.SettingValues);
+
+        string bootstrapScript = $$"""
+(() => {
+  window.phantomHazeExtensions = window.phantomHazeExtensions || {};
+  window.phantomHazeExtensions[{{idJson}}] = {
+    id: {{idJson}},
+    name: {{nameJson}},
+    version: {{versionJson}},
+    settings: {{settingsJson}}
+  };
+})();
+""";
+
+        await tab.WebView.CoreWebView2.ExecuteScriptAsync(bootstrapScript);
+    }
+
+    private async Task ExecuteExtensionScriptAsync(
+        BrowserTab tab,
+        LoadedExtension extension,
+        PhantomExtensionWebScriptDefinition script)
+    {
+        if (tab.WebView.CoreWebView2 is null)
+        {
+            return;
+        }
+
+        if (script.IsCss)
+        {
+            string css = ResolveExtensionPlaceholders(script.Content, extension);
+            string styleScript = BuildCssInjectionScript(extension.Definition.Id, script.Id, css);
+            await tab.WebView.CoreWebView2.ExecuteScriptAsync(styleScript);
+            return;
+        }
+
+        string jsPayload = ResolveExtensionPlaceholders(script.Content, extension);
+        string wrappedScript =
+            "(function(){try{" +
+            jsPayload +
+            "}catch(error){console.error('PhantomHaze extension script failure', error);}})();";
+
+        await tab.WebView.CoreWebView2.ExecuteScriptAsync(wrappedScript);
+    }
+
+    private static string BuildCssInjectionScript(string extensionId, string scriptId, string css)
+    {
+        string domId = $"ph-ext-style-{SanitizeDomToken(extensionId)}-{SanitizeDomToken(scriptId)}";
+        string domIdJson = JsonSerializer.Serialize(domId);
+        string cssJson = JsonSerializer.Serialize(css);
+        return $$"""
+(() => {
+  if (!document.head) {
+    return;
+  }
+
+  const styleId = {{domIdJson}};
+  let styleElement = document.getElementById(styleId);
+  if (!styleElement) {
+    styleElement = document.createElement('style');
+    styleElement.id = styleId;
+    document.head.appendChild(styleElement);
+  }
+
+  styleElement.textContent = {{cssJson}};
+})();
+""";
+    }
+
+    private static string SanitizeDomToken(string value)
+    {
+        if (string.IsNullOrWhiteSpace(value))
+        {
+            return "extension";
+        }
+
+        var builder = new StringBuilder(value.Length);
+        foreach (char character in value.ToLowerInvariant())
+        {
+            bool valid = (character >= 'a' && character <= 'z') ||
+                         (character >= '0' && character <= '9') ||
+                         character is '-' or '_';
+            builder.Append(valid ? character : '-');
+        }
+
+        return builder.ToString();
+    }
+
     private async Task<int> ApplyFindScriptAsync(BrowserTab tab, string query)
     {
         if (!_tabs.Contains(tab) || tab.WebView.CoreWebView2 is null)
@@ -2821,7 +3754,29 @@ public class MainForm : Form
 
     private void OnWebResourceRequested(object? sender, CoreWebView2WebResourceRequestedEventArgs e)
     {
-        if (!_webViewModeEnabled || !TryGetTabFromSender(sender, out BrowserTab tab))
+        if (!TryGetTabFromSender(sender, out BrowserTab tab))
+        {
+            return;
+        }
+
+        if (TryGetBlockingExtensionRule(e.Request.Uri, out LoadedExtension? blockingExtension, out PhantomExtensionWebBlockDefinition? blockingRule))
+        {
+            if (sender is CoreWebView2 core)
+            {
+                byte[] payload = Encoding.UTF8.GetBytes("Blocked by PhantomHaze extension.");
+                var stream = new MemoryStream(payload);
+                e.Response = core.Environment.CreateWebResourceResponse(
+                    stream,
+                    403,
+                    "Forbidden",
+                    "Content-Type: text/plain; charset=utf-8");
+            }
+
+            Log($"Tab {tab.Id} blocked by extension {blockingExtension!.Definition.Name} ({blockingRule!.Id}): {e.Request.Uri}");
+            return;
+        }
+
+        if (!_webViewModeEnabled)
         {
             return;
         }
@@ -2937,6 +3892,20 @@ public class MainForm : Form
 
         _tabByCore.Clear();
         _activeTab = null;
+
+        foreach (Form extensionWindow in _openExtensionWindowsById.Values.ToArray())
+        {
+            try
+            {
+                extensionWindow.Close();
+            }
+            catch
+            {
+                // Best effort cleanup only.
+            }
+        }
+
+        _openExtensionWindowsById.Clear();
 
         try
         {
@@ -3188,6 +4157,8 @@ public class MainForm : Form
         {
             PositionFindPanel();
         }
+
+        PositionExtensionLauncherPanel();
     }
 
     private void UpdateAddressStripLayout()
@@ -3269,6 +4240,7 @@ public class MainForm : Form
         _menuLogoLabel.ForeColor = textColor;
         _addressBarPanel.BackColor = panelBackColor;
         _contentHostPanel.BackColor = appBackColor;
+        _extensionLauncherPanel.BackColor = panelBackColor;
         _webViewHostPanel.BackColor = appBackColor;
         _webViewLoadingOverlayPanel.BackColor = darkTheme
             ? Color.FromArgb(31, 36, 43)
@@ -3312,40 +4284,102 @@ public class MainForm : Form
         UpdateWebViewToggleVisual();
         UpdateFavoriteButtonState();
         UpdateTabHeaderVisuals();
+        ApplyThemeToDynamicExtensionControls();
+    }
+
+    private List<ExtensionListItem> BuildExtensionDraftItems(
+        IReadOnlyList<InstalledExtensionEntry> draftExtensions,
+        IReadOnlyDictionary<string, string> stagedSourcesById)
+    {
+        var items = new List<ExtensionListItem>(draftExtensions.Count);
+        foreach (InstalledExtensionEntry installed in draftExtensions)
+        {
+            try
+            {
+                string source;
+                if (!stagedSourcesById.TryGetValue(installed.Id, out source!))
+                {
+                    string extensionPath = Path.Combine(_extensionsRootPath, installed.FileName);
+                    source = File.ReadAllText(extensionPath);
+                }
+
+                PhantomExtensionDefinition definition = PhextParser.Parse(source, installed.FileName);
+                if (!definition.Id.Equals(installed.Id, StringComparison.OrdinalIgnoreCase))
+                {
+                    installed.Id = definition.Id;
+                    installed.FileName = BuildExtensionFileName(definition.Id);
+                }
+
+                if (string.IsNullOrWhiteSpace(installed.DisplayName))
+                {
+                    installed.DisplayName = definition.Name;
+                }
+
+                EnsureExtensionSettingValues(installed, definition);
+                items.Add(new ExtensionListItem(installed, definition, loadError: null));
+            }
+            catch (Exception ex)
+            {
+                items.Add(new ExtensionListItem(installed, definition: null, loadError: ex.Message));
+            }
+        }
+
+        return items;
+    }
+
+    private void PersistExtensionDraftChanges(
+        IReadOnlyList<InstalledExtensionEntry> previousExtensions,
+        IReadOnlyList<InstalledExtensionEntry> draftExtensions,
+        IReadOnlyDictionary<string, string> stagedSourcesById)
+    {
+        var previousFileNames = previousExtensions
+            .Select(entry => NormalizeStoredExtensionFileName(entry.FileName, entry.Id))
+            .Where(fileName => !string.IsNullOrWhiteSpace(fileName))
+            .ToHashSet(StringComparer.OrdinalIgnoreCase);
+
+        var retainedFileNames = draftExtensions
+            .Select(entry => NormalizeStoredExtensionFileName(entry.FileName, entry.Id))
+            .Where(fileName => !string.IsNullOrWhiteSpace(fileName))
+            .ToHashSet(StringComparer.OrdinalIgnoreCase);
+
+        foreach (string removedFileName in previousFileNames.Except(retainedFileNames, StringComparer.OrdinalIgnoreCase))
+        {
+            string removedPath = Path.Combine(_extensionsRootPath, removedFileName);
+            TryDeleteFile(removedPath);
+        }
+
+        foreach (InstalledExtensionEntry entry in draftExtensions)
+        {
+            if (!stagedSourcesById.TryGetValue(entry.Id, out string? source))
+            {
+                continue;
+            }
+
+            string fileName = NormalizeStoredExtensionFileName(entry.FileName, entry.Id);
+            string targetPath = Path.Combine(_extensionsRootPath, fileName);
+            File.WriteAllText(targetPath, source);
+        }
+    }
+
+    private static void ApplyColorsRecursively(Control control, Color backColor, Color foreColor)
+    {
+        control.BackColor = backColor;
+        control.ForeColor = foreColor;
+
+        foreach (Control child in control.Controls)
+        {
+            ApplyColorsRecursively(child, backColor, foreColor);
+        }
     }
 
     private void OpenSettingsWindow()
     {
         AppSettings draftSettings = _settings.Clone();
-
-        using var settingsWindow = new Form
-        {
-            Text = "PhantomHaze Settings",
-            StartPosition = FormStartPosition.CenterParent,
-            FormBorderStyle = FormBorderStyle.FixedDialog,
-            MinimizeBox = false,
-            MaximizeBox = false,
-            ShowInTaskbar = false,
-            ClientSize = new Size(ScaleByDpi(520), ScaleByDpi(330)),
-            AutoScaleMode = AutoScaleMode.Dpi,
-        };
-
-        var contentLayout = new TableLayoutPanel
-        {
-            Dock = DockStyle.Fill,
-            ColumnCount = 2,
-            RowCount = 7,
-            Padding = ScalePadding(12, 12, 12, 12),
-        };
-        contentLayout.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, ScaleByDpi(220)));
-        contentLayout.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100f));
-        contentLayout.RowStyles.Add(new RowStyle(SizeType.Absolute, ScaleByDpi(36)));
-        contentLayout.RowStyles.Add(new RowStyle(SizeType.Absolute, ScaleByDpi(36)));
-        contentLayout.RowStyles.Add(new RowStyle(SizeType.Absolute, ScaleByDpi(36)));
-        contentLayout.RowStyles.Add(new RowStyle(SizeType.Absolute, ScaleByDpi(36)));
-        contentLayout.RowStyles.Add(new RowStyle(SizeType.Absolute, ScaleByDpi(36)));
-        contentLayout.RowStyles.Add(new RowStyle(SizeType.Absolute, ScaleByDpi(36)));
-        contentLayout.RowStyles.Add(new RowStyle(SizeType.Percent, 100f));
+        List<InstalledExtensionEntry> previousExtensions = _settings.Extensions
+            .Select(entry => entry.Clone())
+            .ToList();
+        var stagedSourcesByExtensionId = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        bool darkTheme = IsDarkTheme();
 
         static Label BuildSettingsLabel(string text)
         {
@@ -3357,6 +4391,56 @@ public class MainForm : Form
                 Font = new Font("Segoe UI", 9, FontStyle.Regular),
             };
         }
+
+        using var settingsWindow = new Form
+        {
+            Text = "PhantomHaze Settings",
+            StartPosition = FormStartPosition.CenterParent,
+            FormBorderStyle = FormBorderStyle.FixedDialog,
+            MinimizeBox = false,
+            MaximizeBox = false,
+            ShowInTaskbar = false,
+            ClientSize = new Size(ScaleByDpi(760), ScaleByDpi(580)),
+            AutoScaleMode = AutoScaleMode.Dpi,
+        };
+
+        var rootLayout = new TableLayoutPanel
+        {
+            Dock = DockStyle.Fill,
+            ColumnCount = 1,
+            RowCount = 2,
+            Padding = ScalePadding(12, 12, 12, 12),
+        };
+        rootLayout.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100f));
+        rootLayout.RowStyles.Add(new RowStyle(SizeType.Percent, 100f));
+        rootLayout.RowStyles.Add(new RowStyle(SizeType.Absolute, ScaleByDpi(44)));
+
+        var settingsTabs = new TabControl
+        {
+            Dock = DockStyle.Fill,
+        };
+
+        var generalTab = new TabPage("General");
+        var extensionsTab = new TabPage("Extensions");
+        settingsTabs.TabPages.Add(generalTab);
+        settingsTabs.TabPages.Add(extensionsTab);
+
+        var generalLayout = new TableLayoutPanel
+        {
+            Dock = DockStyle.Fill,
+            ColumnCount = 2,
+            RowCount = 7,
+            Padding = ScalePadding(12, 12, 12, 12),
+        };
+        generalLayout.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, ScaleByDpi(250)));
+        generalLayout.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100f));
+        generalLayout.RowStyles.Add(new RowStyle(SizeType.Absolute, ScaleByDpi(36)));
+        generalLayout.RowStyles.Add(new RowStyle(SizeType.Absolute, ScaleByDpi(36)));
+        generalLayout.RowStyles.Add(new RowStyle(SizeType.Absolute, ScaleByDpi(36)));
+        generalLayout.RowStyles.Add(new RowStyle(SizeType.Absolute, ScaleByDpi(36)));
+        generalLayout.RowStyles.Add(new RowStyle(SizeType.Absolute, ScaleByDpi(36)));
+        generalLayout.RowStyles.Add(new RowStyle(SizeType.Absolute, ScaleByDpi(36)));
+        generalLayout.RowStyles.Add(new RowStyle(SizeType.Percent, 100f));
 
         var themeComboBox = new ComboBox
         {
@@ -3440,6 +4524,123 @@ public class MainForm : Form
             Text = draftSettings.StartingPage,
         };
 
+        generalLayout.Controls.Add(BuildSettingsLabel("Theme"), 0, 0);
+        generalLayout.Controls.Add(themeComboBox, 1, 0);
+
+        generalLayout.Controls.Add(renderInBackgroundCheckBox, 0, 1);
+        generalLayout.SetColumnSpan(renderInBackgroundCheckBox, 2);
+
+        generalLayout.Controls.Add(persistHistoryCheckBox, 0, 2);
+        generalLayout.SetColumnSpan(persistHistoryCheckBox, 2);
+
+        generalLayout.Controls.Add(BuildSettingsLabel("Saved history retention"), 0, 3);
+        generalLayout.Controls.Add(retentionComboBox, 1, 3);
+
+        generalLayout.Controls.Add(BuildSettingsLabel("Default search engine"), 0, 4);
+        generalLayout.Controls.Add(searchEngineComboBox, 1, 4);
+
+        generalLayout.Controls.Add(BuildSettingsLabel("Web View starting page"), 0, 5);
+        generalLayout.Controls.Add(startPageTextBox, 1, 5);
+
+        generalTab.Controls.Add(generalLayout);
+
+        var extensionsLayout = new TableLayoutPanel
+        {
+            Dock = DockStyle.Fill,
+            ColumnCount = 1,
+            RowCount = 5,
+            Padding = ScalePadding(12, 12, 12, 12),
+        };
+        extensionsLayout.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100f));
+        extensionsLayout.RowStyles.Add(new RowStyle(SizeType.Absolute, ScaleByDpi(34)));
+        extensionsLayout.RowStyles.Add(new RowStyle(SizeType.Absolute, ScaleByDpi(38)));
+        extensionsLayout.RowStyles.Add(new RowStyle(SizeType.Absolute, ScaleByDpi(28)));
+        extensionsLayout.RowStyles.Add(new RowStyle(SizeType.Percent, 100f));
+        extensionsLayout.RowStyles.Add(new RowStyle(SizeType.Absolute, ScaleByDpi(28)));
+
+        var extensionsEnabledCheckBox = new CheckBox
+        {
+            Dock = DockStyle.Fill,
+            Text = "Enable all PhantomHaze extensions",
+            Checked = draftSettings.ExtensionsEnabled,
+            TextAlign = ContentAlignment.MiddleLeft,
+        };
+
+        var extensionActionsLayout = new FlowLayoutPanel
+        {
+            Dock = DockStyle.Fill,
+            FlowDirection = FlowDirection.LeftToRight,
+            WrapContents = false,
+            Margin = new Padding(0),
+        };
+
+        var importExtensionButton = new Button
+        {
+            Text = "Import extension",
+            AutoSize = true,
+            Height = ScaleByDpi(30),
+            Margin = ScalePadding(0, 2, 8, 2),
+        };
+
+        var uninstallAllExtensionsButton = new Button
+        {
+            Text = "Uninstall all extensions",
+            AutoSize = true,
+            Height = ScaleByDpi(30),
+            Margin = ScalePadding(0, 2, 0, 2),
+        };
+
+        extensionActionsLayout.Controls.Add(importExtensionButton);
+        extensionActionsLayout.Controls.Add(uninstallAllExtensionsButton);
+
+        var installedExtensionsLabel = new Label
+        {
+            Text = "Installed extensions",
+            Dock = DockStyle.Fill,
+            TextAlign = ContentAlignment.MiddleLeft,
+            Font = new Font("Segoe UI", 9, FontStyle.Bold),
+        };
+
+        var extensionSplit = new SplitContainer
+        {
+            Dock = DockStyle.Fill,
+            FixedPanel = FixedPanel.Panel1,
+            SplitterDistance = ScaleByDpi(300),
+            Panel1MinSize = ScaleByDpi(220),
+            Panel2MinSize = ScaleByDpi(280),
+        };
+
+        var extensionsListBox = new CheckedListBox
+        {
+            Dock = DockStyle.Fill,
+            CheckOnClick = true,
+            IntegralHeight = false,
+        };
+
+        var extensionSettingsPanel = new Panel
+        {
+            Dock = DockStyle.Fill,
+            AutoScroll = true,
+        };
+
+        extensionSplit.Panel1.Controls.Add(extensionsListBox);
+        extensionSplit.Panel2.Controls.Add(extensionSettingsPanel);
+
+        var extensionStatusLabel = new Label
+        {
+            Dock = DockStyle.Fill,
+            TextAlign = ContentAlignment.MiddleLeft,
+            Text = "No extension changes pending.",
+        };
+
+        extensionsLayout.Controls.Add(extensionsEnabledCheckBox, 0, 0);
+        extensionsLayout.Controls.Add(extensionActionsLayout, 0, 1);
+        extensionsLayout.Controls.Add(installedExtensionsLabel, 0, 2);
+        extensionsLayout.Controls.Add(extensionSplit, 0, 3);
+        extensionsLayout.Controls.Add(extensionStatusLabel, 0, 4);
+
+        extensionsTab.Controls.Add(extensionsLayout);
+
         var buttonsPanel = new FlowLayoutPanel
         {
             Dock = DockStyle.Fill,
@@ -3467,48 +4668,404 @@ public class MainForm : Form
         buttonsPanel.Controls.Add(saveButton);
         buttonsPanel.Controls.Add(cancelButton);
 
-        contentLayout.Controls.Add(BuildSettingsLabel("Theme"), 0, 0);
-        contentLayout.Controls.Add(themeComboBox, 1, 0);
-
-        contentLayout.Controls.Add(renderInBackgroundCheckBox, 0, 1);
-        contentLayout.SetColumnSpan(renderInBackgroundCheckBox, 2);
-
-        contentLayout.Controls.Add(persistHistoryCheckBox, 0, 2);
-        contentLayout.SetColumnSpan(persistHistoryCheckBox, 2);
-
-        contentLayout.Controls.Add(BuildSettingsLabel("Saved history retention"), 0, 3);
-        contentLayout.Controls.Add(retentionComboBox, 1, 3);
-
-        contentLayout.Controls.Add(BuildSettingsLabel("Default search engine"), 0, 4);
-        contentLayout.Controls.Add(searchEngineComboBox, 1, 4);
-
-        contentLayout.Controls.Add(BuildSettingsLabel("Web View starting page"), 0, 5);
-        contentLayout.Controls.Add(startPageTextBox, 1, 5);
-
-        contentLayout.Controls.Add(buttonsPanel, 0, 6);
-        contentLayout.SetColumnSpan(buttonsPanel, 2);
-
         settingsWindow.AcceptButton = saveButton;
         settingsWindow.CancelButton = cancelButton;
-        settingsWindow.Controls.Add(contentLayout);
+        rootLayout.Controls.Add(settingsTabs, 0, 0);
+        rootLayout.Controls.Add(buttonsPanel, 0, 1);
+        settingsWindow.Controls.Add(rootLayout);
 
-        if (IsDarkTheme())
+        List<ExtensionListItem> extensionItems = new();
+        bool listPopulationInProgress = false;
+
+        void ApplySettingsInputColors(Control control)
         {
-            settingsWindow.BackColor = Color.FromArgb(38, 44, 52);
-            foreach (Control control in contentLayout.Controls)
+            Color inputBackColor = Color.FromArgb(55, 64, 77);
+            Color inputForeColor = Color.FromArgb(228, 236, 247);
+
+            switch (control)
             {
-                control.BackColor = Color.FromArgb(38, 44, 52);
-                control.ForeColor = Color.FromArgb(228, 236, 247);
+                case TextBoxBase textBox:
+                    textBox.BackColor = inputBackColor;
+                    textBox.ForeColor = inputForeColor;
+                    break;
+                case ComboBox comboBox:
+                    comboBox.BackColor = inputBackColor;
+                    comboBox.ForeColor = inputForeColor;
+                    break;
+                case CheckedListBox checkedListBox:
+                    checkedListBox.BackColor = inputBackColor;
+                    checkedListBox.ForeColor = inputForeColor;
+                    break;
+                case ListBox listBox:
+                    listBox.BackColor = inputBackColor;
+                    listBox.ForeColor = inputForeColor;
+                    break;
+                case NumericUpDown numericUpDown:
+                    numericUpDown.BackColor = inputBackColor;
+                    numericUpDown.ForeColor = inputForeColor;
+                    break;
             }
 
-            themeComboBox.BackColor = Color.FromArgb(55, 64, 77);
-            themeComboBox.ForeColor = Color.FromArgb(228, 236, 247);
-            retentionComboBox.BackColor = Color.FromArgb(55, 64, 77);
-            retentionComboBox.ForeColor = Color.FromArgb(228, 236, 247);
-            searchEngineComboBox.BackColor = Color.FromArgb(55, 64, 77);
-            searchEngineComboBox.ForeColor = Color.FromArgb(228, 236, 247);
-            startPageTextBox.BackColor = Color.FromArgb(55, 64, 77);
-            startPageTextBox.ForeColor = Color.FromArgb(228, 236, 247);
+            foreach (Control child in control.Controls)
+            {
+                ApplySettingsInputColors(child);
+            }
+        }
+
+        void RenderSelectedExtensionSettings()
+        {
+            extensionSettingsPanel.Controls.Clear();
+
+            if (extensionsListBox.SelectedItem is not ExtensionListItem selectedItem)
+            {
+                extensionSettingsPanel.Controls.Add(new Label
+                {
+                    Dock = DockStyle.Top,
+                    Text = "Select an extension to view its configurable settings.",
+                    Height = ScaleByDpi(26),
+                    TextAlign = ContentAlignment.MiddleLeft,
+                });
+                return;
+            }
+
+            if (!string.IsNullOrWhiteSpace(selectedItem.LoadError))
+            {
+                extensionSettingsPanel.Controls.Add(new Label
+                {
+                    Dock = DockStyle.Top,
+                    AutoSize = true,
+                    Text = $"This extension failed to load:\n{selectedItem.LoadError}",
+                    ForeColor = Color.FromArgb(197, 70, 70),
+                });
+                return;
+            }
+
+            PhantomExtensionDefinition? definition = selectedItem.Definition;
+            if (definition is null)
+            {
+                return;
+            }
+
+            var detailsLayout = new TableLayoutPanel
+            {
+                Dock = DockStyle.Top,
+                AutoSize = true,
+                ColumnCount = 2,
+                Padding = new Padding(0),
+                Margin = new Padding(0),
+            };
+
+            detailsLayout.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, ScaleByDpi(150)));
+            detailsLayout.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100f));
+
+            int row = 0;
+
+            void AddMetaRow(string label, string value)
+            {
+                detailsLayout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+                detailsLayout.Controls.Add(new Label
+                {
+                    Text = label,
+                    Dock = DockStyle.Fill,
+                    TextAlign = ContentAlignment.MiddleLeft,
+                    Font = new Font("Segoe UI", 9, FontStyle.Bold),
+                    Margin = ScalePadding(0, 0, 8, 6),
+                }, 0, row);
+
+                detailsLayout.Controls.Add(new Label
+                {
+                    Text = value,
+                    Dock = DockStyle.Fill,
+                    TextAlign = ContentAlignment.MiddleLeft,
+                    AutoSize = true,
+                    Margin = ScalePadding(0, 0, 0, 6),
+                }, 1, row);
+
+                row++;
+            }
+
+            AddMetaRow("Name", definition.Name);
+            AddMetaRow("ID", definition.Id);
+            AddMetaRow("Version", definition.Version);
+            if (!string.IsNullOrWhiteSpace(definition.Description))
+            {
+                AddMetaRow("Description", definition.Description);
+            }
+
+            if (definition.Settings.Count > 0)
+            {
+                detailsLayout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+                var settingsHeader = new Label
+                {
+                    Text = "Extension settings",
+                    Dock = DockStyle.Fill,
+                    TextAlign = ContentAlignment.MiddleLeft,
+                    Font = new Font("Segoe UI", 9, FontStyle.Bold),
+                    Margin = ScalePadding(0, 8, 0, 6),
+                };
+                detailsLayout.Controls.Add(settingsHeader, 0, row);
+                detailsLayout.SetColumnSpan(settingsHeader, 2);
+                row++;
+            }
+
+            foreach (PhantomExtensionSettingDefinition setting in definition.Settings)
+            {
+                detailsLayout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+
+                string currentValue = selectedItem.Installation.SettingValues.TryGetValue(setting.Key, out string? value)
+                    ? value
+                    : GetDefaultSettingValue(setting);
+
+                if (setting.Type == PhantomExtensionSettingType.Toggle)
+                {
+                    bool checkedValue = TryParseBooleanSetting(currentValue, out bool parsed) && parsed;
+                    var toggle = new CheckBox
+                    {
+                        Text = setting.Label,
+                        Checked = checkedValue,
+                        Dock = DockStyle.Fill,
+                        Margin = ScalePadding(0, 0, 0, 6),
+                    };
+                    toggle.CheckedChanged += (_, _) =>
+                    {
+                        selectedItem.Installation.SettingValues[setting.Key] = toggle.Checked ? "true" : "false";
+                    };
+
+                    detailsLayout.Controls.Add(toggle, 0, row);
+                    detailsLayout.SetColumnSpan(toggle, 2);
+                    row++;
+                    continue;
+                }
+
+                detailsLayout.Controls.Add(new Label
+                {
+                    Text = setting.Label,
+                    Dock = DockStyle.Fill,
+                    TextAlign = ContentAlignment.MiddleLeft,
+                    Margin = ScalePadding(0, 0, 8, 6),
+                }, 0, row);
+
+                Control editorControl;
+                if (setting.Type == PhantomExtensionSettingType.Number)
+                {
+                    int minimum = setting.Minimum ?? -100000;
+                    int maximum = setting.Maximum ?? 100000;
+                    int numericValue = int.TryParse(currentValue, out int parsedValue)
+                        ? Math.Clamp(parsedValue, minimum, maximum)
+                        : Math.Clamp(int.TryParse(setting.DefaultValue, out int parsedDefault) ? parsedDefault : 0, minimum, maximum);
+
+                    var numeric = new NumericUpDown
+                    {
+                        Dock = DockStyle.Fill,
+                        Minimum = minimum,
+                        Maximum = maximum,
+                        Value = numericValue,
+                        Margin = ScalePadding(0, 0, 0, 6),
+                    };
+                    numeric.ValueChanged += (_, _) =>
+                    {
+                        selectedItem.Installation.SettingValues[setting.Key] =
+                            numeric.Value.ToString(System.Globalization.CultureInfo.InvariantCulture);
+                    };
+
+                    editorControl = numeric;
+                }
+                else if (setting.Type == PhantomExtensionSettingType.Select)
+                {
+                    var combo = new ComboBox
+                    {
+                        Dock = DockStyle.Fill,
+                        DropDownStyle = ComboBoxStyle.DropDownList,
+                        Margin = ScalePadding(0, 0, 0, 6),
+                    };
+
+                    foreach (string option in setting.SelectOptions)
+                    {
+                        combo.Items.Add(option);
+                    }
+
+                    string selectedOption = setting.SelectOptions.FirstOrDefault(option =>
+                        option.Equals(currentValue, StringComparison.OrdinalIgnoreCase)) ?? setting.SelectOptions[0];
+                    combo.SelectedItem = selectedOption;
+                    combo.SelectedIndexChanged += (_, _) =>
+                    {
+                        if (combo.SelectedItem is string option)
+                        {
+                            selectedItem.Installation.SettingValues[setting.Key] = option;
+                        }
+                    };
+
+                    editorControl = combo;
+                }
+                else
+                {
+                    var textBox = new TextBox
+                    {
+                        Dock = DockStyle.Fill,
+                        Text = currentValue,
+                        Margin = ScalePadding(0, 0, 0, 6),
+                    };
+                    textBox.TextChanged += (_, _) =>
+                    {
+                        selectedItem.Installation.SettingValues[setting.Key] = textBox.Text;
+                    };
+                    editorControl = textBox;
+                }
+
+                detailsLayout.Controls.Add(editorControl, 1, row);
+                row++;
+            }
+
+            if (darkTheme)
+            {
+                ApplyColorsRecursively(detailsLayout, Color.FromArgb(38, 44, 52), Color.FromArgb(228, 236, 247));
+                ApplySettingsInputColors(detailsLayout);
+            }
+
+            extensionSettingsPanel.Controls.Add(detailsLayout);
+        }
+
+        void RefreshExtensionDraftList(string? preferredExtensionId = null)
+        {
+            extensionItems = BuildExtensionDraftItems(draftSettings.Extensions, stagedSourcesByExtensionId);
+            listPopulationInProgress = true;
+
+            extensionsListBox.Items.Clear();
+            for (int index = 0; index < extensionItems.Count; index++)
+            {
+                ExtensionListItem item = extensionItems[index];
+                extensionsListBox.Items.Add(item);
+                extensionsListBox.SetItemChecked(index, item.Installation.Enabled);
+            }
+
+            int selectedIndex = -1;
+            if (!string.IsNullOrWhiteSpace(preferredExtensionId))
+            {
+                selectedIndex = extensionItems.FindIndex(item =>
+                    item.Installation.Id.Equals(preferredExtensionId, StringComparison.OrdinalIgnoreCase));
+            }
+
+            if (selectedIndex < 0 && extensionItems.Count > 0)
+            {
+                selectedIndex = 0;
+            }
+
+            if (selectedIndex >= 0)
+            {
+                extensionsListBox.SelectedIndex = selectedIndex;
+            }
+
+            extensionStatusLabel.Text = extensionItems.Count == 0
+                ? "No extensions installed."
+                : $"{extensionItems.Count} extension(s) in this settings draft.";
+
+            listPopulationInProgress = false;
+            RenderSelectedExtensionSettings();
+        }
+
+        extensionsListBox.SelectedIndexChanged += (_, _) => RenderSelectedExtensionSettings();
+        extensionsListBox.ItemCheck += (_, eventArgs) =>
+        {
+            if (listPopulationInProgress || eventArgs.Index < 0 || eventArgs.Index >= extensionItems.Count)
+            {
+                return;
+            }
+
+            extensionItems[eventArgs.Index].Installation.Enabled = eventArgs.NewValue == CheckState.Checked;
+        };
+
+        importExtensionButton.Click += (_, _) =>
+        {
+            using var picker = new OpenFileDialog
+            {
+                Filter = "PhantomHaze extension (*.phext)|*.phext",
+                Multiselect = false,
+                CheckFileExists = true,
+                Title = "Import PhantomHaze Extension",
+            };
+
+            if (picker.ShowDialog(settingsWindow) != DialogResult.OK)
+            {
+                return;
+            }
+
+            try
+            {
+                string rawSource = File.ReadAllText(picker.FileName);
+                string sourceName = Path.GetFileName(picker.FileName);
+                PhantomExtensionDefinition definition = PhextParser.Parse(rawSource, sourceName);
+
+                InstalledExtensionEntry? existing = draftSettings.Extensions.FirstOrDefault(entry =>
+                    entry.Id.Equals(definition.Id, StringComparison.OrdinalIgnoreCase));
+
+                if (existing is null)
+                {
+                    existing = new InstalledExtensionEntry
+                    {
+                        Id = definition.Id,
+                        DisplayName = definition.Name,
+                        FileName = BuildExtensionFileName(definition.Id),
+                        Enabled = true,
+                        SettingValues = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase),
+                    };
+
+                    draftSettings.Extensions.Add(existing);
+                }
+
+                existing.Id = definition.Id;
+                existing.DisplayName = definition.Name;
+                existing.FileName = BuildExtensionFileName(definition.Id);
+                existing.Enabled = true;
+                EnsureExtensionSettingValues(existing, definition);
+
+                stagedSourcesByExtensionId[definition.Id] = rawSource;
+                extensionStatusLabel.Text = $"Imported '{definition.Name}'. Click Save to install it.";
+                RefreshExtensionDraftList(definition.Id);
+            }
+            catch (Exception ex)
+            {
+                MessageBox.Show(
+                    settingsWindow,
+                    $"Extension import failed:\n{ex.Message}",
+                    "PhantomHaze",
+                    MessageBoxButtons.OK,
+                    MessageBoxIcon.Warning);
+            }
+        };
+
+        uninstallAllExtensionsButton.Click += (_, _) =>
+        {
+            if (draftSettings.Extensions.Count == 0)
+            {
+                return;
+            }
+
+            DialogResult result = MessageBox.Show(
+                settingsWindow,
+                "This will uninstall every extension when you save settings. Continue?",
+                "PhantomHaze",
+                MessageBoxButtons.YesNo,
+                MessageBoxIcon.Warning);
+
+            if (result != DialogResult.Yes)
+            {
+                return;
+            }
+
+            draftSettings.Extensions.Clear();
+            stagedSourcesByExtensionId.Clear();
+            extensionStatusLabel.Text = "All extensions are marked for uninstallation. Click Save to apply.";
+            RefreshExtensionDraftList();
+        };
+
+        RefreshExtensionDraftList();
+
+        if (darkTheme)
+        {
+            settingsWindow.BackColor = Color.FromArgb(38, 44, 52);
+            ApplyColorsRecursively(settingsWindow, Color.FromArgb(38, 44, 52), Color.FromArgb(228, 236, 247));
+            ApplySettingsInputColors(settingsWindow);
+
             saveButton.BackColor = Color.FromArgb(67, 76, 90);
             saveButton.ForeColor = Color.FromArgb(228, 236, 247);
             cancelButton.BackColor = Color.FromArgb(67, 76, 90);
@@ -3541,9 +5098,29 @@ public class MainForm : Form
         }
 
         draftSettings.StartingPage = NormalizeStartPage(startPageTextBox.Text.Trim());
+        draftSettings.ExtensionsEnabled = extensionsEnabledCheckBox.Checked;
+
+        try
+        {
+            PersistExtensionDraftChanges(previousExtensions, draftSettings.Extensions, stagedSourcesByExtensionId);
+        }
+        catch (Exception ex)
+        {
+            MessageBox.Show(
+                this,
+                $"Extension changes could not be applied:\n{ex.Message}",
+                "PhantomHaze",
+                MessageBoxButtons.OK,
+                MessageBoxIcon.Warning);
+            Log($"Extension persistence failed: {ex.Message}");
+            return;
+        }
+
         _settings = draftSettings;
         NormalizeSettings();
         SaveSettings();
+        LoadInstalledExtensions();
+        RefreshExtensionSurface();
 
         if (_settings.PersistHistoryAcrossSessions)
         {
@@ -3554,7 +5131,7 @@ public class MainForm : Form
             TryDeleteFile(_historyFilePath);
         }
 
-        _addressBarTextBox.PlaceholderText = _settings.StartingPage;
+        _addressBarTextBox.PlaceholderText = NormalizeStartPage(GetEffectiveStartPage());
         RefreshHistoryPanelItems();
         UpdateTabVisibilityAndRendering();
         ApplyTheme();

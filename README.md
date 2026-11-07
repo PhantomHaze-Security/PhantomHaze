@@ -37,6 +37,15 @@ Includes timed disable options with a live countdown banner so you always know w
 * **Live Status Logging:** Instant visual feedback whenever protection is active or toggled.
 * **Smooth View Switching:** Web View transitions wait for the page surface to be ready, with an inline loading state to prevent partial renders.
 
+### 🧩 PhantomHaze Extensions (`.phext`)
+* **Importable Extension Files:** Load `.phext` files from **Settings -> Extensions -> Import extension**.
+* **Global + Per-Extension Controls:** Toggle all extensions at once or disable individual installed extensions.
+* **Extension UI Launcher:** Extensions with `ui.html` automatically get a bottom-right launcher button with their icon.
+* **Web View Modification Hooks:** Extensions can inject JS/CSS and block matching web requests.
+* **App Surface Customization:** Extensions can add settings fields and top-bar buttons, plus override start page/search engine while enabled.
+
+Extension language reference: [`PHEXT_GUIDE.md`](./PHEXT_GUIDE.md)
+
 ---
 
 ##  Quick Start Comparison
