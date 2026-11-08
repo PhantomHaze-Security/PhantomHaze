@@ -1,6 +1,8 @@
+using System.Globalization;
 using System.Net;
 using System.Text;
 using System.Text.Json;
+using System.Text.Json.Serialization;
 using Microsoft.Web.WebView2.Core;
 using Microsoft.Web.WebView2.WinForms;
 
@@ -56,6 +58,7 @@ public class MainForm : Form
         public string DisplayName { get; set; } = string.Empty;
         public string FileName { get; set; } = string.Empty;
         public bool Enabled { get; set; } = true;
+        [JsonConverter(typeof(LenientSettingValuesConverter))]
         public Dictionary<string, string> SettingValues { get; set; } = new(StringComparer.OrdinalIgnoreCase);
 
         public InstalledExtensionEntry Clone()
@@ -71,6 +74,67 @@ public class MainForm : Form
         }
     }
 
+    /// <summary>
+    /// Reads extension setting values written as JSON numbers or booleans (for example by hand-editing
+    /// settings.json) instead of failing the whole settings file, which would reset every setting and orphan all
+    /// installed extensions. Values are always written back as strings.
+    /// </summary>
+    private sealed class LenientSettingValuesConverter : JsonConverter<Dictionary<string, string>>
+    {
+        public override Dictionary<string, string> Read(ref Utf8JsonReader reader, Type typeToConvert, JsonSerializerOptions options)
+        {
+            var values = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+            if (reader.TokenType != JsonTokenType.StartObject)
+            {
+                reader.Skip();
+                return values;
+            }
+
+            while (reader.Read() && reader.TokenType != JsonTokenType.EndObject)
+            {
+                string key = reader.GetString() ?? string.Empty;
+                reader.Read();
+                switch (reader.TokenType)
+                {
+                    case JsonTokenType.String:
+                        values[key] = reader.GetString() ?? string.Empty;
+                        break;
+                    case JsonTokenType.Number:
+                        values[key] = reader.TryGetDecimal(out decimal number)
+                            ? number.ToString(CultureInfo.InvariantCulture)
+                            : reader.GetDouble().ToString("R", CultureInfo.InvariantCulture);
+                        break;
+                    case JsonTokenType.True:
+                        values[key] = "true";
+                        break;
+                    case JsonTokenType.False:
+                        values[key] = "false";
+                        break;
+                    default:
+                        // null, objects and arrays: ignore the value so the declared default is used.
+                        reader.Skip();
+                        break;
+                }
+            }
+
+            return values;
+        }
+
+        public override void Write(Utf8JsonWriter writer, Dictionary<string, string> value, JsonSerializerOptions options)
+        {
+            writer.WriteStartObject();
+            foreach ((string key, string item) in value)
+            {
+                writer.WriteString(key, item);
+            }
+
+            writer.WriteEndObject();
+        }
+    }
+
+    /// <summary>Identifies one version of settings.json, to notice writes made by another PhantomHaze window.</summary>
+    private readonly record struct SettingsFileStamp(DateTime LastWriteUtc, long Length);
+
     private sealed class LoadedExtension
     {
         public LoadedExtension(InstalledExtensionEntry installation, PhantomExtensionDefinition definition, string sourcePath)
@@ -83,6 +147,34 @@ public class MainForm : Form
         public InstalledExtensionEntry Installation { get; }
         public PhantomExtensionDefinition Definition { get; }
         public string SourcePath { get; }
+    }
+
+    private sealed class ExtensionWindowState
+    {
+        public ExtensionWindowState(Form window, LoadedExtension extension)
+        {
+            Window = window;
+            Extension = extension;
+        }
+
+        public Form Window { get; }
+        public LoadedExtension Extension { get; set; }
+        public WebView2? WebView { get; set; }
+        public RichTextBox? FallbackBox { get; set; }
+        public string? RenderedContent { get; set; }
+    }
+
+    private sealed record ExtensionMenuCommand(LoadedExtension Extension, PhantomExtensionAppButtonDefinition AppButton);
+
+    private sealed class AuxiliaryWindowProtection
+    {
+        public AuxiliaryWindowProtection(string description)
+        {
+            Description = description;
+        }
+
+        public string Description { get; }
+        public bool? AppliedState { get; set; }
     }
 
     private sealed class ExtensionListItem
@@ -168,6 +260,10 @@ public class MainForm : Form
         public Image? OwnedFaviconImage { get; set; }
         public int ZoomPercent { get; set; }
         public bool IsNavigationPending { get; set; }
+
+        // Incremented on every NavigationStarting so async work started for one document can detect that the
+        // tab has moved on before touching the new document.
+        public int NavigationSequence { get; set; }
     }
 
     private readonly Panel _menuBarPanel = new();
@@ -208,7 +304,8 @@ public class MainForm : Form
     private readonly Label _findCountLabel = new();
     private readonly Button _findCloseButton = new();
     private readonly TextBox _logBox = new();
-    private readonly HttpClient _faviconHttpClient = new();
+    // Redirects are followed manually so every hop can be checked against extension web.block rules.
+    private readonly HttpClient _faviconHttpClient = new(new HttpClientHandler { AllowAutoRedirect = false });
     private readonly Font _tabCloseFontRegular = new("Segoe UI", 8, FontStyle.Bold);
     private readonly Font _tabCloseFontCompact = new("Segoe UI", 6.5f, FontStyle.Bold);
     private readonly Font _menuButtonFontRegular = new("Segoe UI", 10, FontStyle.Regular);
@@ -224,8 +321,22 @@ public class MainForm : Form
     private readonly List<BrowserTab> _tabs = new();
     private readonly List<LoadedExtension> _loadedExtensions = new();
     private readonly Dictionary<string, LoadedExtension> _loadedExtensionById = new(StringComparer.OrdinalIgnoreCase);
-    private readonly Dictionary<string, Form> _openExtensionWindowsById = new(StringComparer.OrdinalIgnoreCase);
+    private readonly Dictionary<string, ExtensionWindowState> _openExtensionWindowsById = new(StringComparer.OrdinalIgnoreCase);
+    private readonly Dictionary<Form, AuxiliaryWindowProtection> _protectedAuxiliaryWindows = new();
+    private readonly ToolTip _extensionLauncherToolTip = new();
+    private readonly Button _extensionMenuOverflowButton = new();
+    private readonly ContextMenuStrip _extensionMenuOverflowMenu = new();
+    private readonly List<Button> _overflowedExtensionMenuButtons = new();
+    // "extensionId/scriptId" keys already reported as not running, so a broken script is logged once per load.
+    private readonly HashSet<string> _reportedNonRunningExtensionScripts = new(StringComparer.OrdinalIgnoreCase);
+    // Handles of system dialogs (MessageBox, file picker) currently open through ShowCaptureProtectedDialog.
+    private readonly HashSet<IntPtr> _openSystemDialogWindows = new();
+    // settings.json as this window last read or wrote it (null: no file); see HasSettingsFileChangedSinceLastAccess.
+    private SettingsFileStamp? _settingsFileStamp;
     private readonly Dictionary<CoreWebView2, BrowserTab> _tabByCore = new();
+    // The one tab whose CoreWebView2 carries the service/shared worker request filter (see EnsureWorkerRequestFilter).
+    private CoreWebView2? _workerRequestFilterCore;
+    private bool _workerRequestFilterUnavailable;
     private AppSettings _settings = new();
     private TableLayoutPanel? _addressRootLayout;
     private TableLayoutPanel? _addressStripLayout;
@@ -240,6 +351,7 @@ public class MainForm : Form
     private bool _webViewModeEnabled;
     private bool _webViewModeSwitchInProgress;
     private bool _sessionDataCleared;
+    private bool _updatingExtensionMenuOverflow;
     private int _nextTabId = 1;
     private int _findRequestVersion;
     private int _webViewModeSwitchVersion;
@@ -261,10 +373,18 @@ public class MainForm : Form
     private const int MinimumAddressInputWidth = 180;
     private static readonly Image DefaultTabIcon = SystemIcons.Application.ToBitmap();
     private static readonly int[] ValidHistoryRetentionDays = new[] { 1, 7, 14, 30, 80, -1 };
+    private const string ExtensionStagingFileSuffix = ".phext-staging";
+    private const string ExtensionBackupFileSuffix = ".phext-backup";
+    private static readonly HashSet<string> WindowsReservedFileNames = new(StringComparer.OrdinalIgnoreCase)
+    {
+        "CON", "PRN", "AUX", "NUL",
+        "COM0", "COM1", "COM2", "COM3", "COM4", "COM5", "COM6", "COM7", "COM8", "COM9",
+        "LPT0", "LPT1", "LPT2", "LPT3", "LPT4", "LPT5", "LPT6", "LPT7", "LPT8", "LPT9",
+    };
 
     public MainForm()
     {
-        Text = "PhantomHaze v1.3.4";
+        Text = "PhantomHaze v1.3.5";
         Width = 980;
         Height = 620;
         MinimumSize = new Size(860, 560);
@@ -289,6 +409,7 @@ public class MainForm : Form
         NormalizeSettings();
 
         BuildUi();
+        CleanupStaleExtensionTransactionFiles();
         LoadInstalledExtensions();
         RefreshExtensionSurface();
         _addressBarTextBox.PlaceholderText = NormalizeStartPage(GetEffectiveStartPage());
@@ -488,6 +609,9 @@ public class MainForm : Form
     {
         _settings = new AppSettings();
 
+        // Taken before reading, so a write by another window in between is noticed rather than missed.
+        _settingsFileStamp = ReadSettingsFileStamp();
+
         try
         {
             if (!File.Exists(_settingsFilePath))
@@ -507,35 +631,65 @@ public class MainForm : Form
         catch (Exception ex)
         {
             Log($"Settings load failed: {ex.Message}");
+            PreserveUnreadableSettingsFile();
             _settings = new AppSettings();
+        }
+    }
+
+    /// <summary>
+    /// settings.json is the only record of installed extensions and their settings, and it is rewritten on exit.
+    /// Keep a copy of a file that could not be read so that data can still be recovered.
+    /// </summary>
+    private void PreserveUnreadableSettingsFile()
+    {
+        try
+        {
+            if (!File.Exists(_settingsFilePath))
+            {
+                return;
+            }
+
+            string backupPath = $"{_settingsFilePath}.unreadable-{DateTime.UtcNow.ToString("yyyyMMddHHmmss", CultureInfo.InvariantCulture)}";
+            File.Copy(_settingsFilePath, backupPath, overwrite: true);
+            Log($"The unreadable settings file was preserved as {backupPath}. Default settings are used for this session.");
+        }
+        catch (Exception ex)
+        {
+            Log($"The unreadable settings file could not be preserved: {ex.Message}");
         }
     }
 
     private void NormalizeSettings()
     {
-        if (!Enum.IsDefined(_settings.Theme))
+        NormalizeSettings(_settings);
+    }
+
+    private static void NormalizeSettings(AppSettings settings)
+    {
+        if (!Enum.IsDefined(settings.Theme))
         {
-            _settings.Theme = AppTheme.Light;
+            settings.Theme = AppTheme.Light;
         }
 
-        if (!Enum.IsDefined(_settings.DefaultSearchEngine))
+        if (!Enum.IsDefined(settings.DefaultSearchEngine))
         {
-            _settings.DefaultSearchEngine = SearchEngine.Google;
+            settings.DefaultSearchEngine = SearchEngine.Google;
         }
 
-        if (!ValidHistoryRetentionDays.Contains(_settings.HistoryRetentionDays))
+        if (!ValidHistoryRetentionDays.Contains(settings.HistoryRetentionDays))
         {
-            _settings.HistoryRetentionDays = 1;
+            settings.HistoryRetentionDays = 1;
         }
 
-        _settings.StartingPage = NormalizeStartPage(_settings.StartingPage);
+        settings.StartingPage = NormalizeStartPage(settings.StartingPage);
 
-        _settings.Extensions ??= new List<InstalledExtensionEntry>();
+        settings.Extensions ??= new List<InstalledExtensionEntry>();
 
         var normalizedExtensions = new List<InstalledExtensionEntry>();
         var seenIds = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        var usedFileNames = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
 
-        foreach (InstalledExtensionEntry entry in _settings.Extensions)
+        foreach (InstalledExtensionEntry entry in settings.Extensions)
         {
             if (entry is null)
             {
@@ -559,44 +713,48 @@ public class MainForm : Form
             }
 
             entry.Id = idCandidate;
-            entry.FileName = NormalizeStoredExtensionFileName(entry.FileName, entry.Id);
+            entry.FileName = NormalizeStoredExtensionFileName(entry.FileName, entry.Id, usedFileNames);
+            usedFileNames.Add(entry.FileName);
             if (string.IsNullOrWhiteSpace(entry.DisplayName))
             {
                 entry.DisplayName = entry.Id;
             }
 
-            entry.SettingValues ??= new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
-            if (entry.SettingValues.Comparer != StringComparer.OrdinalIgnoreCase)
-            {
-                entry.SettingValues = new Dictionary<string, string>(entry.SettingValues, StringComparer.OrdinalIgnoreCase);
-            }
+            // Rebuilt key by key: copying a hand-edited settings.json whose keys differ only by case into a
+            // case-insensitive dictionary would otherwise throw during startup.
+            entry.SettingValues = CreateSettingValueDictionary(entry.SettingValues);
 
             normalizedExtensions.Add(entry);
         }
 
-        _settings.Extensions = normalizedExtensions;
+        settings.Extensions = normalizedExtensions;
+    }
+
+    private static Dictionary<string, string> CreateSettingValueDictionary(IEnumerable<KeyValuePair<string, string>>? source)
+    {
+        var values = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        if (source is null)
+        {
+            return values;
+        }
+
+        foreach (KeyValuePair<string, string> pair in source)
+        {
+            if (string.IsNullOrEmpty(pair.Key))
+            {
+                continue;
+            }
+
+            values[pair.Key] = pair.Value ?? string.Empty;
+        }
+
+        return values;
     }
 
     private static bool IsValidExtensionIdentifier(string value)
     {
-        if (string.IsNullOrWhiteSpace(value))
-        {
-            return false;
-        }
-
-        foreach (char character in value)
-        {
-            bool valid = (character >= 'a' && character <= 'z') ||
-                         (character >= 'A' && character <= 'Z') ||
-                         (character >= '0' && character <= '9') ||
-                         character is '.' or '_' or '-';
-            if (!valid)
-            {
-                return false;
-            }
-        }
-
-        return true;
+        // One rule for the parser and the settings file, so they can never disagree about a valid id.
+        return PhextParser.IsValidIdentifier(value);
     }
 
     private static string BuildExtensionIdFromFileName(string? fileName)
@@ -607,53 +765,109 @@ public class MainForm : Form
             return string.Empty;
         }
 
-        var normalized = new StringBuilder(candidate.Length);
-        foreach (char character in candidate.ToLowerInvariant())
-        {
-            normalized.Append(character switch
-            {
-                >= 'a' and <= 'z' => character,
-                >= '0' and <= '9' => character,
-                '.' or '_' or '-' => character,
-                _ => '-',
-            });
-        }
-
-        return normalized.ToString().Trim('-');
+        // The same derivation the parser applies to files without meta.id (including the hash for non-Latin names).
+        return PhextParser.BuildDefaultExtensionId(fileName!);
     }
 
-    private static string BuildExtensionFileName(string extensionId)
+    /// <summary>
+    /// Builds the stored file name for an extension from its complete id (lower-cased, because ids are
+    /// case-insensitive). Ids whose first segment is a Windows device name such as "con" or "aux" get a prefix,
+    /// and a numeric suffix is added when another installed extension already uses the name.
+    /// </summary>
+    private static string BuildExtensionFileName(string? extensionId, IEnumerable<string>? unavailableFileNames = null)
     {
-        string id = extensionId.ToLowerInvariant();
-
-        if (string.IsNullOrWhiteSpace(id))
+        string baseName = (extensionId ?? string.Empty).Trim().ToLowerInvariant();
+        if (string.IsNullOrWhiteSpace(baseName))
         {
-            id = $"extension-{Guid.NewGuid():N}";
+            baseName = $"extension-{Guid.NewGuid():N}";
         }
 
-        return $"{id}.phext";
-    }
-
-    private static string NormalizeStoredExtensionFileName(string fileName, string extensionId)
-    {
-        string candidate = Path.GetFileName(fileName ?? string.Empty);
-        if (string.IsNullOrWhiteSpace(candidate) || !candidate.EndsWith(".phext", StringComparison.OrdinalIgnoreCase))
+        if (IsWindowsReservedFileName(baseName))
         {
-            return BuildExtensionFileName(extensionId);
+            baseName = $"ext-{baseName}";
+        }
+
+        HashSet<string>? unavailable = unavailableFileNames?
+            .Where(name => !string.IsNullOrWhiteSpace(name))
+            .ToHashSet(StringComparer.OrdinalIgnoreCase);
+
+        string candidate = $"{baseName}.phext";
+        for (int suffix = 2; unavailable is not null && unavailable.Contains(candidate); suffix++)
+        {
+            candidate = string.Create(CultureInfo.InvariantCulture, $"{baseName}-{suffix}.phext");
         }
 
         return candidate;
     }
 
+    private static bool IsWindowsReservedFileName(string fileNameWithoutExtension)
+    {
+        // Windows treats names such as "NUL.phext" or "con.tools.phext" as devices, so the source would be lost.
+        string firstSegment = fileNameWithoutExtension.Split('.')[0].TrimEnd(' ');
+        return WindowsReservedFileNames.Contains(firstSegment);
+    }
+
+    private static string NormalizeStoredExtensionFileName(string? fileName, string extensionId, IEnumerable<string>? unavailableFileNames = null)
+    {
+        string candidate = Path.GetFileName(fileName ?? string.Empty);
+        if (string.IsNullOrWhiteSpace(candidate) || !candidate.EndsWith(".phext", StringComparison.OrdinalIgnoreCase))
+        {
+            return BuildExtensionFileName(extensionId, unavailableFileNames);
+        }
+
+        return candidate;
+    }
+
+    /// <summary>
+    /// Re-imports keep the extension's current file (it is replaced atomically on Save); new imports get a name
+    /// derived from the complete id that no other installed extension uses, so one extension's source can never
+    /// overwrite another's.
+    /// </summary>
+    private static string ChooseImportedExtensionFileName(InstalledExtensionEntry entry, IEnumerable<InstalledExtensionEntry> allEntries)
+    {
+        HashSet<string> otherFileNames = allEntries
+            .Where(other => other is not null && !ReferenceEquals(other, entry) && !string.IsNullOrWhiteSpace(other.FileName))
+            .Select(other => NormalizeStoredExtensionFileName(other.FileName, other.Id))
+            .ToHashSet(StringComparer.OrdinalIgnoreCase);
+
+        string currentFileName = Path.GetFileName(entry.FileName ?? string.Empty);
+        if (!string.IsNullOrWhiteSpace(currentFileName) &&
+            currentFileName.EndsWith(".phext", StringComparison.OrdinalIgnoreCase) &&
+            !otherFileNames.Contains(currentFileName) &&
+            !IsWindowsReservedFileName(Path.GetFileNameWithoutExtension(currentFileName)))
+        {
+            return currentFileName;
+        }
+
+        return BuildExtensionFileName(entry.Id, otherFileNames);
+    }
+
+    /// <summary>
+    /// Name handed to the parser for an installed extension. The parser only uses it to derive an id for files
+    /// without meta.id, so it is based on the stored id rather than the stored file name (which can carry a
+    /// collision suffix or device-name prefix) and therefore always yields the same id again.
+    /// </summary>
+    private static string GetExtensionParserSourceName(InstalledExtensionEntry installed)
+    {
+        return IsValidExtensionIdentifier(installed.Id)
+            ? $"{installed.Id}.phext"
+            : installed.FileName;
+    }
+
     private void SaveSettings()
     {
+        // Another PhantomHaze window (or a manual edit) changed settings.json after this window read or wrote it.
+        // Everything the user changed here was already written when Settings was saved, so overwriting the file now
+        // would only throw away the other window's changes, such as extensions it installed.
+        if (HasSettingsFileChangedSinceLastAccess())
+        {
+            Log("settings.json was changed by another PhantomHaze window after this one loaded it, so it was not overwritten on exit.");
+            return;
+        }
+
         try
         {
-            string json = JsonSerializer.Serialize(
-                _settings,
-                new JsonSerializerOptions { WriteIndented = true });
-
-            File.WriteAllText(_settingsFilePath, json);
+            WriteSettingsFile(_settings);
         }
         catch (Exception ex)
         {
@@ -661,10 +875,122 @@ public class MainForm : Form
         }
     }
 
-    private void LoadInstalledExtensions()
+    /// <summary>
+    /// Writes settings.json atomically (temporary file + rename) so a crash or a full disk can never leave a
+    /// truncated file behind, which would reset every setting and orphan all installed extensions on the next
+    /// start. Throws on failure.
+    /// </summary>
+    private void WriteSettingsFile(AppSettings settings)
+    {
+        string json = JsonSerializer.Serialize(
+            settings,
+            new JsonSerializerOptions { WriteIndented = true });
+
+        string tempPath = BuildSidecarFilePath(_settingsFilePath, ".tmp");
+        try
+        {
+            File.WriteAllText(tempPath, json);
+            File.Move(tempPath, _settingsFilePath, overwrite: true);
+            _settingsFileStamp = ReadSettingsFileStamp();
+        }
+        finally
+        {
+            TryDeleteFile(tempPath);
+        }
+    }
+
+    private SettingsFileStamp? ReadSettingsFileStamp()
+    {
+        try
+        {
+            var info = new FileInfo(_settingsFilePath);
+            return info.Exists ? new SettingsFileStamp(info.LastWriteTimeUtc, info.Length) : null;
+        }
+        catch (Exception)
+        {
+            return null;
+        }
+    }
+
+    private bool HasSettingsFileChangedSinceLastAccess()
+    {
+        return ReadSettingsFileStamp() != _settingsFileStamp;
+    }
+
+    /// <summary>Reads and normalises the settings file as it is on disk now (null if it is missing or unreadable).</summary>
+    private AppSettings? TryReadSettingsFile()
+    {
+        try
+        {
+            if (!File.Exists(_settingsFilePath))
+            {
+                return null;
+            }
+
+            AppSettings? settings = JsonSerializer.Deserialize<AppSettings>(File.ReadAllText(_settingsFilePath));
+            if (settings is not null)
+            {
+                NormalizeSettings(settings);
+            }
+
+            return settings;
+        }
+        catch (Exception ex)
+        {
+            Log($"settings.json could not be re-read: {ex.Message}");
+            return null;
+        }
+    }
+
+    /// <summary>
+    /// Another PhantomHaze window can install or uninstall extensions while this one is open. Before this window
+    /// saves, extensions it never knew about are added to its draft, and extensions it knew about that are no longer
+    /// installed are dropped (unless they were imported again in this dialog), so neither window undoes the other.
+    /// Everything else in the draft is what the user just chose in this window and is kept as it is.
+    /// </summary>
+    private static void MergeExternalExtensionChanges(
+        AppSettings draft,
+        IEnumerable<InstalledExtensionEntry> knownWhenDialogOpened,
+        IEnumerable<InstalledExtensionEntry> currentlyOnDisk,
+        IEnumerable<string> extensionIdsImportedInDialog)
+    {
+        var known = knownWhenDialogOpened.Select(entry => entry.Id).ToHashSet(StringComparer.OrdinalIgnoreCase);
+        List<InstalledExtensionEntry> onDisk = currentlyOnDisk.Where(entry => entry is not null).ToList();
+        var onDiskIds = onDisk.Select(entry => entry.Id).ToHashSet(StringComparer.OrdinalIgnoreCase);
+        var imported = extensionIdsImportedInDialog.ToHashSet(StringComparer.OrdinalIgnoreCase);
+
+        draft.Extensions.RemoveAll(entry =>
+            known.Contains(entry.Id) && !onDiskIds.Contains(entry.Id) && !imported.Contains(entry.Id));
+
+        var draftIds = draft.Extensions.Select(entry => entry.Id).ToHashSet(StringComparer.OrdinalIgnoreCase);
+        var draftFileNames = draft.Extensions.Select(entry => entry.FileName).ToHashSet(StringComparer.OrdinalIgnoreCase);
+        foreach (InstalledExtensionEntry entry in onDisk)
+        {
+            if (known.Contains(entry.Id) || draftIds.Contains(entry.Id) || draftFileNames.Contains(entry.FileName))
+            {
+                continue;
+            }
+
+            draft.Extensions.Add(entry.Clone());
+            draftIds.Add(entry.Id);
+            draftFileNames.Add(entry.FileName);
+        }
+    }
+
+    private static string BuildSidecarFilePath(string targetPath, string suffix)
+    {
+        string directory = Path.GetDirectoryName(targetPath) ?? string.Empty;
+        return Path.Combine(directory, $".{Path.GetFileName(targetPath)}.{Guid.NewGuid():N}{suffix}");
+    }
+
+    /// <param name="shouldAnnounce">
+    /// Optional filter for which active extensions write their app.log startup messages (all of them when null).
+    /// </param>
+    private void LoadInstalledExtensions(Func<LoadedExtension, bool>? shouldAnnounce = null)
     {
         _loadedExtensions.Clear();
         _loadedExtensionById.Clear();
+        _reportedNonRunningExtensionScripts.Clear();
 
         foreach (InstalledExtensionEntry installed in _settings.Extensions)
         {
@@ -678,9 +1004,22 @@ public class MainForm : Form
             try
             {
                 string source = File.ReadAllText(extensionPath);
-                PhantomExtensionDefinition definition = PhextParser.Parse(source, installed.FileName);
+                PhantomExtensionDefinition definition = PhextParser.Parse(source, GetExtensionParserSourceName(installed));
                 if (!definition.Id.Equals(installed.Id, StringComparison.OrdinalIgnoreCase))
                 {
+                    // The file was edited on disk. If its new id belongs to another installed extension, this entry is
+                    // left untouched: renaming it would create a duplicate that the next settings normalisation drops,
+                    // orphaning its file and losing its setting values.
+                    bool idUsedByAnotherExtension = _settings.Extensions.Any(other =>
+                        !ReferenceEquals(other, installed) &&
+                        other.Id.Equals(definition.Id, StringComparison.OrdinalIgnoreCase));
+                    if (idUsedByAnotherExtension)
+                    {
+                        Log($"Extension '{installed.Id}' was not loaded: {installed.FileName} now declares the id " +
+                            $"'{definition.Id}', which another installed extension already uses.");
+                        continue;
+                    }
+
                     Log($"Extension id corrected from '{installed.Id}' to '{definition.Id}' based on {installed.FileName}.");
                     installed.Id = definition.Id;
                 }
@@ -701,10 +1040,16 @@ public class MainForm : Form
                 _loadedExtensionById[loaded.Definition.Id] = loaded;
                 _loadedExtensions.Add(loaded);
 
+                // app.log messages announce an extension starting, so disabled extensions stay silent.
+                if (!IsExtensionActive(loaded) || (shouldAnnounce is not null && !shouldAnnounce(loaded)))
+                {
+                    continue;
+                }
+
                 foreach (string startupMessage in loaded.Definition.StartupLogMessages)
                 {
                     string resolved = ResolveExtensionPlaceholders(startupMessage, loaded);
-                    Log($"[{loaded.Definition.Name}] {resolved}");
+                    Log($"[{NormalizeForLog(loaded.Definition.Name)}] {NormalizeForLog(resolved)}");
                 }
             }
             catch (Exception ex)
@@ -712,6 +1057,11 @@ public class MainForm : Form
                 Log($"Extension '{installed.Id}' failed to load from '{installed.FileName}': {ex.Message}");
             }
         }
+    }
+
+    private bool IsExtensionActive(LoadedExtension extension)
+    {
+        return _settings.ExtensionsEnabled && extension.Installation.Enabled;
     }
 
     private IEnumerable<LoadedExtension> GetEnabledExtensions()
@@ -726,24 +1076,7 @@ public class MainForm : Form
 
     private static bool TryParseBooleanSetting(string value, out bool parsed)
     {
-        if (value.Equals("true", StringComparison.OrdinalIgnoreCase) ||
-            value.Equals("yes", StringComparison.OrdinalIgnoreCase) ||
-            value.Equals("1", StringComparison.Ordinal))
-        {
-            parsed = true;
-            return true;
-        }
-
-        if (value.Equals("false", StringComparison.OrdinalIgnoreCase) ||
-            value.Equals("no", StringComparison.OrdinalIgnoreCase) ||
-            value.Equals("0", StringComparison.Ordinal))
-        {
-            parsed = false;
-            return true;
-        }
-
-        parsed = false;
-        return false;
+        return PhextParser.TryParseBoolean(value, out parsed);
     }
 
     private static bool TryNormalizeSettingValue(PhantomExtensionSettingDefinition setting, string? input, out string normalized)
@@ -767,11 +1100,11 @@ public class MainForm : Form
                 return true;
 
             case PhantomExtensionSettingType.Number:
-                if (!int.TryParse(
-                        candidate,
-                        System.Globalization.NumberStyles.Integer,
-                        System.Globalization.CultureInfo.InvariantCulture,
-                        out int number))
+                if (!int.TryParse(
+                        candidate,
+                        System.Globalization.NumberStyles.Integer,
+                        System.Globalization.CultureInfo.InvariantCulture,
+                        out int number))
                 {
                     return false;
                 }
@@ -786,7 +1119,7 @@ public class MainForm : Form
                     return false;
                 }
 
-                normalized = number.ToString(System.Globalization.CultureInfo.InvariantCulture);
+                normalized = number.ToString(System.Globalization.CultureInfo.InvariantCulture);
                 return true;
 
             case PhantomExtensionSettingType.Select:
@@ -812,6 +1145,12 @@ public class MainForm : Form
 
     private static string GetDefaultSettingValue(PhantomExtensionSettingDefinition setting)
     {
+        // Text defaults are kept exactly as declared, including "" and whitespace-only values.
+        if (setting.Type == PhantomExtensionSettingType.Text)
+        {
+            return setting.DefaultValue ?? string.Empty;
+        }
+
         if (string.IsNullOrWhiteSpace(setting.DefaultValue))
         {
             return setting.Type switch
@@ -827,10 +1166,9 @@ public class MainForm : Form
 
     private static void EnsureExtensionSettingValues(InstalledExtensionEntry installation, PhantomExtensionDefinition definition)
     {
-        installation.SettingValues ??= new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
-        if (installation.SettingValues.Comparer != StringComparer.OrdinalIgnoreCase)
+        if (installation.SettingValues is null || installation.SettingValues.Comparer != StringComparer.OrdinalIgnoreCase)
         {
-            installation.SettingValues = new Dictionary<string, string>(installation.SettingValues, StringComparer.OrdinalIgnoreCase);
+            installation.SettingValues = CreateSettingValueDictionary(installation.SettingValues);
         }
 
         HashSet<string> validKeys = definition.Settings
@@ -869,31 +1207,146 @@ public class MainForm : Form
 
     private void RebuildExtensionMenuButtons()
     {
-        foreach (Control control in _extensionMenuButtonsPanel.Controls.OfType<Control>().ToArray())
+        _extensionMenuButtonsPanel.SuspendLayout();
+        try
         {
-            control.Dispose();
-        }
-
-        _extensionMenuButtonsPanel.Controls.Clear();
-
-        foreach (LoadedExtension extension in GetEnabledExtensions())
-        {
-            foreach (PhantomExtensionAppButtonDefinition appButton in extension.Definition.AppButtons)
+            // The overflow button is permanent; only the per-extension buttons are recreated.
+            _extensionMenuButtonsPanel.Controls.Remove(_extensionMenuOverflowButton);
+            foreach (Control control in _extensionMenuButtonsPanel.Controls.OfType<Control>().ToArray())
             {
-                var button = new Button();
-                ConfigureMenuButton(button, appButton.Label);
-                button.MinimumSize = new Size(ScaleByDpi(64), 0);
-                button.Click += (_, _) => ExecuteExtensionAppButton(extension, appButton);
-                button.Tag = appButton;
-                _extensionMenuButtonsPanel.Controls.Add(button);
+                control.Dispose();
             }
+
+            _extensionMenuButtonsPanel.Controls.Clear();
+            _overflowedExtensionMenuButtons.Clear();
+
+            foreach (LoadedExtension extension in GetEnabledExtensions())
+            {
+                foreach (PhantomExtensionAppButtonDefinition appButton in extension.Definition.AppButtons)
+                {
+                    var button = new Button();
+                    ConfigureMenuButton(button, appButton.Label);
+                    button.MinimumSize = new Size(ScaleByDpi(64), 0);
+                    // Labels come from extensions: show '&' literally instead of turning it into a mnemonic.
+                    button.UseMnemonic = false;
+                    button.AccessibleName = string.IsNullOrWhiteSpace(appButton.Label) ? appButton.Id : appButton.Label;
+                    button.Click += (_, _) => ExecuteExtensionAppButton(extension, appButton);
+                    button.Tag = new ExtensionMenuCommand(extension, appButton);
+                    _extensionMenuButtonsPanel.Controls.Add(button);
+                }
+            }
+
+            ConfigureMenuButton(_extensionMenuOverflowButton, "»");
+            _extensionMenuOverflowButton.MinimumSize = new Size(ScaleByDpi(40), 0);
+            _extensionMenuOverflowButton.Visible = false;
+            _extensionMenuButtonsPanel.Controls.Add(_extensionMenuOverflowButton);
+        }
+        finally
+        {
+            _extensionMenuButtonsPanel.ResumeLayout(true);
         }
 
         ApplyThemeToDynamicExtensionControls();
+        UpdateExtensionMenuOverflow();
+    }
+
+    /// <summary>
+    /// Shows as many extension menu buttons as fit in the space left of Settings and moves the rest into the
+    /// overflow (») menu, so extension buttons can never push the built-in controls out of view.
+    /// </summary>
+    private void UpdateExtensionMenuOverflow()
+    {
+        if (_updatingExtensionMenuOverflow || _extensionMenuButtonsPanel.IsDisposed)
+        {
+            return;
+        }
+
+        _updatingExtensionMenuOverflow = true;
+        try
+        {
+            List<Button> buttons = _extensionMenuButtonsPanel.Controls
+                .OfType<Button>()
+                .Where(button => !ReferenceEquals(button, _extensionMenuOverflowButton))
+                .ToList();
+
+            _overflowedExtensionMenuButtons.Clear();
+            int available = _extensionMenuButtonsPanel.ClientSize.Width - _extensionMenuButtonsPanel.Padding.Horizontal;
+            int required = buttons.Sum(GetMenuButtonFootprint);
+            if (buttons.Count == 0 || available <= 0 || required <= available)
+            {
+                foreach (Button button in buttons)
+                {
+                    button.Visible = true;
+                }
+
+                _extensionMenuOverflowButton.Visible = false;
+                return;
+            }
+
+            int budget = available - GetMenuButtonFootprint(_extensionMenuOverflowButton);
+            int used = 0;
+            foreach (Button button in buttons)
+            {
+                int footprint = GetMenuButtonFootprint(button);
+                bool fits = _overflowedExtensionMenuButtons.Count == 0 && used + footprint <= budget;
+                button.Visible = fits;
+                if (fits)
+                {
+                    used += footprint;
+                }
+                else
+                {
+                    _overflowedExtensionMenuButtons.Add(button);
+                }
+            }
+
+            _extensionMenuOverflowButton.Visible = true;
+        }
+        finally
+        {
+            _updatingExtensionMenuOverflow = false;
+        }
+    }
+
+    private static int GetMenuButtonFootprint(Button button)
+    {
+        Size preferred = button.GetPreferredSize(Size.Empty);
+        return Math.Max(preferred.Width, button.MinimumSize.Width) + button.Margin.Horizontal;
+    }
+
+    private void ShowExtensionMenuOverflow()
+    {
+        foreach (ToolStripItem item in _extensionMenuOverflowMenu.Items.Cast<ToolStripItem>().ToArray())
+        {
+            item.Dispose();
+        }
+
+        _extensionMenuOverflowMenu.Items.Clear();
+        foreach (Button hiddenButton in _overflowedExtensionMenuButtons)
+        {
+            if (hiddenButton.IsDisposed || hiddenButton.Tag is not ExtensionMenuCommand command)
+            {
+                continue;
+            }
+
+            // '&' is doubled so menu items show extension labels literally, like the toolbar buttons do.
+            var item = new ToolStripMenuItem(hiddenButton.Text.Replace("&", "&&", StringComparison.Ordinal))
+            {
+                AccessibleName = hiddenButton.AccessibleName,
+            };
+            item.Click += (_, _) => ExecuteExtensionAppButton(command.Extension, command.AppButton);
+            _extensionMenuOverflowMenu.Items.Add(item);
+        }
+
+        if (_extensionMenuOverflowMenu.Items.Count > 0)
+        {
+            _extensionMenuOverflowMenu.Show(_extensionMenuOverflowButton, new Point(0, _extensionMenuOverflowButton.Height));
+        }
     }
 
     private void RebuildExtensionLauncherButtons()
     {
+        _extensionLauncherToolTip.RemoveAll();
         foreach (Button button in _extensionLauncherPanel.Controls.OfType<Button>().ToArray())
         {
             Image? icon = button.Image;
@@ -919,9 +1372,13 @@ public class MainForm : Form
                 FlatStyle = FlatStyle.Flat,
                 ImageAlign = ContentAlignment.MiddleCenter,
                 Text = string.Empty,
-                AccessibleName = extension.Definition.Name,
+                // Icon-only button: expose the extension's name to assistive technology and as a hover tooltip.
+                AccessibleName = extension.Definition.Name,
+                AccessibleDescription = $"Opens the {extension.Definition.Name} extension window.",
+                AccessibleRole = AccessibleRole.PushButton,
                 Tag = extension,
             };
+            _extensionLauncherToolTip.SetToolTip(button, extension.Definition.Name);
 
             Image icon = PhantomExtensionIconFactory.CreateIcon(extension.Definition.IconToken);
             button.Image = new Bitmap(icon, new Size(ScaleByDpi(20), ScaleByDpi(20)));
@@ -962,107 +1419,176 @@ public class MainForm : Form
     private void ExecuteExtensionAppButton(LoadedExtension extension, PhantomExtensionAppButtonDefinition appButton)
     {
         string resolvedMessage = ResolveExtensionPlaceholders(appButton.Message, extension);
-        Log($"[{extension.Definition.Name}] {appButton.Label}: {resolvedMessage}");
+        Log($"[{NormalizeForLog(extension.Definition.Name)}] {NormalizeForLog(appButton.Label)}: {NormalizeForLog(resolvedMessage)}");
 
-        MessageBox.Show(
+        // The message can contain the user's setting values, so the dialog is protected like the app's windows.
+        ShowCaptureProtectedDialog(() => MessageBox.Show(
             this,
             resolvedMessage,
             extension.Definition.Name,
             MessageBoxButtons.OK,
-            MessageBoxIcon.Information);
+            MessageBoxIcon.Information));
     }
 
-    private string ResolveExtensionPlaceholders(string template, LoadedExtension extension)
+    /// <summary>
+    /// Resolves {{extension.*}} / {{setting.*}} placeholders in one pass (values are never re-scanned), encoding
+    /// the inserted values for the context the template is used in.
+    /// </summary>
+    private static string ResolveExtensionPlaceholders(
+        string template,
+        LoadedExtension extension,
+        PhantomExtensionPlaceholderContext context = PhantomExtensionPlaceholderContext.PlainText)
     {
-        if (string.IsNullOrEmpty(template))
-        {
-            return string.Empty;
-        }
-
-        string resolved = template
-            .Replace("{{extension.id}}", extension.Definition.Id, StringComparison.OrdinalIgnoreCase)
-            .Replace("{{extension.name}}", extension.Definition.Name, StringComparison.OrdinalIgnoreCase)
-            .Replace("{{extension.version}}", extension.Definition.Version, StringComparison.OrdinalIgnoreCase);
-
-        foreach ((string key, string value) in extension.Installation.SettingValues)
-        {
-            resolved = resolved.Replace($"{{{{setting.{key}}}}}", value, StringComparison.OrdinalIgnoreCase);
-        }
-
-        return resolved;
+        return PhantomExtensionPlaceholders.Resolve(
+            template,
+            extension.Definition,
+            extension.Installation.SettingValues,
+            context);
     }
 
     private void OpenExtensionUiWindow(LoadedExtension extension)
     {
-        if (!_settings.ExtensionsEnabled || !extension.Installation.Enabled || !extension.Definition.Ui.HasUi)
+        if (!IsExtensionActive(extension) || !extension.Definition.Ui.HasUi)
         {
             return;
         }
 
-        if (_openExtensionWindowsById.TryGetValue(extension.Definition.Id, out Form? existingWindow) &&
-            !existingWindow.IsDisposed)
+        string windowKey = extension.Definition.Id;
+        if (_openExtensionWindowsById.TryGetValue(windowKey, out ExtensionWindowState? existing))
         {
-            existingWindow.Activate();
-            return;
+            if (!existing.Window.IsDisposed)
+            {
+                // The window has no taskbar button, so a minimised window must be restored from here.
+                if (existing.Window.WindowState == FormWindowState.Minimized)
+                {
+                    existing.Window.WindowState = FormWindowState.Normal;
+                }
+
+                existing.Window.Activate();
+                return;
+            }
+
+            _openExtensionWindowsById.Remove(windowKey);
         }
 
         var extensionWindow = new Form
         {
             Text = extension.Definition.Ui.Title,
             StartPosition = FormStartPosition.CenterParent,
-            ClientSize = new Size(
-                ScaleByDpi(Math.Clamp(extension.Definition.Ui.Width, 320, 2000)),
-                ScaleByDpi(Math.Clamp(extension.Definition.Ui.Height, 240, 1400))),
+            ClientSize = GetExtensionWindowClientSize(extension.Definition.Ui),
             MinimizeBox = true,
             MaximizeBox = true,
             ShowInTaskbar = false,
             AutoScaleMode = AutoScaleMode.Dpi,
-            BackColor = IsDarkTheme() ? Color.FromArgb(38, 44, 52) : Color.White,
+            BackColor = GetExtensionWindowBackColor(),
         };
 
-        _openExtensionWindowsById[extension.Definition.Id] = extensionWindow;
+        var state = new ExtensionWindowState(extensionWindow, extension);
+        _openExtensionWindowsById[windowKey] = state;
+
+        // Registered before the handle exists, so capture protection is in place before the window is first shown
+        // and follows every later protection change.
+        RegisterProtectedAuxiliaryWindow(extensionWindow, $"Extension '{extension.Definition.Name}'");
+
         extensionWindow.FormClosed += (_, _) =>
         {
-            _openExtensionWindowsById.Remove(extension.Definition.Id);
+            if (_openExtensionWindowsById.TryGetValue(windowKey, out ExtensionWindowState? current) &&
+                ReferenceEquals(current, state))
+            {
+                _openExtensionWindowsById.Remove(windowKey);
+            }
         };
 
-        extensionWindow.Shown += async (_, _) =>
-        {
-            ApplyProtectionToSettingsWindow(extensionWindow);
-            await LoadExtensionWindowContentAsync(extensionWindow, extension);
-        };
-
+        extensionWindow.Shown += (_, _) => _ = InitializeExtensionWindowAsync(state);
         extensionWindow.Show(this);
     }
 
-    private async Task LoadExtensionWindowContentAsync(Form extensionWindow, LoadedExtension extension)
+    private Size GetExtensionWindowClientSize(PhantomExtensionUiDefinition ui)
     {
-        string html = BuildExtensionUiDocument(extension);
-        var webView = new WebView2
-        {
-            Dock = DockStyle.Fill,
-        };
+        int width = ScaleByDpi(Math.Clamp(ui.Width, 320, 2000));
+        int height = ScaleByDpi(Math.Clamp(ui.Height, 240, 1400));
 
-        extensionWindow.Controls.Clear();
-        extensionWindow.Controls.Add(webView);
+        // Keep the window (and its frame) on screen even for large ui.size values at high DPI.
+        Rectangle workingArea = Screen.FromControl(this).WorkingArea;
+        width = Math.Min(width, Math.Max(ScaleByDpi(320), workingArea.Width - ScaleByDpi(40)));
+        height = Math.Min(height, Math.Max(ScaleByDpi(240), workingArea.Height - ScaleByDpi(80)));
+        return new Size(width, height);
+    }
+
+    private Color GetExtensionWindowBackColor()
+    {
+        return IsDarkTheme() ? Color.FromArgb(38, 44, 52) : Color.White;
+    }
+
+    private async Task InitializeExtensionWindowAsync(ExtensionWindowState state)
+    {
+        Form window = state.Window;
+        if (window.IsDisposed || state.WebView is not null || state.FallbackBox is not null)
+        {
+            return;
+        }
 
         try
         {
+            var webView = new WebView2
+            {
+                Dock = DockStyle.Fill,
+            };
+
+            state.WebView = webView;
+            window.Controls.Add(webView);
+
             CoreWebView2Environment environment = _webEnvironment ??
                 await CoreWebView2Environment.CreateAsync(
                     browserExecutableFolder: null,
                     userDataFolder: _webSessionPath,
                     options: new CoreWebView2EnvironmentOptions("--inprivate"));
 
+            // The window (or the whole app) can be closed while WebView2 is still starting up.
+            if (window.IsDisposed || webView.IsDisposed)
+            {
+                return;
+            }
+
             await webView.EnsureCoreWebView2Async(environment);
-            webView.CoreWebView2.Settings.AreDevToolsEnabled = false;
-            webView.CoreWebView2.Settings.AreDefaultContextMenusEnabled = true;
-            webView.CoreWebView2.NavigateToString(html);
+            if (window.IsDisposed || webView.IsDisposed || webView.CoreWebView2 is null)
+            {
+                return;
+            }
+
+            CoreWebView2 core = webView.CoreWebView2;
+            core.Settings.AreDevToolsEnabled = false;
+            core.Settings.AreDefaultContextMenusEnabled = true;
+            core.NewWindowRequested += OnExtensionWindowNewWindowRequested;
+            // The window only ever shows the extension's own UI: links that would navigate it to a web page open
+            // in a protected tab instead, and web.block rules apply to everything the UI itself loads.
+            core.NavigationStarting += OnExtensionWindowNavigationStarting;
+            core.WebResourceRequested += OnExtensionWindowWebResourceRequested;
+            AddWebResourceRequestedFilterForAllFrames(core);
+            RenderExtensionWindow(state);
         }
         catch (Exception ex)
         {
-            webView.Dispose();
-            extensionWindow.Controls.Clear();
+            if (window.IsDisposed)
+            {
+                return;
+            }
+
+            Log($"Extension UI failed for '{state.Extension.Definition.Id}': {ex.Message}");
+            ShowExtensionWindowFallback(state);
+        }
+    }
+
+    private void ShowExtensionWindowFallback(ExtensionWindowState state)
+    {
+        try
+        {
+            if (state.WebView is not null)
+            {
+                state.Window.Controls.Remove(state.WebView);
+                state.WebView.Dispose();
+                state.WebView = null;
+            }
 
             var fallbackBox = new RichTextBox
             {
@@ -1070,35 +1596,218 @@ public class MainForm : Form
                 ReadOnly = true,
                 WordWrap = true,
                 BorderStyle = BorderStyle.None,
-                BackColor = IsDarkTheme() ? Color.FromArgb(31, 36, 43) : Color.White,
-                ForeColor = IsDarkTheme() ? Color.FromArgb(228, 236, 247) : Color.Black,
-                Text = $"Extension UI fallback for '{extension.Definition.Name}'\n\n" +
-                       "WebView2 could not be initialized for this window.\n\n" +
-                       ResolveExtensionPlaceholders(extension.Definition.Ui.Html, extension),
             };
 
-            extensionWindow.Controls.Add(fallbackBox);
-            Log($"Extension UI failed for '{extension.Definition.Id}': {ex.Message}");
+            state.FallbackBox = fallbackBox;
+            state.RenderedContent = null;
+            state.Window.Controls.Add(fallbackBox);
+            RenderExtensionWindow(state);
+        }
+        catch (Exception ex)
+        {
+            Log($"Extension UI fallback failed for '{state.Extension.Definition.Id}': {ex.Message}");
+        }
+    }
+
+    /// <summary>
+    /// Renders an extension window from its current LoadedExtension. Content is reloaded only when it actually
+    /// changed (settings, extension source or theme), so unrelated Settings saves do not reset the extension UI.
+    /// </summary>
+    private void RenderExtensionWindow(ExtensionWindowState state)
+    {
+        Form window = state.Window;
+        if (window.IsDisposed)
+        {
+            return;
+        }
+
+        LoadedExtension extension = state.Extension;
+        window.Text = extension.Definition.Ui.Title;
+        window.BackColor = GetExtensionWindowBackColor();
+
+        if (state.FallbackBox is { IsDisposed: false } fallbackBox)
+        {
+            fallbackBox.BackColor = IsDarkTheme() ? Color.FromArgb(31, 36, 43) : Color.White;
+            fallbackBox.ForeColor = IsDarkTheme() ? Color.FromArgb(228, 236, 247) : Color.Black;
+            string fallbackText = $"Extension UI fallback for '{extension.Definition.Name}'\n\n" +
+                                  "The extension UI could not be displayed with WebView2.\n\n" +
+                                  ResolveExtensionPlaceholders(extension.Definition.Ui.Html, extension);
+            if (!string.Equals(fallbackText, state.RenderedContent, StringComparison.Ordinal))
+            {
+                fallbackBox.Text = fallbackText;
+                state.RenderedContent = fallbackText;
+            }
+
+            return;
+        }
+
+        CoreWebView2? core = state.WebView is { IsDisposed: false } webView ? webView.CoreWebView2 : null;
+        if (core is null)
+        {
+            // Still initialising: InitializeExtensionWindowAsync renders the latest state once WebView2 is ready.
+            return;
+        }
+
+        string html = BuildExtensionUiDocument(extension);
+        if (string.Equals(html, state.RenderedContent, StringComparison.Ordinal))
+        {
+            return;
+        }
+
+        core.NavigateToString(html);
+        state.RenderedContent = html;
+    }
+
+    /// <summary>
+    /// Runs after Settings were saved and the extensions reloaded: windows of extensions that were disabled,
+    /// uninstalled or no longer have a UI are closed; the others are re-rendered with the new settings, source
+    /// and theme.
+    /// </summary>
+    private void RefreshOpenExtensionWindows()
+    {
+        foreach ((string extensionId, ExtensionWindowState state) in _openExtensionWindowsById.ToArray())
+        {
+            if (state.Window.IsDisposed)
+            {
+                _openExtensionWindowsById.Remove(extensionId);
+                continue;
+            }
+
+            if (!_loadedExtensionById.TryGetValue(extensionId, out LoadedExtension? current) ||
+                !IsExtensionActive(current) ||
+                !current.Definition.Ui.HasUi)
+            {
+                state.Window.Close();
+                continue;
+            }
+
+            state.Extension = current;
+            try
+            {
+                RenderExtensionWindow(state);
+            }
+            catch (Exception ex)
+            {
+                Log($"Extension UI refresh failed for '{extensionId}': {ex.Message}");
+            }
+        }
+    }
+
+    private void OnExtensionWindowNewWindowRequested(object? sender, CoreWebView2NewWindowRequestedEventArgs e)
+    {
+        // Never let WebView2 open its own popup window: it would be a separate top-level window outside
+        // PhantomHaze's control and not excluded from screen capture. Web links open in a protected tab instead.
+        e.Handled = true;
+        OpenExtensionWindowLinkInTab(e.Uri, e.IsUserInitiated, "popup");
+    }
+
+    private void OnExtensionWindowNavigationStarting(object? sender, CoreWebView2NavigationStartingEventArgs e)
+    {
+        // The extension UI is a NavigateToString document; same-page (#fragment), about: and data: navigations keep
+        // it. A web page or local file would replace the UI in a window that has no way back, so those navigations
+        // are cancelled and web links the user clicked open in a protected tab.
+        string requestedUri = e.Uri ?? string.Empty;
+        bool replacesExtensionUi =
+            requestedUri.StartsWith("http:", StringComparison.OrdinalIgnoreCase) ||
+            requestedUri.StartsWith("https:", StringComparison.OrdinalIgnoreCase) ||
+            requestedUri.StartsWith("file:", StringComparison.OrdinalIgnoreCase);
+        if (!replacesExtensionUi)
+        {
+            return;
+        }
+
+        e.Cancel = true;
+        OpenExtensionWindowLinkInTab(requestedUri, e.IsUserInitiated, "navigation");
+    }
+
+    private void OnExtensionWindowWebResourceRequested(object? sender, CoreWebView2WebResourceRequestedEventArgs e)
+    {
+        if (sender is not CoreWebView2 core ||
+            !TryGetBlockingExtensionRule(e.Request.Uri, out LoadedExtension? blockingExtension, out PhantomExtensionWebBlockDefinition? blockingRule))
+        {
+            return;
+        }
+
+        e.Response = CreateBlockedResourceResponse(core);
+        Log($"Extension window request blocked by extension {NormalizeForLog(blockingExtension!.Definition.Name)} " +
+            $"({blockingRule!.Id}): {TrimForLog(e.Request.Uri, 220)}");
+    }
+
+    /// <summary>Opens an http(s) link from an extension window in a new protected tab if the user clicked it.</summary>
+    private void OpenExtensionWindowLinkInTab(string? requestedUri, bool isUserInitiated, string kind)
+    {
+        requestedUri ??= string.Empty;
+        if (!isUserInitiated ||
+            !Uri.TryCreate(requestedUri, UriKind.Absolute, out Uri? uri) ||
+            (!uri.Scheme.Equals(Uri.UriSchemeHttp, StringComparison.OrdinalIgnoreCase) &&
+             !uri.Scheme.Equals(Uri.UriSchemeHttps, StringComparison.OrdinalIgnoreCase)))
+        {
+            Log($"Blocked a {kind} from an extension window: {TrimForLog(requestedUri, 220)}");
+            return;
+        }
+
+        string url = uri.AbsoluteUri;
+        try
+        {
+            BeginInvoke(new Action(() => _ = OpenUrlInNewTabAsync(url)));
+        }
+        catch (Exception ex) when (ex is ObjectDisposedException or InvalidOperationException)
+        {
+            // The main window is closing; ignore the late request.
+        }
+    }
+
+    private async Task OpenUrlInNewTabAsync(string url)
+    {
+        try
+        {
+            BrowserTab? tab = await CreateTabAsync(url, activate: true);
+            if (tab is null || IsDisposed)
+            {
+                return;
+            }
+
+            if (!_webViewModeEnabled)
+            {
+                await SetWebViewModeAsync(enableWebView: true);
+            }
+
+            if (WindowState == FormWindowState.Minimized)
+            {
+                WindowState = FormWindowState.Normal;
+            }
+
+            Activate();
+            Log($"Extension window link opened in a new tab: {url}");
+        }
+        catch (Exception ex)
+        {
+            Log($"Opening an extension window link failed: {ex.Message}");
         }
     }
 
     private string BuildExtensionUiDocument(LoadedExtension extension)
     {
-        string resolvedHtml = ResolveExtensionPlaceholders(extension.Definition.Ui.Html, extension);
-        if (resolvedHtml.Contains("<html", StringComparison.OrdinalIgnoreCase))
+        // Placeholder values are user-entered text, not markup, so they are HTML-encoded here.
+        string resolvedHtml = ResolveExtensionPlaceholders(
+            extension.Definition.Ui.Html,
+            extension,
+            PhantomExtensionPlaceholderContext.Html);
+        if (extension.Definition.Ui.Html.Contains("<html", StringComparison.OrdinalIgnoreCase))
         {
             return resolvedHtml;
         }
 
         string textColor = IsDarkTheme() ? "#E4ECF7" : "#111111";
         string backColor = IsDarkTheme() ? "#262C34" : "#FFFFFF";
+        string encodedTitle = WebUtility.HtmlEncode(extension.Definition.Ui.Title);
         return $$"""
 <!doctype html>
 <html>
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>{{extension.Definition.Ui.Title}}</title>
+  <title>{{encodedTitle}}</title>
   <style>
     body {
       margin: 0;
@@ -1233,6 +1942,8 @@ public class MainForm : Form
     {
         BuildMenuBar();
         BuildProtectionDisableMenu();
+        ProtectPopupMenuFromCapture(_disableProtectionMenu);
+        ProtectPopupMenuFromCapture(_extensionMenuOverflowMenu);
 
         _statusLabel.Dock = DockStyle.Top;
         _statusLabel.Height = 34;
@@ -1297,10 +2008,13 @@ public class MainForm : Form
         _menuBarPanel.MinimumSize = new Size(0, ScaleByDpi(52));
         _menuBarPanel.Padding = ScalePadding(12, 8, 12, 8);
 
+        // Extension buttons live in the stretching column (where the spacer used to be), so however many buttons
+        // extensions add, the built-in controls - Settings in particular - always keep their space. Buttons that
+        // do not fit are moved into an overflow (») menu by UpdateExtensionMenuOverflow.
         var menuLayout = new TableLayoutPanel
         {
             Dock = DockStyle.Fill,
-            ColumnCount = 6,
+            ColumnCount = 5,
             RowCount = 1,
             Margin = new Padding(0),
             Padding = new Padding(0),
@@ -1308,7 +2022,6 @@ public class MainForm : Form
             AutoSizeMode = AutoSizeMode.GrowAndShrink,
         };
         menuLayout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
-        menuLayout.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
         menuLayout.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
         menuLayout.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
         menuLayout.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
@@ -1356,6 +2069,14 @@ public class MainForm : Form
         _extensionMenuButtonsPanel.Margin = new Padding(0);
         _extensionMenuButtonsPanel.Padding = new Padding(0);
         _extensionMenuButtonsPanel.FlowDirection = FlowDirection.LeftToRight;
+        _extensionMenuButtonsPanel.SizeChanged += (_, _) => UpdateExtensionMenuOverflow();
+
+        ConfigureMenuButton(_extensionMenuOverflowButton, "»");
+        _extensionMenuOverflowButton.MinimumSize = new Size(ScaleByDpi(40), 0);
+        _extensionMenuOverflowButton.UseMnemonic = false;
+        _extensionMenuOverflowButton.Visible = false;
+        _extensionMenuOverflowButton.AccessibleName = "More extension buttons";
+        _extensionMenuOverflowButton.Click += (_, _) => ShowExtensionMenuOverflow();
 
         _settingsButton.Text = "Settings";
         _settingsButton.AutoSize = true;
@@ -1373,8 +2094,7 @@ public class MainForm : Form
         menuLayout.Controls.Add(_logsViewButton, 1, 0);
         menuLayout.Controls.Add(_webViewToggleButton, 2, 0);
         menuLayout.Controls.Add(_extensionMenuButtonsPanel, 3, 0);
-        menuLayout.Controls.Add(new Panel { Dock = DockStyle.Fill }, 4, 0);
-        menuLayout.Controls.Add(_settingsButton, 5, 0);
+        menuLayout.Controls.Add(_settingsButton, 4, 0);
 
         _menuBarPanel.Controls.Add(menuLayout);
     }
@@ -1413,7 +2133,9 @@ public class MainForm : Form
         _extensionLauncherPanel.Visible = false;
         _extensionLauncherPanel.AutoSize = true;
         _extensionLauncherPanel.AutoSizeMode = AutoSizeMode.GrowAndShrink;
-        _extensionLauncherPanel.WrapContents = false;
+        // With a height limit (set in PositionExtensionLauncherPanel) many launchers wrap into extra columns
+        // instead of running off the top of the content area.
+        _extensionLauncherPanel.WrapContents = true;
         _extensionLauncherPanel.FlowDirection = FlowDirection.TopDown;
         _extensionLauncherPanel.Padding = new Padding(0);
         _extensionLauncherPanel.Margin = new Padding(0);
@@ -1422,14 +2144,28 @@ public class MainForm : Form
 
     private void PositionExtensionLauncherPanel()
     {
-        if (_contentHostPanel.IsDisposed)
+        if (_contentHostPanel.IsDisposed || _extensionLauncherPanel.IsDisposed)
         {
             return;
         }
 
-        Size preferred = _extensionLauncherPanel.PreferredSize;
         int margin = ScaleByDpi(12);
-        int x = Math.Max(margin, _contentHostPanel.ClientSize.Width - preferred.Width - margin);
+        int availableHeight = Math.Max(ScaleByDpi(48), _contentHostPanel.ClientSize.Height - (margin * 2));
+        if (_extensionLauncherPanel.MaximumSize.Height != availableHeight)
+        {
+            _extensionLauncherPanel.MaximumSize = new Size(0, availableHeight);
+        }
+
+        Size preferred = _extensionLauncherPanel.PreferredSize;
+
+        // Stay clear of the history/favourites panel while it is open on the right-hand side.
+        int rightEdge = _contentHostPanel.ClientSize.Width;
+        if (_historyPanel.Visible)
+        {
+            rightEdge -= _historyPanel.Width;
+        }
+
+        int x = Math.Max(margin, rightEdge - preferred.Width - margin);
         int y = Math.Max(margin, _contentHostPanel.ClientSize.Height - preferred.Height - margin);
         _extensionLauncherPanel.Location = new Point(x, y);
 
@@ -1437,6 +2173,26 @@ public class MainForm : Form
         {
             _extensionLauncherPanel.BringToFront();
         }
+    }
+
+    /// <summary>
+    /// Drop-down menus are separate top-level windows, so the main window's capture exclusion does not cover them.
+    /// The current protection state is applied when the menu window is created (before it is first shown) and
+    /// again every time it opens, because protection can change in between.
+    /// </summary>
+    private void ProtectPopupMenuFromCapture(ToolStripDropDown menu)
+    {
+        void ApplyCurrentProtection()
+        {
+            if (!menu.IsDisposed && menu.IsHandleCreated)
+            {
+                // Best effort: a failure leaves the menu capturable but must not stop it from opening.
+                _ = NativeMethods.ExcludeFromCapture(menu.Handle, _protectionEnabled);
+            }
+        }
+
+        menu.HandleCreated += (_, _) => ApplyCurrentProtection();
+        menu.Opening += (_, _) => ApplyCurrentProtection();
     }
 
     private void BuildProtectionDisableMenu()
@@ -1712,6 +2468,7 @@ public class MainForm : Form
         historyLayout.Controls.Add(_historyClearButton, 0, 4);
 
         _historyPanel.Controls.Add(historyLayout);
+        _historyPanel.VisibleChanged += (_, _) => PositionExtensionLauncherPanel();
 
         RefreshHistoryPanelItems();
         RefreshFavoritesPanelItems();
@@ -1845,6 +2602,8 @@ public class MainForm : Form
             _webViewHostPanel.Visible = false;
             _logBox.Visible = true;
             _logBox.BringToFront();
+            // BringToFront put the log box above the extension launcher; restore the launcher on top.
+            PositionExtensionLauncherPanel();
             UpdateTabVisibilityAndRendering();
             UpdateWebViewToggleVisual();
             UpdateZoomControlsForActiveTab();
@@ -2002,11 +2761,11 @@ public class MainForm : Form
         catch (Exception ex)
         {
             Log($"Web View initialization failed: {ex.Message}");
-            MessageBox.Show(
+            ShowCaptureProtectedDialog(() => MessageBox.Show(
                 "Web View could not be initialized. Install Microsoft Edge WebView2 Runtime on the Windows host.",
                 "PhantomHaze",
                 MessageBoxButtons.OK,
-                MessageBoxIcon.Warning);
+                MessageBoxIcon.Warning));
         }
     }
 
@@ -2045,10 +2804,11 @@ public class MainForm : Form
             await webView.EnsureCoreWebView2Async(_webEnvironment);
             CoreWebView2 core = webView.CoreWebView2;
             ConfigureCoreSettings(core);
-            core.AddWebResourceRequestedFilter("*", CoreWebView2WebResourceContext.All);
+            AddWebResourceRequestedFilterForAllFrames(core);
             AttachCoreHandlers(core);
             await core.AddScriptToExecuteOnDocumentCreatedAsync(BuildFindShortcutBridgeScript());
             _tabByCore[core] = tab;
+            EnsureWorkerRequestFilter(core);
 
             if (!_sessionDataCleared)
             {
@@ -2062,11 +2822,11 @@ public class MainForm : Form
         {
             Log($"Web tab initialization failed: {ex.Message}");
             RemoveTabAndDispose(tab);
-            MessageBox.Show(
+            ShowCaptureProtectedDialog(() => MessageBox.Show(
                 "A browser tab could not be created. Install Microsoft Edge WebView2 Runtime on the Windows host.",
                 "PhantomHaze",
                 MessageBoxButtons.OK,
-                MessageBoxIcon.Warning);
+                MessageBoxIcon.Warning));
             UpdateTabLayout();
             return null;
         }
@@ -2147,6 +2907,72 @@ public class MainForm : Form
         header.Controls.Add(closeButton);
         header.Controls.Add(faviconBox);
         return header;
+    }
+
+    private void AddWebResourceRequestedFilterForAllFrames(CoreWebView2 core)
+    {
+        try
+        {
+            // The two-argument overload is deprecated: it only reports requests from the main frame and same-origin
+            // iframes, so web.block rules were never applied to cross-origin iframes. Document covers the page, all of
+            // its iframes and their dedicated workers; service and shared workers have their own filter
+            // (EnsureWorkerRequestFilter).
+            core.AddWebResourceRequestedFilter(
+                "*",
+                CoreWebView2WebResourceContext.All,
+                CoreWebView2WebResourceRequestSourceKinds.Document);
+        }
+        catch (Exception ex) when (ex is NotImplementedException or InvalidCastException)
+        {
+            Log("This WebView2 runtime cannot filter requests from all frames; extension blocking covers the main frame only.");
+            core.AddWebResourceRequestedFilter("*", CoreWebView2WebResourceContext.All);
+        }
+    }
+
+    /// <summary>
+    /// Service and shared workers do not belong to one WebView: WebView2 raises their requests on every CoreWebView2
+    /// that has a matching filter. The worker filter is therefore kept on exactly one tab, so web.block applies to
+    /// worker requests without every tab handling (and logging) each of them.
+    /// </summary>
+    private void EnsureWorkerRequestFilter(CoreWebView2 candidate)
+    {
+        if (_workerRequestFilterCore is not null || _workerRequestFilterUnavailable)
+        {
+            return;
+        }
+
+        try
+        {
+            candidate.AddWebResourceRequestedFilter(
+                "*",
+                CoreWebView2WebResourceContext.All,
+                CoreWebView2WebResourceRequestSourceKinds.ServiceWorker | CoreWebView2WebResourceRequestSourceKinds.SharedWorker);
+            _workerRequestFilterCore = candidate;
+        }
+        catch (Exception ex) when (ex is NotImplementedException or InvalidCastException or ArgumentException)
+        {
+            _workerRequestFilterUnavailable = true;
+            Log("This WebView2 runtime cannot filter service or shared worker requests; extension blocking does not cover them.");
+        }
+    }
+
+    private void MoveWorkerRequestFilterToAnotherTab()
+    {
+        foreach (BrowserTab remaining in _tabs)
+        {
+            try
+            {
+                if (remaining.WebView.CoreWebView2 is CoreWebView2 candidate)
+                {
+                    EnsureWorkerRequestFilter(candidate);
+                    return;
+                }
+            }
+            catch (Exception ex) when (ex is ObjectDisposedException or InvalidOperationException)
+            {
+                // That tab is closing or its browser process has gone; try the next one.
+            }
+        }
     }
 
     private void ConfigureCoreSettings(CoreWebView2 core)
@@ -2296,6 +3122,7 @@ public class MainForm : Form
                     _webViewHostPanel.Visible = false;
                     _logBox.Visible = true;
                     _logBox.BringToFront();
+                    PositionExtensionLauncherPanel();
                     UpdateTabVisibilityAndRendering();
                     UpdateNavigationButtons();
                     UpdateFavoriteButtonState();
@@ -2331,9 +3158,18 @@ public class MainForm : Form
             CoreWebView2 core = tab.WebView.CoreWebView2;
             DetachCoreHandlers(core);
             _tabByCore.Remove(core);
+            if (ReferenceEquals(core, _workerRequestFilterCore))
+            {
+                _workerRequestFilterCore = null;
+            }
         }
 
         _tabs.Remove(tab);
+        if (_workerRequestFilterCore is null)
+        {
+            MoveWorkerRequestFilterToAnotherTab();
+        }
+
         if (ReferenceEquals(_activeTab, tab))
         {
             _activeTab = null;
@@ -2463,7 +3299,7 @@ public class MainForm : Form
         NavigateTabToUrl(
             _activeTab,
             targetUrl,
-            isSearchQuery ? $"Search requested ({_settings.DefaultSearchEngine})" : "Navigate requested");
+            isSearchQuery ? $"Search requested ({GetEffectiveSearchEngine()})" : "Navigate requested");
     }
 
     private void NavigateTabToUrl(BrowserTab tab, string normalizedUrl, string reason)
@@ -2706,10 +3542,18 @@ public class MainForm : Form
 
     private string? GetExtensionStartPageOverride()
     {
-        LoadedExtension? extension = GetEnabledExtensions()
-            .FirstOrDefault(current => !string.IsNullOrWhiteSpace(current.Definition.StartPageOverride));
+        // Only valid http(s) overrides count: an invalid app.startpage must not replace the user's own start page
+        // with the built-in default.
+        foreach (LoadedExtension extension in GetEnabledExtensions())
+        {
+            string candidate = extension.Definition.StartPageOverride;
+            if (!string.IsNullOrWhiteSpace(candidate) && TryNormalizeUrl(candidate, out string normalized))
+            {
+                return normalized;
+            }
+        }
 
-        return extension?.Definition.StartPageOverride;
+        return null;
     }
 
     private PhantomExtensionSearchEngine? GetExtensionSearchEngineOverride()
@@ -2898,6 +3742,7 @@ public class MainForm : Form
 
         tab.CurrentUrl = e.Uri;
         tab.IsNavigationPending = true;
+        tab.NavigationSequence++;
         if (_webViewModeEnabled && ReferenceEquals(_activeTab, tab))
         {
             _addressBarTextBox.Text = e.Uri;
@@ -2915,6 +3760,7 @@ public class MainForm : Form
         }
 
         tab.IsNavigationPending = false;
+        int navigationSequence = tab.NavigationSequence;
 
         try
         {
@@ -2931,7 +3777,7 @@ public class MainForm : Form
                 }
 
                 RefreshTabTitle(tab);
-                await ApplyExtensionWebContentAsync(tab, currentUrl);
+                await ApplyExtensionWebContentAsync(tab, navigationSequence);
                 await RefreshTabFaviconAsync(tab);
                 Log($"Tab {tab.Id} navigation completed: {currentUrl}");
                 await LogCookieJarSnapshotAsync(currentUrl, tab);
@@ -3172,12 +4018,65 @@ public class MainForm : Form
     {
         try
         {
-            using HttpResponseMessage response = await _faviconHttpClient.GetAsync(url);
-            if (!response.IsSuccessStatusCode)
+            const int maximumRedirects = 5;
+            string requestUrl = url;
+            for (int redirect = 0; ; redirect++)
             {
-                return null;
-            }
+                if (!Uri.TryCreate(requestUrl, UriKind.Absolute, out Uri? requestUri) ||
+                    (!requestUri.Scheme.Equals(Uri.UriSchemeHttp, StringComparison.OrdinalIgnoreCase) &&
+                     !requestUri.Scheme.Equals(Uri.UriSchemeHttps, StringComparison.OrdinalIgnoreCase)))
+                {
+                    return null;
+                }
 
+                // Favicons are downloaded by PhantomHaze itself rather than by WebView2, so extension block rules
+                // have to be applied here as well, including to redirect targets.
+                if (TryGetBlockingExtensionRule(requestUri.AbsoluteUri, out _, out _))
+                {
+                    return null;
+                }
+
+                using HttpResponseMessage response = await _faviconHttpClient.GetAsync(requestUri);
+                int statusCode = (int)response.StatusCode;
+                if (statusCode is 301 or 302 or 303 or 307 or 308)
+                {
+                    if (redirect >= maximumRedirects || response.Headers.Location is not Uri location)
+                    {
+                        return null;
+                    }
+
+                    var redirectUri = new Uri(requestUri, location);
+
+                    // Like the default handler, never follow an https -> http redirect: the request would be sent
+                    // in plain text and its response could be replaced on the way.
+                    if (requestUri.Scheme.Equals(Uri.UriSchemeHttps, StringComparison.OrdinalIgnoreCase) &&
+                        !redirectUri.Scheme.Equals(Uri.UriSchemeHttps, StringComparison.OrdinalIgnoreCase))
+                    {
+                        return null;
+                    }
+
+                    requestUrl = redirectUri.AbsoluteUri;
+                    continue;
+                }
+
+                if (!response.IsSuccessStatusCode)
+                {
+                    return null;
+                }
+
+                return await ReadImageAsync(response);
+            }
+        }
+        catch
+        {
+            return null;
+        }
+    }
+
+    private static async Task<Image?> ReadImageAsync(HttpResponseMessage response)
+    {
+        try
+        {
             await using Stream contentStream = await response.Content.ReadAsStreamAsync();
             using var ms = new MemoryStream();
             await contentStream.CopyToAsync(ms);
@@ -3325,164 +4224,160 @@ public class MainForm : Form
         return false;
     }
 
-    private async Task ApplyExtensionWebContentAsync(BrowserTab tab, string currentUrl)
+    /// <summary>
+    /// Injects the enabled extensions' web.script / web.css rules into the document whose navigation just
+    /// completed (document-start rules first, then document-end, as documented in PHEXT_GUIDE.md).
+    /// The work is asynchronous, so before every injection the tab is re-checked to still be on that same
+    /// navigation; otherwise a rule matched for one URL could run on whatever page the tab moved to next.
+    /// The injected script additionally re-checks location.href against the rule's pattern when it executes.
+    /// </summary>
+    private async Task ApplyExtensionWebContentAsync(BrowserTab tab, int navigationSequence)
     {
-        if (!_settings.ExtensionsEnabled || tab.WebView.CoreWebView2 is null)
+        if (!_settings.ExtensionsEnabled || !IsTabStillOnNavigation(tab, navigationSequence))
         {
             return;
         }
 
-        await ApplyExtensionScriptsByTimingAsync(tab, currentUrl, PhantomExtensionScriptTiming.DocumentStart);
-        await ApplyExtensionScriptsByTimingAsync(tab, currentUrl, PhantomExtensionScriptTiming.DocumentEnd);
-    }
-
-    private async Task ApplyExtensionScriptsByTimingAsync(
-        BrowserTab tab,
-        string currentUrl,
-        PhantomExtensionScriptTiming timing)
-    {
-        if (tab.WebView.CoreWebView2 is null)
+        // Snapshot: Settings can be saved (which reloads the extension list) while an injection is awaited.
+        List<LoadedExtension> extensions = GetEnabledExtensions().ToList();
+        if (extensions.Count == 0)
         {
             return;
         }
 
-        foreach (LoadedExtension extension in GetEnabledExtensions())
+        string pageUrl = GetTabDocumentUrl(tab);
+        PhantomExtensionScriptTiming[] timings = { PhantomExtensionScriptTiming.DocumentStart, PhantomExtensionScriptTiming.DocumentEnd };
+        foreach (PhantomExtensionScriptTiming timing in timings)
         {
-            foreach (PhantomExtensionWebScriptDefinition script in extension.Definition.WebScripts)
+            foreach (LoadedExtension extension in extensions)
             {
-                if (script.Timing != timing)
+                foreach (PhantomExtensionWebScriptDefinition script in extension.Definition.WebScripts)
                 {
-                    continue;
-                }
+                    if (script.Timing != timing || !PhantomExtensionPatternMatcher.IsMatch(pageUrl, script.MatchPattern))
+                    {
+                        continue;
+                    }
 
-                if (!PhantomExtensionPatternMatcher.IsMatch(currentUrl, script.MatchPattern))
-                {
-                    continue;
-                }
+                    if (!IsTabStillOnNavigation(tab, navigationSequence))
+                    {
+                        return;
+                    }
 
-                try
-                {
-                    await EnsureExtensionContextObjectAsync(tab, extension);
-                    await ExecuteExtensionScriptAsync(tab, extension, script);
-                }
-                catch (Exception ex)
-                {
-                    Log($"Extension script failed [{extension.Definition.Id}/{script.Id}]: {ex.Message}");
+                    if (!IsExtensionStillLoadedAndActive(extension))
+                    {
+                        // Disabled, uninstalled or reloaded with new settings while this cycle was running.
+                        break;
+                    }
+
+                    try
+                    {
+                        string injectedScript = BuildExtensionInjectionScript(extension, script);
+                        string result = await tab.WebView.CoreWebView2!.ExecuteScriptAsync(injectedScript);
+
+                        // The wrapper always evaluates to a status string, so "null" means the script never ran:
+                        // WebView2 reports syntax errors that way and nothing else would show the failure.
+                        if (!script.IsCss &&
+                            string.Equals(result, "null", StringComparison.Ordinal) &&
+                            IsTabStillOnNavigation(tab, navigationSequence) &&
+                            _reportedNonRunningExtensionScripts.Add($"{extension.Definition.Id}/{script.Id}"))
+                        {
+                            Log($"Extension script [{extension.Definition.Id}/{script.Id}] did not run on {TrimForLog(pageUrl, 220)}. " +
+                                "If this happens on every page, check the script for JavaScript syntax errors.");
+                        }
+                    }
+                    catch (Exception ex)
+                    {
+                        if (!IsTabStillOnNavigation(tab, navigationSequence))
+                        {
+                            return;
+                        }
+
+                        Log($"Extension script failed [{extension.Definition.Id}/{script.Id}]: {ex.Message}");
+                    }
                 }
             }
         }
     }
 
-    private async Task EnsureExtensionContextObjectAsync(BrowserTab tab, LoadedExtension extension)
+    private bool IsTabStillOnNavigation(BrowserTab tab, int navigationSequence)
     {
-        if (tab.WebView.CoreWebView2 is null)
-        {
-            return;
-        }
-
-        string idJson = JsonSerializer.Serialize(extension.Definition.Id);
-        string nameJson = JsonSerializer.Serialize(extension.Definition.Name);
-        string versionJson = JsonSerializer.Serialize(extension.Definition.Version);
-        var runtimeSettings = new Dictionary<string, object>(StringComparer.Ordinal);
-        foreach (PhantomExtensionSettingDefinition setting in extension.Definition.Settings)
-        {
-            string value = extension.Installation.SettingValues[setting.Key];
-            runtimeSettings[setting.Key] = setting.Type switch
-            {
-                PhantomExtensionSettingType.Toggle => TryParseBooleanSetting(value, out bool toggleValue) && toggleValue,
-                PhantomExtensionSettingType.Number =>
-                    int.TryParse(value, System.Globalization.NumberStyles.Integer,
-                        System.Globalization.CultureInfo.InvariantCulture, out int numberValue) ||
-                    int.TryParse(value, out numberValue) ? numberValue : 0,
-                _ => value,
-            };
-        }
-
-        string settingsJson = JsonSerializer.Serialize(runtimeSettings);
-
-        string bootstrapScript = $$"""
-(() => {
-  window.phantomHazeExtensions = window.phantomHazeExtensions || {};
-  window.phantomHazeExtensions[{{idJson}}] = {
-    id: {{idJson}},
-    name: {{nameJson}},
-    version: {{versionJson}},
-    settings: {{settingsJson}}
-  };
-})();
-""";
-
-        await tab.WebView.CoreWebView2.ExecuteScriptAsync(bootstrapScript);
+        return !IsDisposed &&
+               _tabs.Contains(tab) &&
+               tab.NavigationSequence == navigationSequence &&
+               tab.WebView.CoreWebView2 is not null;
     }
 
-    private async Task ExecuteExtensionScriptAsync(
-        BrowserTab tab,
-        LoadedExtension extension,
-        PhantomExtensionWebScriptDefinition script)
+    private bool IsExtensionStillLoadedAndActive(LoadedExtension extension)
     {
-        if (tab.WebView.CoreWebView2 is null)
-        {
-            return;
-        }
+        return IsExtensionActive(extension) && _loadedExtensions.Contains(extension);
+    }
 
+    private static string GetTabDocumentUrl(BrowserTab tab)
+    {
+        // CoreWebView2.Source is the browser's own serialisation of the URL (what location.href reports), so a
+        // rule is matched the same way here and by the in-page guard of the injected script.
+        string? source = tab.WebView.CoreWebView2?.Source;
+        return string.IsNullOrWhiteSpace(source) ? tab.CurrentUrl : source;
+    }
+
+    private static string BuildExtensionInjectionScript(LoadedExtension extension, PhantomExtensionWebScriptDefinition script)
+    {
         if (script.IsCss)
         {
             string css = ResolveExtensionPlaceholders(script.Content, extension);
-            string styleScript = BuildCssInjectionScript(extension.Definition.Id, script.Id, css);
-            await tab.WebView.CoreWebView2.ExecuteScriptAsync(styleScript);
-            return;
+            return PhantomExtensionScriptBuilder.BuildStyleInjectionScript(
+                extension.Definition.Id,
+                script.Id,
+                script.MatchPattern,
+                css);
         }
 
-        string jsPayload = ResolveExtensionPlaceholders(script.Content, extension);
-        string wrappedScript =
-            "(function(){try{" +
-            jsPayload +
-            "}catch(error){console.error('PhantomHaze extension script failure', error);}})();";
-
-        await tab.WebView.CoreWebView2.ExecuteScriptAsync(wrappedScript);
+        // Legacy window.phantomHazeExtensions references are redirected to the private context first; then
+        // placeholders are resolved with JavaScript string escaping so a setting value cannot break out of the
+        // string literal it is placed in.
+        string source = PhantomExtensionScriptBuilder.RewriteLegacyGlobalAccess(script.Content);
+        string payload = ResolveExtensionPlaceholders(source, extension, PhantomExtensionPlaceholderContext.JavaScriptString);
+        return PhantomExtensionScriptBuilder.BuildWebScript(
+            BuildExtensionRuntimeContextJson(extension),
+            script.MatchPattern,
+            payload);
     }
 
-    private static string BuildCssInjectionScript(string extensionId, string scriptId, string css)
+    /// <summary>
+    /// The context handed privately to an extension's own scripts (it is never stored on the page's window, where
+    /// any site script could read or modify it), with every setting serialised according to its declared type.
+    /// </summary>
+    private static string BuildExtensionRuntimeContextJson(LoadedExtension extension)
     {
-        string domId = $"ph-ext-style-{extensionId.Length}-{extensionId}-{scriptId.Length}-{scriptId}";
-        string domIdJson = JsonSerializer.Serialize(domId);
-        string cssJson = JsonSerializer.Serialize(css);
-        return $$"""
-(() => {
-  if (!document.head) {
-    return;
-  }
+        var runtimeSettings = new Dictionary<string, object>(StringComparer.Ordinal);
+        foreach (PhantomExtensionSettingDefinition setting in extension.Definition.Settings)
+        {
+            string value = extension.Installation.SettingValues.TryGetValue(setting.Key, out string? storedValue) && storedValue is not null
+                ? storedValue
+                : GetDefaultSettingValue(setting);
 
-  const styleId = {{domIdJson}};
-  let styleElement = document.getElementById(styleId);
-  if (!styleElement) {
-    styleElement = document.createElement('style');
-    styleElement.id = styleId;
-    document.head.appendChild(styleElement);
-  }
+            runtimeSettings[setting.Key] = setting.Type switch
+            {
+                PhantomExtensionSettingType.Toggle => TryParseBooleanSetting(value, out bool toggleValue) && toggleValue,
+                PhantomExtensionSettingType.Number => TryParseInvariantInt(value, out int numberValue)
+                    ? numberValue
+                    : (TryParseInvariantInt(GetDefaultSettingValue(setting), out int defaultNumber) ? defaultNumber : 0),
+                _ => value,
+            };
+        }
 
-  styleElement.textContent = {{cssJson}};
-})();
-""";
+        return JsonSerializer.Serialize(new Dictionary<string, object>(StringComparer.Ordinal)
+        {
+            ["id"] = extension.Definition.Id,
+            ["name"] = extension.Definition.Name,
+            ["version"] = extension.Definition.Version,
+            ["settings"] = runtimeSettings,
+        });
     }
 
-    private static string SanitizeDomToken(string value)
+    private static bool TryParseInvariantInt(string? value, out int parsed)
     {
-        if (string.IsNullOrWhiteSpace(value))
-        {
-            return "extension";
-        }
-
-        var builder = new StringBuilder(value.Length);
-        foreach (char character in value.ToLowerInvariant())
-        {
-            bool valid = (character >= 'a' && character <= 'z') ||
-                         (character >= '0' && character <= '9') ||
-                         character is '-' or '_';
-            builder.Append(valid ? character : '-');
-        }
-
-        return builder.ToString();
+        return int.TryParse(value, NumberStyles.Integer, CultureInfo.InvariantCulture, out parsed);
     }
 
     private async Task<int> ApplyFindScriptAsync(BrowserTab tab, string query)
@@ -3512,7 +4407,7 @@ public class MainForm : Form
         }
 
         string candidate = rawResult.Trim().Trim('"');
-        return int.TryParse(candidate, out int count) ? count : 0;
+        return int.TryParse(candidate, NumberStyles.Integer, CultureInfo.InvariantCulture, out int count) ? count : 0;
     }
 
     private void ShowFindPanel()
@@ -3773,6 +4668,16 @@ public class MainForm : Form
         }
     }
 
+    private static CoreWebView2WebResourceResponse CreateBlockedResourceResponse(CoreWebView2 core)
+    {
+        byte[] payload = Encoding.UTF8.GetBytes("Blocked by PhantomHaze extension.");
+        return core.Environment.CreateWebResourceResponse(
+            new MemoryStream(payload),
+            403,
+            "Forbidden",
+            "Content-Type: text/plain; charset=utf-8");
+    }
+
     private void OnWebResourceRequested(object? sender, CoreWebView2WebResourceRequestedEventArgs e)
     {
         if (!TryGetTabFromSender(sender, out BrowserTab tab))
@@ -3784,16 +4689,10 @@ public class MainForm : Form
         {
             if (sender is CoreWebView2 core)
             {
-                byte[] payload = Encoding.UTF8.GetBytes("Blocked by PhantomHaze extension.");
-                var stream = new MemoryStream(payload);
-                e.Response = core.Environment.CreateWebResourceResponse(
-                    stream,
-                    403,
-                    "Forbidden",
-                    "Content-Type: text/plain; charset=utf-8");
+                e.Response = CreateBlockedResourceResponse(core);
             }
 
-            Log($"Tab {tab.Id} blocked by extension {blockingExtension!.Definition.Name} ({blockingRule!.Id}): {e.Request.Uri}");
+            Log($"Tab {tab.Id} blocked by extension {NormalizeForLog(blockingExtension!.Definition.Name)} ({blockingRule!.Id}): {TrimForLog(e.Request.Uri, 220)}");
             return;
         }
 
@@ -3912,13 +4811,14 @@ public class MainForm : Form
         }
 
         _tabByCore.Clear();
+        _workerRequestFilterCore = null;
         _activeTab = null;
 
-        foreach (Form extensionWindow in _openExtensionWindowsById.Values.ToArray())
+        foreach (ExtensionWindowState extensionWindowState in _openExtensionWindowsById.Values.ToArray())
         {
             try
             {
-                extensionWindow.Close();
+                extensionWindowState.Window.Close();
             }
             catch
             {
@@ -3927,6 +4827,17 @@ public class MainForm : Form
         }
 
         _openExtensionWindowsById.Clear();
+        _protectedAuxiliaryWindows.Clear();
+
+        try
+        {
+            _extensionLauncherToolTip.Dispose();
+            _extensionMenuOverflowMenu.Dispose();
+        }
+        catch
+        {
+            // Best effort cleanup only.
+        }
 
         try
         {
@@ -4029,6 +4940,9 @@ public class MainForm : Form
             _protectionRestoreTimer.Stop();
             _protectionResumeAtUtc = null;
         }
+
+        // Keep the Settings window and extension windows in the same capture state as the main window.
+        SyncAuxiliaryWindowProtection();
 
         UpdateProtectionStatusVisual();
         _toggleButton.Text = _protectionEnabled
@@ -4324,11 +5238,11 @@ public class MainForm : Form
                     source = File.ReadAllText(extensionPath);
                 }
 
-                PhantomExtensionDefinition definition = PhextParser.Parse(source, installed.FileName);
-                if (!definition.Id.Equals(installed.Id, StringComparison.OrdinalIgnoreCase))
-                {
-                    installed.FileName = BuildExtensionFileName(definition.Id);
-                }
+                // The parsed id can differ from the stored one when the file was edited on disk. The stored file
+                // name is deliberately left alone: pointing the entry at a new name would make Save delete the
+                // existing source file without ever writing a replacement. LoadInstalledExtensions reconciles the
+                // id after Save, exactly as it does at startup.
+                PhantomExtensionDefinition definition = PhextParser.Parse(source, GetExtensionParserSourceName(installed));
 
                 if (string.IsNullOrWhiteSpace(installed.DisplayName))
                 {
@@ -4347,38 +5261,203 @@ public class MainForm : Form
         return items;
     }
 
-    private void PersistExtensionDraftChanges(
-        IReadOnlyList<InstalledExtensionEntry> previousExtensions,
-        IReadOnlyList<InstalledExtensionEntry> draftExtensions,
+    /// <summary>
+    /// Commits a Settings save as one unit: staged extension sources are first written to temporary files, then
+    /// swapped into place (keeping backups), then settings.json is written. If any step fails, every swapped file
+    /// is restored and the exception is rethrown so nothing is applied; settings.json and the extensions folder
+    /// therefore never disagree. Source files of uninstalled extensions are deleted only after the commit.
+    /// </summary>
+    private void CommitSettingsChanges(
+        AppSettings newSettings,
+        IReadOnlyCollection<string> previousFileNames,
+        IReadOnlyCollection<string> referencedFileNames,
         IReadOnlyDictionary<string, string> stagedSourcesById)
     {
-        var previousFileNames = previousExtensions
-            .Select(entry => NormalizeStoredExtensionFileName(entry.FileName, entry.Id))
-            .Where(fileName => !string.IsNullOrWhiteSpace(fileName))
-            .ToHashSet(StringComparer.OrdinalIgnoreCase);
-
-        var retainedFileNames = draftExtensions
-            .Select(entry => NormalizeStoredExtensionFileName(entry.FileName, entry.Id))
-            .Where(fileName => !string.IsNullOrWhiteSpace(fileName))
-            .ToHashSet(StringComparer.OrdinalIgnoreCase);
-
-        foreach (string removedFileName in previousFileNames.Except(retainedFileNames, StringComparer.OrdinalIgnoreCase))
+        var writes = new List<(string TargetPath, string Source)>();
+        foreach (InstalledExtensionEntry entry in newSettings.Extensions)
         {
-            string removedPath = Path.Combine(_extensionsRootPath, removedFileName);
-            TryDeleteFile(removedPath);
+            if (stagedSourcesById.TryGetValue(entry.Id, out string? source))
+            {
+                writes.Add((Path.Combine(_extensionsRootPath, entry.FileName), source));
+            }
         }
 
-        foreach (InstalledExtensionEntry entry in draftExtensions)
+        List<string> removedFileNames = previousFileNames
+            .Where(fileName => !string.IsNullOrWhiteSpace(fileName))
+            .Except(referencedFileNames, StringComparer.OrdinalIgnoreCase)
+            .ToList();
+
+        var stagedFiles = new List<(string TempPath, string TargetPath)>();
+        var committedFiles = new List<(string TargetPath, string? BackupPath)>();
+        var backupPaths = new List<string>();
+        try
         {
-            if (!stagedSourcesById.TryGetValue(entry.Id, out string? source))
+            if (writes.Count > 0)
             {
-                continue;
+                Directory.CreateDirectory(_extensionsRootPath);
             }
 
-            string fileName = NormalizeStoredExtensionFileName(entry.FileName, entry.Id);
-            string targetPath = Path.Combine(_extensionsRootPath, fileName);
-            File.WriteAllText(targetPath, source);
+            foreach ((string targetPath, string source) in writes)
+            {
+                string tempPath = BuildSidecarFilePath(targetPath, ExtensionStagingFileSuffix);
+                stagedFiles.Add((tempPath, targetPath));
+                File.WriteAllText(tempPath, source);
+            }
+
+            foreach ((string tempPath, string targetPath) in stagedFiles)
+            {
+                string? backupPath = null;
+                if (File.Exists(targetPath))
+                {
+                    backupPath = BuildSidecarFilePath(targetPath, ExtensionBackupFileSuffix);
+                    backupPaths.Add(backupPath);
+                    File.Copy(targetPath, backupPath);
+                }
+
+                File.Move(tempPath, targetPath, overwrite: true);
+                committedFiles.Add((targetPath, backupPath));
+            }
+
+            try
+            {
+                WriteSettingsFile(newSettings);
+            }
+            catch (Exception ex) when (writes.Count == 0 && removedFileNames.Count == 0)
+            {
+                // No extension files are involved, so keep the previous behaviour for plain settings changes:
+                // apply them now and let the next save (for example on exit) persist them.
+                Log($"Settings save failed: {ex.Message}");
+            }
         }
+        catch
+        {
+            List<string> unrestoredBackups = RollBackExtensionFiles(committedFiles);
+            foreach ((string tempPath, _) in stagedFiles)
+            {
+                TryDeleteFile(tempPath);
+            }
+
+            foreach (string backupPath in backupPaths)
+            {
+                if (unrestoredBackups.Contains(backupPath, StringComparer.OrdinalIgnoreCase))
+                {
+                    // The restore failed, so this backup is the only copy of the previous source: keep it.
+                    Log($"The previous version of an extension file was kept at {backupPath}.");
+                    continue;
+                }
+
+                TryDeleteFile(backupPath);
+            }
+
+            throw;
+        }
+
+        foreach (string backupPath in backupPaths)
+        {
+            TryDeleteFile(backupPath);
+        }
+
+        foreach (string removedFileName in removedFileNames)
+        {
+            TryDeleteFile(Path.Combine(_extensionsRootPath, removedFileName));
+        }
+    }
+
+    /// <returns>Backups that could not be restored (they are the only remaining copy of the previous source).</returns>
+    private List<string> RollBackExtensionFiles(List<(string TargetPath, string? BackupPath)> committedFiles)
+    {
+        var unrestoredBackups = new List<string>();
+        for (int i = committedFiles.Count - 1; i >= 0; i--)
+        {
+            (string targetPath, string? backupPath) = committedFiles[i];
+            try
+            {
+                if (backupPath is null)
+                {
+                    File.Delete(targetPath);
+                }
+                else
+                {
+                    File.Copy(backupPath, targetPath, overwrite: true);
+                }
+            }
+            catch (Exception ex)
+            {
+                Log($"Extension file rollback failed for '{Path.GetFileName(targetPath)}': {ex.Message}");
+                if (backupPath is not null)
+                {
+                    unrestoredBackups.Add(backupPath);
+                }
+            }
+        }
+
+        return unrestoredBackups;
+    }
+
+    private void CleanupStaleExtensionTransactionFiles()
+    {
+        try
+        {
+            foreach (string stagingPath in Directory.EnumerateFiles(_extensionsRootPath, "*" + ExtensionStagingFileSuffix).ToList())
+            {
+                TryDeleteFile(stagingPath);
+            }
+
+            // A leftover backup means a save was interrupted (or its rollback failed), so it can be the only copy of an
+            // extension's previous source. It is moved aside rather than deleted.
+            foreach (string backupPath in Directory.EnumerateFiles(_extensionsRootPath, "*" + ExtensionBackupFileSuffix).ToList())
+            {
+                PreserveStaleExtensionBackup(backupPath);
+            }
+        }
+        catch (Exception ex)
+        {
+            Log($"Extension folder cleanup skipped: {ex.Message}");
+        }
+    }
+
+    private void PreserveStaleExtensionBackup(string backupPath)
+    {
+        try
+        {
+            string recoveredDirectory = Path.Combine(_extensionsRootPath, "recovered");
+            Directory.CreateDirectory(recoveredDirectory);
+            string originalFileName = GetBackupTargetFileName(Path.GetFileName(backupPath));
+            string recoveredPath = Path.Combine(
+                recoveredDirectory,
+                string.Create(
+                    CultureInfo.InvariantCulture,
+                    $"{Path.GetFileNameWithoutExtension(originalFileName)}.recovered-{DateTime.UtcNow:yyyyMMddHHmmss}-{Guid.NewGuid():N}.phext"));
+            File.Move(backupPath, recoveredPath);
+            Log($"An interrupted Settings save left an earlier version of {originalFileName}; it was moved to {recoveredPath}.");
+        }
+        catch (Exception ex)
+        {
+            Log($"An earlier extension file version could not be moved aside ({Path.GetFileName(backupPath)}): {ex.Message}");
+        }
+    }
+
+    /// <summary>Recovers "name.phext" from a backup file name built by BuildSidecarFilePath (".name.phext.{guid}.phext-backup").</summary>
+    private static string GetBackupTargetFileName(string backupFileName)
+    {
+        string name = backupFileName;
+        if (name.EndsWith(ExtensionBackupFileSuffix, StringComparison.OrdinalIgnoreCase))
+        {
+            name = name[..^ExtensionBackupFileSuffix.Length];
+        }
+
+        if (name.StartsWith('.'))
+        {
+            name = name[1..];
+        }
+
+        int lastDot = name.LastIndexOf('.');
+        if (lastDot > 0 && name.Length - lastDot - 1 == 32)
+        {
+            name = name[..lastDot];
+        }
+
+        return string.IsNullOrWhiteSpace(name) ? "extension.phext" : name;
     }
 
     private static void ApplyColorsRecursively(Control control, Color backColor, Color foreColor)
@@ -4698,7 +5777,18 @@ public class MainForm : Form
         settingsWindow.Controls.Add(rootLayout);
 
         List<ExtensionListItem> extensionItems = new();
+        var activeNumericEditors = new List<NumericUpDown>();
         bool listPopulationInProgress = false;
+
+        // Reading NumericUpDown.Value commits text the user typed but has not confirmed yet (for example when Enter
+        // triggers Save while the editor still has focus), so that value is saved instead of silently dropped.
+        saveButton.Click += (_, _) =>
+        {
+            foreach (NumericUpDown numericEditor in activeNumericEditors.Where(editor => !editor.IsDisposed))
+            {
+                _ = numericEditor.Value;
+            }
+        };
 
         void ApplySettingsInputColors(Control control)
         {
@@ -4737,7 +5827,14 @@ public class MainForm : Form
 
         void RenderSelectedExtensionSettings()
         {
+            // Dispose the previous editors: Controls.Clear() alone leaks their window handles on every selection change.
+            foreach (Control previousControl in extensionSettingsPanel.Controls.Cast<Control>().ToArray())
+            {
+                previousControl.Dispose();
+            }
+
             extensionSettingsPanel.Controls.Clear();
+            activeNumericEditors.Clear();
 
             if (extensionsListBox.SelectedItem is not ExtensionListItem selectedItem)
             {
@@ -4801,6 +5898,7 @@ public class MainForm : Form
                     Dock = DockStyle.Fill,
                     TextAlign = ContentAlignment.MiddleLeft,
                     AutoSize = true,
+                    UseMnemonic = false,
                     Margin = ScalePadding(0, 0, 0, 6),
                 }, 1, row);
 
@@ -4847,6 +5945,7 @@ public class MainForm : Form
                         Text = setting.Label,
                         Checked = checkedValue,
                         Dock = DockStyle.Fill,
+                        UseMnemonic = false,
                         Margin = ScalePadding(0, 0, 0, 6),
                     };
                     toggle.CheckedChanged += (_, _) =>
@@ -4865,6 +5964,7 @@ public class MainForm : Form
                     Text = setting.Label,
                     Dock = DockStyle.Fill,
                     TextAlign = ContentAlignment.MiddleLeft,
+                    UseMnemonic = false,
                     Margin = ScalePadding(0, 0, 8, 6),
                 }, 0, row);
 
@@ -4872,10 +5972,11 @@ public class MainForm : Form
                 if (setting.Type == PhantomExtensionSettingType.Number)
                 {
                     int minimum = setting.Minimum ?? -100000;
-                    int maximum = setting.Maximum ?? 100000;
-                    int numericValue = int.TryParse(currentValue, out int parsedValue)
+                    int maximum = Math.Max(minimum, setting.Maximum ?? 100000);
+                    // Stored values are invariant-culture integers (see TryNormalizeSettingValue).
+                    int numericValue = TryParseInvariantInt(currentValue, out int parsedValue)
                         ? Math.Clamp(parsedValue, minimum, maximum)
-                        : Math.Clamp(int.TryParse(setting.DefaultValue, out int parsedDefault) ? parsedDefault : 0, minimum, maximum);
+                        : Math.Clamp(TryParseInvariantInt(setting.DefaultValue, out int parsedDefault) ? parsedDefault : 0, minimum, maximum);
 
                     var numeric = new NumericUpDown
                     {
@@ -4883,13 +5984,25 @@ public class MainForm : Form
                         Minimum = minimum,
                         Maximum = maximum,
                         Value = numericValue,
+                        DecimalPlaces = 0,
+                        Increment = 1,
                         Margin = ScalePadding(0, 0, 0, 6),
                     };
                     numeric.ValueChanged += (_, _) =>
                     {
+                        // NumericUpDown accepts typed decimals such as "5.5" even with DecimalPlaces = 0. Only whole
+                        // numbers are stored, otherwise the value is rejected (and reset to the default) on load.
+                        decimal wholeValue = decimal.Round(numeric.Value, 0, MidpointRounding.AwayFromZero);
+                        if (wholeValue != numeric.Value)
+                        {
+                            numeric.Value = wholeValue;
+                            return;
+                        }
+
                         selectedItem.Installation.SettingValues[setting.Key] =
-                            numeric.Value.ToString(System.Globalization.CultureInfo.InvariantCulture);
+                            decimal.ToInt32(wholeValue).ToString(CultureInfo.InvariantCulture);
                     };
+                    activeNumericEditors.Add(numeric);
 
                     editorControl = numeric;
                 }
@@ -4986,7 +6099,15 @@ public class MainForm : Form
             RenderSelectedExtensionSettings();
         }
 
-        extensionsListBox.SelectedIndexChanged += (_, _) => RenderSelectedExtensionSettings();
+        extensionsListBox.SelectedIndexChanged += (_, _) =>
+        {
+            // While the list is rebuilt, Items.Clear() and the SelectedIndex assignment both raise this event;
+            // RefreshExtensionDraftList renders once when it is done.
+            if (!listPopulationInProgress)
+            {
+                RenderSelectedExtensionSettings();
+            }
+        };
         extensionsListBox.ItemCheck += (_, eventArgs) =>
         {
             if (listPopulationInProgress || eventArgs.Index < 0 || eventArgs.Index >= extensionItems.Count)
@@ -5007,7 +6128,7 @@ public class MainForm : Form
                 Title = "Import PhantomHaze Extension",
             };
 
-            if (picker.ShowDialog(settingsWindow) != DialogResult.OK)
+            if (ShowCaptureProtectedDialog(() => picker.ShowDialog(settingsWindow)) != DialogResult.OK)
             {
                 return;
             }
@@ -5027,7 +6148,7 @@ public class MainForm : Form
                     {
                         Id = definition.Id,
                         DisplayName = definition.Name,
-                        FileName = BuildExtensionFileName(definition.Id),
+                        FileName = string.Empty,
                         Enabled = true,
                         SettingValues = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase),
                     };
@@ -5037,7 +6158,7 @@ public class MainForm : Form
 
                 existing.Id = definition.Id;
                 existing.DisplayName = definition.Name;
-                existing.FileName = BuildExtensionFileName(definition.Id);
+                existing.FileName = ChooseImportedExtensionFileName(existing, draftSettings.Extensions);
                 existing.Enabled = true;
                 EnsureExtensionSettingValues(existing, definition);
 
@@ -5047,12 +6168,12 @@ public class MainForm : Form
             }
             catch (Exception ex)
             {
-                MessageBox.Show(
+                ShowCaptureProtectedDialog(() => MessageBox.Show(
                     settingsWindow,
                     $"Extension import failed:\n{ex.Message}",
                     "PhantomHaze",
                     MessageBoxButtons.OK,
-                    MessageBoxIcon.Warning);
+                    MessageBoxIcon.Warning));
             }
         };
 
@@ -5063,12 +6184,12 @@ public class MainForm : Form
                 return;
             }
 
-            DialogResult result = MessageBox.Show(
+            DialogResult result = ShowCaptureProtectedDialog(() => MessageBox.Show(
                 settingsWindow,
                 "This will uninstall every extension when you save settings. Continue?",
                 "PhantomHaze",
                 MessageBoxButtons.YesNo,
-                MessageBoxIcon.Warning);
+                MessageBoxIcon.Warning));
 
             if (result != DialogResult.Yes)
             {
@@ -5095,7 +6216,7 @@ public class MainForm : Form
             cancelButton.ForeColor = Color.FromArgb(228, 236, 247);
         }
 
-        settingsWindow.Shown += (_, _) => ApplyProtectionToSettingsWindow(settingsWindow);
+        RegisterProtectedAuxiliaryWindow(settingsWindow, "Settings");
 
         if (settingsWindow.ShowDialog(this) != DialogResult.OK)
         {
@@ -5123,46 +6244,51 @@ public class MainForm : Form
         draftSettings.StartingPage = NormalizeStartPage(startPageTextBox.Text.Trim());
         draftSettings.ExtensionsEnabled = extensionsEnabledCheckBox.Checked;
 
+        if (HasSettingsFileChangedSinceLastAccess() && TryReadSettingsFile() is AppSettings currentOnDisk)
+        {
+            MergeExternalExtensionChanges(draftSettings, previousExtensions, currentOnDisk.Extensions, stagedSourcesByExtensionId.Keys);
+            Log("settings.json was changed by another PhantomHaze window; extensions it installed or uninstalled were kept.");
+        }
+
+        // File names referenced by the draft are captured before normalisation (which can drop invalid or
+        // duplicate entries), so only extensions the user actually uninstalled have their source files deleted.
+        HashSet<string> referencedFileNames = draftSettings.Extensions
+            .Where(entry => entry is not null)
+            .Select(entry => NormalizeStoredExtensionFileName(entry.FileName, entry.Id))
+            .ToHashSet(StringComparer.OrdinalIgnoreCase);
+        NormalizeSettings(draftSettings);
+        referencedFileNames.UnionWith(draftSettings.Extensions.Select(entry => entry.FileName));
+        HashSet<string> previousFileNames = previousExtensions
+            .Select(entry => NormalizeStoredExtensionFileName(entry.FileName, entry.Id))
+            .ToHashSet(StringComparer.OrdinalIgnoreCase);
+
         try
         {
-            PersistExtensionDraftChanges(previousExtensions, draftSettings.Extensions, stagedSourcesByExtensionId);
+            CommitSettingsChanges(draftSettings, previousFileNames, referencedFileNames, stagedSourcesByExtensionId);
         }
         catch (Exception ex)
         {
-            MessageBox.Show(
+            ShowCaptureProtectedDialog(() => MessageBox.Show(
                 this,
-                $"Extension changes could not be applied:\n{ex.Message}",
+                $"Settings could not be saved, so no changes were applied:\n{ex.Message}",
                 "PhantomHaze",
                 MessageBoxButtons.OK,
-                MessageBoxIcon.Warning);
-            Log($"Extension persistence failed: {ex.Message}");
+                MessageBoxIcon.Warning));
+            Log($"Settings save failed; extension and settings changes were rolled back: {ex.Message}");
             return;
         }
 
+        HashSet<string> previouslyActiveExtensionIds = _loadedExtensions
+            .Where(IsExtensionActive)
+            .Select(extension => extension.Definition.Id)
+            .ToHashSet(StringComparer.OrdinalIgnoreCase);
+
         _settings = draftSettings;
-        NormalizeSettings();
-        foreach ((string extensionId, Form window) in _openExtensionWindowsById.ToArray())
-        {
-            InstalledExtensionEntry? previous = previousExtensions.FirstOrDefault(entry =>
-                entry.Id.Equals(extensionId, StringComparison.OrdinalIgnoreCase));
-            if (!_settings.ExtensionsEnabled ||
-                !_loadedExtensionById.TryGetValue(extensionId, out LoadedExtension? current) ||
-                !current.Installation.Enabled ||
-                stagedSourcesByExtensionId.ContainsKey(extensionId) ||
-                previous is null ||
-                current.Installation.SettingValues.Count != previous.SettingValues.Count ||
-                current.Installation.SettingValues.Any(pair =>
-                    !previous.SettingValues.TryGetValue(pair.Key, out string? oldValue) || pair.Value != oldValue))
-            {
-                if (!window.IsDisposed)
-                {
-                    window.Close();
-                }
-            }
-        }
-        SaveSettings();
-        LoadInstalledExtensions();
+        LoadInstalledExtensions(extension =>
+            !previouslyActiveExtensionIds.Contains(extension.Definition.Id) ||
+            stagedSourcesByExtensionId.ContainsKey(extension.Definition.Id));
         RefreshExtensionSurface();
+        RefreshOpenExtensionWindows();
 
         if (_settings.PersistHistoryAcrossSessions)
         {
@@ -5180,21 +6306,95 @@ public class MainForm : Form
         Log("Settings updated and saved.");
     }
 
-    private void ApplyProtectionToSettingsWindow(Form settingsWindow)
+    /// <summary>
+    /// Tracks a secondary top-level window (Settings, extension UI windows) so its capture exclusion always matches
+    /// the main window: it is applied as soon as the window handle exists - before the window is first shown - and
+    /// re-synchronised on every protection change (manual toggle, timed disable, automatic re-enable).
+    /// </summary>
+    private void RegisterProtectedAuxiliaryWindow(Form window, string description)
     {
-        if (!_protectionEnabled)
+        _protectedAuxiliaryWindows[window] = new AuxiliaryWindowProtection(description);
+        window.HandleCreated += (_, _) => ApplyProtectionToAuxiliaryWindow(window);
+        window.FormClosed += (_, _) => _protectedAuxiliaryWindows.Remove(window);
+        window.Disposed += (_, _) => _protectedAuxiliaryWindows.Remove(window);
+
+        if (window.IsHandleCreated)
+        {
+            ApplyProtectionToAuxiliaryWindow(window);
+        }
+    }
+
+    private void SyncAuxiliaryWindowProtection()
+    {
+        foreach (Form window in _protectedAuxiliaryWindows.Keys.ToArray())
+        {
+            ApplyProtectionToAuxiliaryWindow(window);
+        }
+
+        foreach (IntPtr dialogWindow in _openSystemDialogWindows.ToArray())
+        {
+            _ = NativeMethods.ExcludeFromCapture(dialogWindow, _protectionEnabled);
+        }
+    }
+
+    /// <summary>
+    /// Shows a system dialog (MessageBox, file picker) with the same capture protection as the app's own windows.
+    /// Windows creates these dialogs itself, so they are excluded from capture as they open and kept in step with
+    /// later protection changes (for example the timed re-enable) while they stay open.
+    /// </summary>
+    private T ShowCaptureProtectedDialog<T>(Func<T> showDialog)
+    {
+        var dialogWindows = new List<IntPtr>();
+        try
+        {
+            return NativeMethods.RunWithDialogActivationHook(dialogWindow =>
+            {
+                if (_openSystemDialogWindows.Add(dialogWindow))
+                {
+                    dialogWindows.Add(dialogWindow);
+                }
+
+                _ = NativeMethods.ExcludeFromCapture(dialogWindow, _protectionEnabled);
+            }, showDialog);
+        }
+        finally
+        {
+            foreach (IntPtr dialogWindow in dialogWindows)
+            {
+                _openSystemDialogWindows.Remove(dialogWindow);
+            }
+        }
+    }
+
+    private void ApplyProtectionToAuxiliaryWindow(Form window)
+    {
+        if (window.IsDisposed ||
+            !window.IsHandleCreated ||
+            !_protectedAuxiliaryWindows.TryGetValue(window, out AuxiliaryWindowProtection? protection))
         {
             return;
         }
 
-        var (ok, error) = NativeMethods.ExcludeFromCapture(settingsWindow.Handle, enable: true);
+        bool enable = _protectionEnabled;
+        var (ok, error) = NativeMethods.ExcludeFromCapture(window.Handle, enable);
         if (!ok)
         {
-            Log($"Settings window protection failed. Win32 error {error}: {NativeMethods.DescribeError(error)}.");
+            protection.AppliedState = null;
+            Log($"{protection.Description} window protection {(enable ? "could not be applied" : "could not be removed")}. " +
+                $"Win32 error {error}: {NativeMethods.DescribeError(error)}.");
             return;
         }
 
-        Log("Settings window protection applied.");
+        bool? previous = protection.AppliedState;
+        protection.AppliedState = enable;
+        if (enable && previous != true)
+        {
+            Log($"{protection.Description} window protection applied.");
+        }
+        else if (!enable && previous == true)
+        {
+            Log($"{protection.Description} window protection removed because protection is disabled.");
+        }
     }
 
     private void Log(string message)
