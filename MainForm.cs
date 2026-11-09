@@ -2099,6 +2099,8 @@ public class MainForm : Form
         _menuLogoPictureBox.Image = Icon?.ToBitmap() ?? DefaultTabIcon;
 
         _menuLogoLabel.Text = "PhantomHaze";
+        // Without AutoSize a Label keeps its default 100px width, which cut the bold name off at "Phantom".
+        _menuLogoLabel.AutoSize = true;
         _menuLogoLabel.Dock = DockStyle.Fill;
         _menuLogoLabel.Font = new Font("Segoe UI", 10, FontStyle.Bold);
         _menuLogoLabel.TextAlign = ContentAlignment.MiddleLeft;
