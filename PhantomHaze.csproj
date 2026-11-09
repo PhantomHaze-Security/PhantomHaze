@@ -12,8 +12,14 @@
     <ApplicationHighDpiMode>PerMonitorV2</ApplicationHighDpiMode>
     <AssemblyName>PhantomHaze</AssemblyName>
     <RootNamespace>PhantomHaze</RootNamespace>
-    <Version>1.3.4</Version>
-    <InformationalVersion>v1.3.4</InformationalVersion>
+    <Version>1.3.5</Version>
+    <!--
+      Release channel of this build: stable or beta. Together with Version it forms the release tag (for example
+      v1.3.5-beta), which the update banner compares with the matching line of ver-banner.csv on the main branch
+      (line 1: latest stable, line 2: latest beta). The window title shows "Beta" for beta builds.
+    -->
+    <PhantomHazeReleaseChannel>beta</PhantomHazeReleaseChannel>
+    <InformationalVersion>v$(Version)-$(PhantomHazeReleaseChannel)</InformationalVersion>
     <ApplicationIcon>icon.ico</ApplicationIcon>
   </PropertyGroup>
 
@@ -22,8 +28,13 @@
   </ItemGroup>
 
   <ItemGroup>
-    <Compile Include="**/*.cs" Exclude="bin/**;obj/**;tmp/**;compiler/tmp/**;PhantomHaze_MainForm.cs" />
+    <Compile Include="**/*.cs" Exclude="bin/**;obj/**;tmp/**;compiler/tmp/**" />
   </ItemGroup>
+
+  <Target Name="ValidatePhantomHazeReleaseChannel" BeforeTargets="BeforeBuild"
+          Condition="'$(PhantomHazeReleaseChannel)' != 'stable' And '$(PhantomHazeReleaseChannel)' != 'beta'">
+    <Error Text="PhantomHazeReleaseChannel must be 'stable' or 'beta' (it is '$(PhantomHazeReleaseChannel)'). The update banner relies on it." />
+  </Target>
 
   <Target Name="RemoveWebView2WpfReference" BeforeTargets="ResolveAssemblyReferences">
     <ItemGroup>

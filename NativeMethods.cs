@@ -23,6 +23,84 @@ internal static class NativeMethods
     [return: MarshalAs(UnmanagedType.Bool)]
     private static extern bool GetWindowDisplayAffinity(IntPtr hWnd, out uint pdwAffinity);
 
+    // Thread-local CBT hook, used only while a system dialog (MessageBox, common file dialog) is open, so the
+    // dialog's own top-level window can be excluded from capture like the rest of the app.
+    private const int WH_CBT = 5;
+    private const int HCBT_ACTIVATE = 5;
+    private const string StandardDialogClassName = "#32770";
+
+    private delegate IntPtr CbtHookProc(int nCode, IntPtr wParam, IntPtr lParam);
+
+    [DllImport("user32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
+    private static extern IntPtr SetWindowsHookEx(int idHook, CbtHookProc lpfn, IntPtr hMod, uint dwThreadId);
+
+    [DllImport("user32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool UnhookWindowsHookEx(IntPtr hhk);
+
+    [DllImport("user32.dll")]
+    private static extern IntPtr CallNextHookEx(IntPtr hhk, int nCode, IntPtr wParam, IntPtr lParam);
+
+    [DllImport("kernel32.dll")]
+    private static extern uint GetCurrentThreadId();
+
+    [DllImport("user32.dll", CharSet = CharSet.Unicode, EntryPoint = "GetClassNameW")]
+    private static extern int GetClassName(IntPtr hWnd, [Out] char[] lpClassName, int nMaxCount);
+
+    /// <summary>
+    /// Runs a modal system dialog on the current (UI) thread and calls <paramref name="onDialogActivated"/> with the
+    /// handle of every standard dialog window (#32770, used by MessageBox and the common file dialogs) that is
+    /// activated while it is open, before that window is first drawn. If the hook cannot be installed, the dialog
+    /// simply runs without it.
+    /// </summary>
+    public static T RunWithDialogActivationHook<T>(Action<IntPtr> onDialogActivated, Func<T> showDialog)
+    {
+        IntPtr hook = IntPtr.Zero;
+        CbtHookProc callback = (nCode, wParam, lParam) =>
+        {
+            if (nCode == HCBT_ACTIVATE)
+            {
+                try
+                {
+                    if (IsStandardDialogWindow(wParam))
+                    {
+                        onDialogActivated(wParam);
+                    }
+                }
+                catch
+                {
+                    // An exception must never cross back into native code.
+                }
+            }
+
+            return CallNextHookEx(hook, nCode, wParam, lParam);
+        };
+
+        hook = SetWindowsHookEx(WH_CBT, callback, IntPtr.Zero, GetCurrentThreadId());
+        try
+        {
+            return showDialog();
+        }
+        finally
+        {
+            if (hook != IntPtr.Zero)
+            {
+                UnhookWindowsHookEx(hook);
+            }
+
+            // The delegate must stay alive for as long as Windows can call it.
+            GC.KeepAlive(callback);
+        }
+    }
+
+    private static bool IsStandardDialogWindow(IntPtr hWnd)
+    {
+        var buffer = new char[16];
+        int length = GetClassName(hWnd, buffer, buffer.Length);
+        return length == StandardDialogClassName.Length &&
+               new string(buffer, 0, length).Equals(StandardDialogClassName, StringComparison.Ordinal);
+    }
+
     // .NET's Environment.OSVersion / the classic GetVersionEx API get lied to
     // by Windows' app-compatibility shim unless the .exe ships a manifest
     // declaring Windows 10/11 support. RtlGetVersion in ntdll is unaffected
