@@ -272,6 +272,15 @@ public class MainForm : Form
     private readonly Button _logsViewButton = new();
     private readonly FlowLayoutPanel _extensionMenuButtonsPanel = new();
     private readonly Label _statusLabel = new();
+    private readonly TableLayoutPanel _updateBannerPanel = new();
+    private readonly Label _updateBannerTitleLabel = new();
+    private readonly Label _updateBannerMessageLabel = new();
+    private readonly Button _updateBannerUpdateButton = new();
+    private readonly Button _updateBannerSnoozeButton = new();
+    private readonly ContextMenuStrip _updateBannerSnoozeMenu = new();
+    private readonly ToolTip _updateBannerToolTip = new();
+    // Cancelled when the window closes, so a slow update check never touches a closed window.
+    private readonly CancellationTokenSource _updateCheckCancellation = new();
     private readonly Button _toggleButton = new();
     private readonly Button _webViewToggleButton = new();
     private readonly Button _settingsButton = new();
@@ -316,6 +325,7 @@ public class MainForm : Form
     private readonly string _historyFilePath;
     private readonly string _settingsFilePath;
     private readonly string _extensionsRootPath;
+    private readonly string _updateReminderFilePath;
     private readonly List<HistoryEntry> _historyEntries = new();
     private readonly List<string> _favoriteUrls = new();
     private readonly List<BrowserTab> _tabs = new();
@@ -384,7 +394,8 @@ public class MainForm : Form
 
     public MainForm()
     {
-        Text = "PhantomHaze v1.3.5";
+        // The version and release channel come from PhantomHaze.csproj (see AppVersionInfo).
+        Text = AppVersionInfo.WindowTitle;
         Width = 980;
         Height = 620;
         MinimumSize = new Size(860, 560);
@@ -401,7 +412,11 @@ public class MainForm : Form
         _historyFilePath = InitializeHistoryFilePath();
         _settingsFilePath = InitializeSettingsFilePath();
         _extensionsRootPath = InitializeExtensionsDirectoryPath();
+        _updateReminderFilePath = InitializeAppDataFilePath("update-reminder.json");
         _faviconHttpClient.Timeout = TimeSpan.FromSeconds(5);
+        // Favicons are downloaded for every page, so a site must not be able to make PhantomHaze buffer an
+        // arbitrarily large response (the default limit is 2 GB). Real favicons are a few kilobytes.
+        _faviconHttpClient.MaxResponseContentBufferSize = 1024 * 1024;
         _protectionRestoreTimer.Interval = 1000;
         _protectionRestoreTimer.Tick += OnProtectionRestoreTimerTick;
 
@@ -427,6 +442,9 @@ public class MainForm : Form
             Log($"Extensions root: {_extensionsRootPath}");
             LogTrueOsBuild();
             ApplyProtection(enable: true);
+
+            // Decides at every startup whether the update banner is shown; it runs in the background.
+            _ = CheckForUpdatesAsync();
         };
 
         FormClosing += (_, _) => CleanupWebSession();
@@ -471,6 +489,13 @@ public class MainForm : Form
         _menuLogoLabel.Margin = ScalePadding(0, 0, 10, 0);
         _statusLabel.Height = ScaleByDpi(34);
         _toggleButton.Height = ScaleByDpi(36);
+        _updateBannerPanel.Height = ScaleByDpi(36);
+        _updateBannerPanel.Padding = ScalePadding(12, 3, 6, 3);
+        _updateBannerTitleLabel.Margin = ScalePadding(0, 0, 4, 0);
+        _updateBannerUpdateButton.MinimumSize = new Size(ScaleByDpi(76), 0);
+        _updateBannerUpdateButton.Padding = ScalePadding(10, 0, 10, 0);
+        _updateBannerUpdateButton.Margin = ScalePadding(8, 0, 6, 0);
+        _updateBannerSnoozeButton.Size = new Size(ScaleByDpi(30), ScaleByDpi(26));
         _logsViewButton.MinimumSize = new Size(ScaleByDpi(90), 0);
         _webViewToggleButton.MinimumSize = new Size(ScaleByDpi(90), 0);
         _settingsButton.MinimumSize = new Size(ScaleByDpi(95), 0);
@@ -642,20 +667,48 @@ public class MainForm : Form
     /// </summary>
     private void PreserveUnreadableSettingsFile()
     {
+        PreserveUnreadableFile(_settingsFilePath, "settings file", "Default settings are used for this session.");
+    }
+
+    /// <summary>
+    /// Keeps a copy of a data file that could not be read (settings, favourites). These files are rewritten later in
+    /// the session, which would otherwise destroy whatever could still be recovered from them. History is deliberately
+    /// not copied: a leftover copy would survive Clear History and turning history saving off.
+    /// </summary>
+    private void PreserveUnreadableFile(string filePath, string description, string consequence)
+    {
         try
         {
-            if (!File.Exists(_settingsFilePath))
+            if (!File.Exists(filePath))
             {
                 return;
             }
 
-            string backupPath = $"{_settingsFilePath}.unreadable-{DateTime.UtcNow.ToString("yyyyMMddHHmmss", CultureInfo.InvariantCulture)}";
-            File.Copy(_settingsFilePath, backupPath, overwrite: true);
-            Log($"The unreadable settings file was preserved as {backupPath}. Default settings are used for this session.");
+            string backupPath = $"{filePath}.unreadable-{DateTime.UtcNow.ToString("yyyyMMddHHmmss", CultureInfo.InvariantCulture)}";
+            File.Copy(filePath, backupPath, overwrite: true);
+            Log($"The unreadable {description} was preserved as {backupPath}. {consequence}");
         }
         catch (Exception ex)
         {
-            Log($"The unreadable settings file could not be preserved: {ex.Message}");
+            Log($"The unreadable {description} could not be preserved: {ex.Message}");
+        }
+    }
+
+    /// <summary>
+    /// Replaces a file atomically (temporary file + rename), so a crash, power loss or full disk can never leave a
+    /// truncated file behind. Throws on failure.
+    /// </summary>
+    private static void WriteFileAtomically(string filePath, string contents)
+    {
+        string tempPath = BuildSidecarFilePath(filePath, ".tmp");
+        try
+        {
+            File.WriteAllText(tempPath, contents);
+            File.Move(tempPath, filePath, overwrite: true);
+        }
+        finally
+        {
+            TryDeleteFile(tempPath);
         }
     }
 
@@ -886,17 +939,8 @@ public class MainForm : Form
             settings,
             new JsonSerializerOptions { WriteIndented = true });
 
-        string tempPath = BuildSidecarFilePath(_settingsFilePath, ".tmp");
-        try
-        {
-            File.WriteAllText(tempPath, json);
-            File.Move(tempPath, _settingsFilePath, overwrite: true);
-            _settingsFileStamp = ReadSettingsFileStamp();
-        }
-        finally
-        {
-            TryDeleteFile(tempPath);
-        }
+        WriteFileAtomically(_settingsFilePath, json);
+        _settingsFileStamp = ReadSettingsFileStamp();
     }
 
     private SettingsFileStamp? ReadSettingsFileStamp()
@@ -1749,7 +1793,7 @@ public class MainForm : Form
         string url = uri.AbsoluteUri;
         try
         {
-            BeginInvoke(new Action(() => _ = OpenUrlInNewTabAsync(url)));
+            BeginInvoke(new Action(() => _ = OpenUrlInNewTabAsync(url, "Extension window link")));
         }
         catch (Exception ex) when (ex is ObjectDisposedException or InvalidOperationException)
         {
@@ -1757,7 +1801,9 @@ public class MainForm : Form
         }
     }
 
-    private async Task OpenUrlInNewTabAsync(string url)
+    /// <summary>Opens a link in a new protected tab and switches to Web View (extension window links, the Update button).</summary>
+    /// <param name="description">What is being opened, for the log (for example "Extension window link").</param>
+    private async Task OpenUrlInNewTabAsync(string url, string description)
     {
         try
         {
@@ -1778,11 +1824,11 @@ public class MainForm : Form
             }
 
             Activate();
-            Log($"Extension window link opened in a new tab: {url}");
+            Log($"{description} opened in a new tab: {url}");
         }
         catch (Exception ex)
         {
-            Log($"Opening an extension window link failed: {ex.Message}");
+            Log($"{description} could not be opened in a new tab: {ex.Message}");
         }
     }
 
@@ -1886,7 +1932,8 @@ public class MainForm : Form
                 _historyEntries,
                 new JsonSerializerOptions { WriteIndented = true });
 
-            File.WriteAllText(_historyFilePath, json);
+            // Saved after every page load, so a crash mid-write must not be able to leave a truncated file.
+            WriteFileAtomically(_historyFilePath, json);
         }
         catch (Exception ex)
         {
@@ -1941,9 +1988,11 @@ public class MainForm : Form
     private void BuildUi()
     {
         BuildMenuBar();
+        BuildUpdateBanner();
         BuildProtectionDisableMenu();
         ProtectPopupMenuFromCapture(_disableProtectionMenu);
         ProtectPopupMenuFromCapture(_extensionMenuOverflowMenu);
+        ProtectPopupMenuFromCapture(_updateBannerSnoozeMenu);
 
         _statusLabel.Dock = DockStyle.Top;
         _statusLabel.Height = 34;
@@ -1991,6 +2040,8 @@ public class MainForm : Form
         Controls.Add(_addressBarPanel);
         Controls.Add(_toggleButton);
         Controls.Add(_statusLabel);
+        // Docked after the status label, so the update banner sits directly above the protection banner.
+        Controls.Add(_updateBannerPanel);
         Controls.Add(_menuBarPanel);
 
         ApplyDpiAwareMetrics();
@@ -2213,6 +2264,231 @@ public class MainForm : Form
         var item = new ToolStripMenuItem(label);
         item.Click += (_, _) => DisableProtectionForDuration(label, duration);
         _disableProtectionMenu.Items.Add(item);
+    }
+
+    /// <summary>
+    /// The yellow "new version" banner above the protection banner. It stays hidden unless the startup update check
+    /// (CheckForUpdatesAsync) finds that this build does not match the latest release on its channel.
+    /// </summary>
+    private void BuildUpdateBanner()
+    {
+        _updateBannerPanel.Dock = DockStyle.Top;
+        _updateBannerPanel.Visible = false;
+        _updateBannerPanel.Height = ScaleByDpi(36);
+        _updateBannerPanel.Padding = ScalePadding(12, 3, 6, 3);
+        _updateBannerPanel.Margin = new Padding(0);
+        _updateBannerPanel.BorderStyle = BorderStyle.FixedSingle;
+        _updateBannerPanel.ColumnCount = 4;
+        _updateBannerPanel.RowCount = 1;
+        _updateBannerPanel.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
+        _updateBannerPanel.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100f));
+        _updateBannerPanel.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
+        _updateBannerPanel.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
+        _updateBannerPanel.RowStyles.Add(new RowStyle(SizeType.Percent, 100f));
+        _updateBannerPanel.AccessibleName = "PhantomHaze update available";
+        _updateBannerPanel.AccessibleRole = AccessibleRole.Alert;
+
+        _updateBannerTitleLabel.Text = "You're missing out on new features!";
+        _updateBannerTitleLabel.AutoSize = true;
+        _updateBannerTitleLabel.Dock = DockStyle.Fill;
+        _updateBannerTitleLabel.TextAlign = ContentAlignment.MiddleLeft;
+        _updateBannerTitleLabel.Font = new Font("Segoe UI", 9, FontStyle.Bold);
+        _updateBannerTitleLabel.Margin = ScalePadding(0, 0, 4, 0);
+        _updateBannerTitleLabel.UseMnemonic = false;
+
+        // Takes the remaining width and is shortened with "..." (the full text then shows as a tooltip) when the
+        // window is too narrow for the whole sentence, so the Update and X buttons always stay visible.
+        _updateBannerMessageLabel.Text = "Update to the latest version of PhantomHaze to get the latest features!";
+        _updateBannerMessageLabel.Dock = DockStyle.Fill;
+        _updateBannerMessageLabel.AutoEllipsis = true;
+        _updateBannerMessageLabel.TextAlign = ContentAlignment.MiddleLeft;
+        _updateBannerMessageLabel.Font = new Font("Segoe UI", 9, FontStyle.Regular);
+        _updateBannerMessageLabel.Margin = new Padding(0);
+        _updateBannerMessageLabel.UseMnemonic = false;
+
+        _updateBannerUpdateButton.Text = "Update";
+        _updateBannerUpdateButton.AutoSize = true;
+        _updateBannerUpdateButton.AutoSizeMode = AutoSizeMode.GrowAndShrink;
+        _updateBannerUpdateButton.Anchor = AnchorStyles.None;
+        _updateBannerUpdateButton.FlatStyle = FlatStyle.Flat;
+        _updateBannerUpdateButton.FlatAppearance.BorderSize = 1;
+        _updateBannerUpdateButton.Font = new Font("Segoe UI", 9, FontStyle.Regular);
+        _updateBannerUpdateButton.MinimumSize = new Size(ScaleByDpi(76), 0);
+        _updateBannerUpdateButton.Padding = ScalePadding(10, 0, 10, 0);
+        _updateBannerUpdateButton.Margin = ScalePadding(8, 0, 6, 0);
+        _updateBannerUpdateButton.AccessibleDescription = "Opens the PhantomHaze releases page on GitHub in a new tab.";
+        _updateBannerUpdateButton.Click += (_, _) =>
+            _ = OpenUrlInNewTabAsync(UpdateReminder.ReleasesPageUrl, "PhantomHaze releases page");
+
+        // The X does not dismiss the reminder for good: it opens the menu of (limited) snooze lengths.
+        _updateBannerSnoozeButton.Text = "X";
+        _updateBannerSnoozeButton.AutoSize = false;
+        _updateBannerSnoozeButton.Size = new Size(ScaleByDpi(30), ScaleByDpi(26));
+        _updateBannerSnoozeButton.Anchor = AnchorStyles.None;
+        _updateBannerSnoozeButton.FlatStyle = FlatStyle.Flat;
+        _updateBannerSnoozeButton.FlatAppearance.BorderSize = 0;
+        _updateBannerSnoozeButton.Font = new Font("Segoe UI", 9, FontStyle.Bold);
+        _updateBannerSnoozeButton.Margin = new Padding(0);
+        _updateBannerSnoozeButton.AccessibleName = "Snooze update reminder";
+        _updateBannerSnoozeButton.Click += (_, _) => ShowUpdateBannerSnoozeMenu();
+        _updateBannerToolTip.SetToolTip(_updateBannerSnoozeButton, "Snooze this reminder");
+
+        _updateBannerSnoozeMenu.ShowImageMargin = false;
+        _updateBannerSnoozeMenu.Items.Add(new ToolStripLabel("How long should we snooze this reminder for?")
+        {
+            Font = new Font(_updateBannerSnoozeMenu.Font, FontStyle.Bold),
+        });
+        _updateBannerSnoozeMenu.Items.Add(new ToolStripSeparator());
+        foreach (UpdateReminderSnoozeOption option in UpdateReminder.SnoozeOptions)
+        {
+            var item = new ToolStripMenuItem(option.Label);
+            item.Click += (_, _) => SnoozeUpdateBanner(option);
+            _updateBannerSnoozeMenu.Items.Add(item);
+        }
+
+        _updateBannerPanel.Controls.Add(_updateBannerTitleLabel, 0, 0);
+        _updateBannerPanel.Controls.Add(_updateBannerMessageLabel, 1, 0);
+        _updateBannerPanel.Controls.Add(_updateBannerUpdateButton, 2, 0);
+        _updateBannerPanel.Controls.Add(_updateBannerSnoozeButton, 3, 0);
+    }
+
+    private void ShowUpdateBannerSnoozeMenu()
+    {
+        // Opens below the X and extends to the left, so it does not run off the right-hand edge of the window.
+        _updateBannerSnoozeMenu.Show(
+            _updateBannerSnoozeButton,
+            new Point(_updateBannerSnoozeButton.Width, _updateBannerSnoozeButton.Height),
+            ToolStripDropDownDirection.BelowLeft);
+    }
+
+    private void SnoozeUpdateBanner(UpdateReminderSnoozeOption option)
+    {
+        DateTimeOffset snoozedUntil = option.GetSnoozeEnd(DateTimeOffset.UtcNow);
+        _updateBannerPanel.Visible = false;
+
+        try
+        {
+            UpdateReminderStore.Save(_updateReminderFilePath, new UpdateReminderState
+            {
+                SnoozedUntilUtc = snoozedUntil,
+                SnoozedOnVersion = AppVersionInfo.Tag?.ToString(),
+            });
+            Log($"Update reminder snoozed for {option.Label} (until {FormatLocalTimeForLog(snoozedUntil)}).");
+        }
+        catch (Exception ex)
+        {
+            Log($"Update reminder hidden for this session only; the snooze could not be saved: {ex.Message}");
+        }
+    }
+
+    private void ApplyThemeToUpdateBanner()
+    {
+        bool darkTheme = IsDarkTheme();
+        Color bannerBackColor = darkTheme ? Color.FromArgb(125, 104, 30) : Color.FromArgb(255, 226, 110);
+        Color bannerTextColor = darkTheme ? Color.White : Color.Black;
+
+        // The labels inherit the banner background; the Update button is themed with the other command buttons.
+        _updateBannerPanel.BackColor = bannerBackColor;
+        _updateBannerTitleLabel.ForeColor = bannerTextColor;
+        _updateBannerMessageLabel.ForeColor = bannerTextColor;
+        _updateBannerSnoozeButton.BackColor = bannerBackColor;
+        _updateBannerSnoozeButton.ForeColor = bannerTextColor;
+        _updateBannerSnoozeButton.FlatAppearance.MouseOverBackColor = darkTheme ? Color.FromArgb(148, 125, 44) : Color.FromArgb(242, 206, 82);
+        _updateBannerSnoozeButton.FlatAppearance.MouseDownBackColor = darkTheme ? Color.FromArgb(166, 142, 56) : Color.FromArgb(228, 189, 60);
+    }
+
+    /// <summary>
+    /// Runs at every startup. Shows the update banner when this build does not match the latest release on its own
+    /// channel (see UpdateReminder). Nothing is downloaded while the reminder is snoozed, and a failed check (offline,
+    /// GitHub unavailable, unexpected ver-banner.csv contents) only writes a log line and leaves the banner hidden.
+    /// </summary>
+    private async Task CheckForUpdatesAsync()
+    {
+        try
+        {
+            if (AppVersionInfo.Tag is not ReleaseTag currentRelease)
+            {
+                Log($"Update check skipped: this build's version '{NormalizeForLog(AppVersionInfo.InformationalVersion)}' " +
+                    "is not a vX.Y.Z-stable or vX.Y.Z-beta release tag.");
+                return;
+            }
+
+            DateTimeOffset now = DateTimeOffset.UtcNow;
+            UpdateReminderState reminderState = UpdateReminderStore.Load(_updateReminderFilePath, out string? loadProblem);
+            if (loadProblem is not null)
+            {
+                Log($"The saved update reminder state could not be read and was ignored: {loadProblem}");
+            }
+            else if (UpdateReminder.IsSnoozeTooLong(reminderState.SnoozedUntilUtc, now))
+            {
+                Log($"A saved update reminder snooze until {FormatLocalTimeForLog(reminderState.SnoozedUntilUtc!.Value)} " +
+                    "is longer than any snooze option allows and was ignored.");
+            }
+            else if (UpdateReminder.IsSnoozed(reminderState.SnoozedUntilUtc, now) &&
+                     !UpdateReminder.WasSnoozedOn(reminderState, currentRelease))
+            {
+                Log($"The update reminder was snoozed on {NormalizeForLog(reminderState.SnoozedOnVersion ?? "another build")}, " +
+                    $"so the snooze does not apply to PhantomHaze {currentRelease}.");
+            }
+
+            if (UpdateReminder.IsSnoozed(reminderState, currentRelease, now))
+            {
+                Log($"Update check skipped for PhantomHaze {currentRelease}: the update reminder is snoozed until " +
+                    $"{FormatLocalTimeForLog(reminderState.SnoozedUntilUtc!.Value)}.");
+                return;
+            }
+
+            string publishedReleases = await DownloadPublishedReleasesAsync(_updateCheckCancellation.Token);
+            if (IsDisposed || _updateCheckCancellation.IsCancellationRequested)
+            {
+                return;
+            }
+
+            string channelName = ReleaseTag.GetChannelName(currentRelease.Channel);
+            if (!UpdateReminder.TryGetLatestRelease(publishedReleases, currentRelease.Channel, out ReleaseTag latestRelease, out string problem))
+            {
+                Log($"Update check failed: {problem}");
+                return;
+            }
+
+            if (!UpdateReminder.ShouldShowBanner(currentRelease, latestRelease))
+            {
+                Log($"Update check: PhantomHaze {currentRelease} is the latest {channelName} release.");
+                return;
+            }
+
+            Log($"Update check: this is PhantomHaze {currentRelease} and the latest {channelName} release is {latestRelease}; " +
+                "showing the update banner.");
+            _updateBannerPanel.Visible = true;
+        }
+        catch (OperationCanceledException) when (_updateCheckCancellation.IsCancellationRequested)
+        {
+            // The window is closing.
+        }
+        catch (Exception ex)
+        {
+            Log($"Update check failed: {ex.Message}");
+        }
+    }
+
+    private static async Task<string> DownloadPublishedReleasesAsync(CancellationToken cancellationToken)
+    {
+        // One small request per startup, so a short-lived client is fine. HttpClient never follows a redirect from
+        // https to http, and the buffer limit stops an unexpectedly large response from being read into memory.
+        using var httpClient = new HttpClient
+        {
+            Timeout = TimeSpan.FromSeconds(15),
+            MaxResponseContentBufferSize = 64 * 1024,
+        };
+
+        using HttpResponseMessage response = await httpClient.GetAsync(UpdateReminder.PublishedReleasesUrl, cancellationToken);
+        response.EnsureSuccessStatusCode();
+        return await response.Content.ReadAsStringAsync(cancellationToken);
+    }
+
+    private static string FormatLocalTimeForLog(DateTimeOffset value)
+    {
+        return value.LocalDateTime.ToString("yyyy-MM-dd HH:mm", CultureInfo.InvariantCulture);
     }
 
     private void BuildAddressBar()
@@ -4602,6 +4878,8 @@ public class MainForm : Form
         catch (Exception ex)
         {
             Log($"Favourites load failed: {ex.Message}");
+            // favorites.json is rewritten on exit, which would otherwise replace the saved favourites with an empty list.
+            PreserveUnreadableFile(_favoritesFilePath, "favourites file", "Favourites start empty for this session.");
         }
 
         RefreshFavoritesPanelItems();
@@ -4616,7 +4894,7 @@ public class MainForm : Form
                 _favoriteUrls,
                 new JsonSerializerOptions { WriteIndented = true });
 
-            File.WriteAllText(_favoritesFilePath, json);
+            WriteFileAtomically(_favoritesFilePath, json);
         }
         catch (Exception ex)
         {
@@ -4715,7 +4993,7 @@ public class MainForm : Form
         {
             string cookieHeader = e.Request.Headers.GetHeader("Cookie");
             string safeUri = TrimForLog(e.Request.Uri, 220);
-            string safeHeader = TrimForLog(NormalizeForLog(cookieHeader), 1200);
+            string safeHeader = TrimForLog(DescribeCookieHeaderForLog(cookieHeader), 1200);
             Log($"Tab {tab.Id} cookie request header to {safeUri}: {safeHeader}");
         }
         catch (Exception ex)
@@ -4748,7 +5026,7 @@ public class MainForm : Form
                 }
 
                 sawSetCookie = true;
-                Log($"Tab {tab.Id} Set-Cookie from {e.Request.Uri}: {NormalizeForLog(value)}");
+                Log($"Tab {tab.Id} Set-Cookie from {e.Request.Uri}: {DescribeSetCookieHeaderForLog(value)}");
             }
 
             if (sawSetCookie)
@@ -4785,7 +5063,7 @@ public class MainForm : Form
                     ? "session"
                     : cookie.Expires.ToLocalTime().ToString("yyyy-MM-dd HH:mm:ss");
 
-                Log($"Cookie: {NormalizeForLog(cookie.Name)}={NormalizeForLog(cookie.Value)}; domain={NormalizeForLog(cookie.Domain)}; path={NormalizeForLog(cookie.Path)}; secure={cookie.IsSecure}; httpOnly={cookie.IsHttpOnly}; sameSite={cookie.SameSite}; expires={expires}");
+                Log($"Cookie: {NormalizeForLog(cookie.Name)}={HiddenCookieValue}; domain={NormalizeForLog(cookie.Domain)}; path={NormalizeForLog(cookie.Path)}; secure={cookie.IsSecure}; httpOnly={cookie.IsHttpOnly}; sameSite={cookie.SameSite}; expires={expires}");
             }
         }
         catch (Exception ex)
@@ -4796,6 +5074,7 @@ public class MainForm : Form
 
     private void CleanupWebSession()
     {
+        _updateCheckCancellation.Cancel();
         SaveSettings();
         SaveHistory();
         SaveFavorites();
@@ -4833,6 +5112,8 @@ public class MainForm : Form
         {
             _extensionLauncherToolTip.Dispose();
             _extensionMenuOverflowMenu.Dispose();
+            _updateBannerToolTip.Dispose();
+            _updateBannerSnoozeMenu.Dispose();
         }
         catch
         {
@@ -5200,7 +5481,7 @@ public class MainForm : Form
         _zoomLabel.ForeColor = textColor;
         _findCountLabel.ForeColor = textColor;
 
-        foreach (Button button in new[] { _toggleButton, _backButton, _goButton, _refreshButton, _historyButton, _newTabButton, _historyClearButton, _findCloseButton, _settingsButton })
+        foreach (Button button in new[] { _toggleButton, _backButton, _goButton, _refreshButton, _historyButton, _newTabButton, _historyClearButton, _findCloseButton, _settingsButton, _updateBannerUpdateButton })
         {
             button.BackColor = buttonBackColor;
             button.ForeColor = buttonTextColor;
@@ -5216,6 +5497,7 @@ public class MainForm : Form
         _logsViewButton.FlatAppearance.BorderColor = buttonBorderColor;
 
         UpdateProtectionStatusVisual();
+        ApplyThemeToUpdateBanner();
         UpdateWebViewToggleVisual();
         UpdateFavoriteButtonState();
         UpdateTabHeaderVisuals();
@@ -6441,6 +6723,39 @@ public class MainForm : Form
 
     private static string NormalizeForLog(string? value)
         => (value ?? string.Empty).Replace("\r", "\\r").Replace("\n", "\\n");
+
+    // Cookie values (session ids, login tokens) never go into the log: it is shown on screen and written to a file in
+    // %TEMP% that outlives the session, while cookies themselves are meant to exist only in memory for the session.
+    private const string HiddenCookieValue = "<value hidden>";
+
+    /// <summary>"a=1; b=2" (a Cookie request header) becomes "a=&lt;value hidden&gt;; b=&lt;value hidden&gt;".</summary>
+    private static string DescribeCookieHeaderForLog(string? cookieHeader)
+    {
+        IEnumerable<string> names = (cookieHeader ?? string.Empty)
+            .Split(';', StringSplitOptions.TrimEntries | StringSplitOptions.RemoveEmptyEntries)
+            .Select(pair => $"{GetCookieName(pair)}={HiddenCookieValue}");
+        return NormalizeForLog(string.Join("; ", names));
+    }
+
+    /// <summary>
+    /// "id=abc; Path=/; HttpOnly" (a Set-Cookie header) becomes "id=&lt;value hidden&gt;; Path=/; HttpOnly". The
+    /// attributes after the first ';' (Path, Domain, Expires, Secure, ...) describe the cookie and are kept.
+    /// </summary>
+    private static string DescribeSetCookieHeaderForLog(string? setCookieHeader)
+    {
+        string header = setCookieHeader ?? string.Empty;
+        int attributesStart = header.IndexOf(';');
+        string nameValue = attributesStart < 0 ? header : header[..attributesStart];
+        string attributes = attributesStart < 0 ? string.Empty : header[attributesStart..];
+        return NormalizeForLog($"{GetCookieName(nameValue)}={HiddenCookieValue}{attributes}");
+    }
+
+    private static string GetCookieName(string nameValuePair)
+    {
+        // Without '=' the whole text is the value of a nameless cookie (RFC 6265), so nothing of it is shown.
+        int separator = nameValuePair.IndexOf('=');
+        return separator < 0 ? string.Empty : nameValuePair[..separator].Trim();
+    }
 
     private static string TrimForLog(string? value, int maxLength)
     {
