@@ -28,7 +28,7 @@
   </ItemGroup>
 
   <ItemGroup>
-    <Compile Include="**/*.cs" Exclude="bin/**;obj/**;tmp/**;compiler/tmp/**;PhantomHaze_MainForm.cs" />
+    <Compile Include="**/*.cs" Exclude="bin/**;obj/**;tmp/**;compiler/tmp/**" />
   </ItemGroup>
 
   <Target Name="ValidatePhantomHazeReleaseChannel" BeforeTargets="BeforeBuild"
