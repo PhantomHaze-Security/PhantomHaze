@@ -30,6 +30,7 @@ Includes timed disable options with a live countdown banner so you always know w
 ###  True Ephemeral Privacy
 * **Zero Session Footprint:** Web history and session cookies are stored strictly in memory and wiped automatically the moment you close the app.
 * **Persistent Favorites:** Keeps your bookmarked favorite sites safely saved across sessions without storing tracking cookies.
+* **Logs You Control:** Logs (including the addresses of pages you open) are kept in `%LOCALAPPDATA%\PhantomHaze\logs`, so the Master Log covers everything since installation. Cookie names and values are never logged, and **Settings -> About -> Delete all logs** removes them at any time.
 
 ###  Modern Browser Suite
 * **Tabbed Navigation:** Clean tab interface with live site favicons and title updates.
@@ -37,12 +38,25 @@ Includes timed disable options with a live countdown banner so you always know w
 * **Live Status Logging:** Instant visual feedback whenever protection is active or toggled.
 * **Smooth View Switching:** Web View transitions wait for the page surface to be ready, with an inline loading state to prevent partial renders.
 
+###  Make It Yours
+* **Custom Themes:** Pick any colour for the whole window with the colour picker, or build a two-colour gradient theme (left to right, top to bottom or diagonal), alongside the Light and Dark themes.
+* **Text Colour:** Theme default, White, Black, any custom colour - or **Rainbow**, which changes the text to a random colour every half second.
+* **Google Fonts:** Paste a link from [Google Fonts](https://fonts.google.com) to use that font throughout the app. It is downloaded once and cached.
+* **Live Clock:** The menu bar shows the time from your computer's clock, seconds included.
+
+###  Backup, Sync & Diagnostics
+* **Export / Import (`.phstg`):** Settings -> Backup saves your settings and installed extensions (with their settings) to a `.phstg` file. Import it into any PhantomHaze to sync it straight away; if both have extensions, choose to **Skip**, **Merge** or **Overwrite**.
+* **About & Master Log:** Settings -> About shows the version, app size, how much data PhantomHaze stores and technical details, and downloads every log since installation as one `.zip`.
+* **Quieter Logs:** New cookies are summarised in a single line (`12 cookies were registered`) instead of one line per cookie.
+
 ### 🧩 PhantomHaze Extensions (`.phext`)
 * **Importable Extension Files:** Load `.phext` files from **Settings -> Extensions -> Import extension**.
-* **Global + Per-Extension Controls:** Toggle all extensions at once or disable individual installed extensions.
+* **Global + Per-Extension Controls:** Toggle all extensions at once, disable individual installed extensions, or uninstall a single extension from its settings panel.
 * **Extension UI Launcher:** Extensions with `ui.html` automatically get a bottom-right launcher button with their icon.
 * **Web View Modification Hooks:** Extensions can inject JS/CSS and block matching web requests.
-* **App Surface Customization:** Extensions can add settings fields and top-bar buttons, plus override start page/search engine while enabled.
+* **App Surface Customization:** Extensions can add settings fields, menu bar buttons and dropdown menus, plus override start page/search engine while enabled.
+* **Extension Pages:** Extensions can add their own page, shown in the main window just like Logs and Web View.
+* **UI Customization:** Extensions can restyle PhantomHaze's own controls and replace them with SVG graphics or shapes (the protection banner is off-limits, so an extension can never fake your protection status).
 
 Extension language reference: [`PHEXT_GUIDE.md`](./PHEXT_GUIDE.md)
 

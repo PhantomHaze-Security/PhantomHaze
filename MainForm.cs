@@ -8,12 +8,18 @@ using Microsoft.Web.WebView2.WinForms;
 
 namespace PhantomHaze;
 
-public class MainForm : Form
+public partial class MainForm : Form
 {
     private enum AppTheme
     {
         Light,
         Dark,
+
+        /// <summary>A colour the user picked (Settings -> Appearance).</summary>
+        Custom,
+
+        /// <summary>A gradient between two colours the user picked.</summary>
+        Gradient,
     }
 
     private enum SearchEngine
@@ -36,6 +42,17 @@ public class MainForm : Form
         public bool ExtensionsEnabled { get; set; } = true;
         public List<InstalledExtensionEntry> Extensions { get; set; } = new();
 
+        // Appearance (stored as #RRGGBB so settings.json and .phstg exports stay readable).
+        public string CustomThemeColor { get; set; } = DefaultCustomThemeColor;
+        public string GradientStartColor { get; set; } = DefaultGradientStartColor;
+        public string GradientEndColor { get; set; } = DefaultGradientEndColor;
+        public ThemeGradientDirection GradientDirection { get; set; } = ThemeGradientDirection.Horizontal;
+        public TextColorMode TextColorMode { get; set; } = TextColorMode.Automatic;
+        public string CustomTextColor { get; set; } = DefaultCustomTextColor;
+
+        /// <summary>The Google Fonts stylesheet the app font comes from ("" for the default font).</summary>
+        public string CustomFontUrl { get; set; } = string.Empty;
+
         public AppSettings Clone()
         {
             return new AppSettings
@@ -48,6 +65,13 @@ public class MainForm : Form
                 StartingPage = StartingPage,
                 ExtensionsEnabled = ExtensionsEnabled,
                 Extensions = Extensions.Select(entry => entry.Clone()).ToList(),
+                CustomThemeColor = CustomThemeColor,
+                GradientStartColor = GradientStartColor,
+                GradientEndColor = GradientEndColor,
+                GradientDirection = GradientDirection,
+                TextColorMode = TextColorMode,
+                CustomTextColor = CustomTextColor,
+                CustomFontUrl = CustomFontUrl,
             };
         }
     }
@@ -164,8 +188,6 @@ public class MainForm : Form
         public string? RenderedContent { get; set; }
     }
 
-    private sealed record ExtensionMenuCommand(LoadedExtension Extension, PhantomExtensionAppButtonDefinition AppButton);
-
     private sealed class AuxiliaryWindowProtection
     {
         public AuxiliaryWindowProtection(string description)
@@ -266,11 +288,14 @@ public class MainForm : Form
         public int NavigationSequence { get; set; }
     }
 
-    private readonly Panel _menuBarPanel = new();
+    private readonly ThemedPanel _menuBarPanel = new();
     private readonly PictureBox _menuLogoPictureBox = new();
     private readonly Label _menuLogoLabel = new();
     private readonly Button _logsViewButton = new();
     private readonly FlowLayoutPanel _extensionMenuButtonsPanel = new();
+    private readonly Label _menuClockLabel = new();
+    // Ticks once per second, aligned to the system clock. The clock is never written to the log.
+    private readonly System.Windows.Forms.Timer _clockTimer = new();
     private readonly Label _statusLabel = new();
     private readonly TableLayoutPanel _updateBannerPanel = new();
     private readonly Label _updateBannerTitleLabel = new();
@@ -286,7 +311,7 @@ public class MainForm : Form
     private readonly Button _settingsButton = new();
     private readonly ContextMenuStrip _disableProtectionMenu = new();
     private readonly System.Windows.Forms.Timer _protectionRestoreTimer = new();
-    private readonly Panel _addressBarPanel = new();
+    private readonly ThemedPanel _addressBarPanel = new();
     private readonly TextBox _addressBarTextBox = new();
     private readonly Button _favoriteButton = new();
     private readonly Button _backButton = new();
@@ -297,12 +322,14 @@ public class MainForm : Form
     private readonly TrackBar _zoomSlider = new();
     private readonly FlowLayoutPanel _tabsFlowPanel = new();
     private readonly Button _newTabButton = new();
-    private readonly Panel _contentHostPanel = new();
+    private readonly ThemedPanel _contentHostPanel = new();
     private readonly FlowLayoutPanel _extensionLauncherPanel = new();
-    private readonly Panel _webViewHostPanel = new();
-    private readonly Panel _webViewLoadingOverlayPanel = new();
+    private readonly ThemedPanel _webViewHostPanel = new();
+    // Hosts the pages extensions add with app.page; shown instead of the log panel or Web View.
+    private readonly ThemedPanel _extensionPageHostPanel = new();
+    private readonly ThemedPanel _webViewLoadingOverlayPanel = new();
     private readonly Label _webViewLoadingLabel = new();
-    private readonly Panel _historyPanel = new();
+    private readonly ThemedPanel _historyPanel = new();
     private readonly ListBox _historyListBox = new();
     private readonly ListBox _favoritesListBox = new();
     private readonly Button _historyClearButton = new();
@@ -319,7 +346,17 @@ public class MainForm : Form
     private readonly Font _tabCloseFontCompact = new("Segoe UI", 6.5f, FontStyle.Bold);
     private readonly Font _menuButtonFontRegular = new("Segoe UI", 10, FontStyle.Regular);
     private readonly Font _menuButtonFontBold = new("Segoe UI", 10, FontStyle.Bold);
-    private readonly string _logFilePath;
+    // Shared fonts: these used to be created per control (one per tab opened, several per Settings window opened)
+    // and were never disposed, leaking a GDI font handle each time.
+    private readonly Font _menuTitleFont = new("Segoe UI", 10, FontStyle.Bold);
+    private readonly Font _tabTitleFont = new("Segoe UI", 8.5f, FontStyle.Regular);
+    private readonly Font _stripButtonFont = new("Segoe UI", 9, FontStyle.Regular);
+    private readonly Font _favoriteButtonFont = new("Segoe UI", 11, FontStyle.Bold);
+    private readonly Font _zoomLabelFont = new("Segoe UI", 9, FontStyle.Regular);
+    private readonly Font _newTabButtonFont = new("Segoe UI", 12, FontStyle.Bold);
+    private readonly Font _logFont = new("Consolas", 9);
+    private readonly string _logDirectory;
+    private readonly string _fontCacheDirectory;
     private readonly string _webSessionPath;
     private readonly string _favoritesFilePath;
     private readonly string _historyFilePath;
@@ -350,9 +387,13 @@ public class MainForm : Form
     private AppSettings _settings = new();
     private TableLayoutPanel? _addressRootLayout;
     private TableLayoutPanel? _addressStripLayout;
+    private TableLayoutPanel? _addressInputLayout;
     private TableLayoutPanel? _tabsLayout;
     private TableLayoutPanel? _historyLayout;
     private TableLayoutPanel? _findLayout;
+    private TableLayoutPanel? _menuLayout;
+    private TableLayoutPanel? _menuLogoLayout;
+    private Image? _defaultLogoImage;
 
     private CoreWebView2Environment? _webEnvironment;
     private BrowserTab? _activeTab;
@@ -366,6 +407,19 @@ public class MainForm : Form
     private int _findRequestVersion;
     private int _webViewModeSwitchVersion;
     private DateTimeOffset? _protectionResumeAtUtc;
+
+    // New cookies are counted a moment after a page load or Set-Cookie burst and logged as one summary line.
+    private readonly System.Windows.Forms.Timer _cookieCheckTimer = new() { Interval = 1500 };
+    private readonly HashSet<string> _knownCookieKeys = new(StringComparer.Ordinal);
+    private BrowserTab? _cookieCheckTab;
+    private bool _cookieCheckInProgress;
+
+    // The zoom slider is logged once it settles, not for every step while it is dragged.
+    private readonly System.Windows.Forms.Timer _zoomLogTimer = new() { Interval = 700 };
+    private (int TabId, int Percent)? _pendingZoomLog;
+
+    /// <summary>Marks tab close buttons, whose font is chosen by UpdateTabLayout rather than the app font walk.</summary>
+    private static readonly object TabCloseButtonTag = new();
 
     private const string DefaultHomeUrl = "https://www.google.com";
     private const string FindShortcutMessage = "__PH_FIND__";
@@ -406,7 +460,8 @@ public class MainForm : Form
         KeyDown += OnMainFormKeyDown;
         TrySetWindowIcon();
 
-        _logFilePath = InitializeLogFilePath();
+        _logDirectory = InitializeLogDirectory();
+        _fontCacheDirectory = Path.Combine(GetAppDataDirectory(), "fonts");
         _webSessionPath = InitializeWebSessionPath();
         _favoritesFilePath = InitializeFavoritesFilePath();
         _historyFilePath = InitializeHistoryFilePath();
@@ -419,6 +474,11 @@ public class MainForm : Form
         _faviconHttpClient.MaxResponseContentBufferSize = 1024 * 1024;
         _protectionRestoreTimer.Interval = 1000;
         _protectionRestoreTimer.Tick += OnProtectionRestoreTimerTick;
+        _clockTimer.Interval = 1000;
+        _clockTimer.Tick += (_, _) => UpdateClock();
+        _rainbowTimer.Tick += OnRainbowTimerTick;
+        _cookieCheckTimer.Tick += OnCookieCheckTimerTick;
+        _zoomLogTimer.Tick += OnZoomLogTimerTick;
 
         LoadSettings();
         NormalizeSettings();
@@ -434,7 +494,10 @@ public class MainForm : Form
         Load += (_, _) =>
         {
             ApplyDpiAwareMetrics();
-            Log($"Log file: {_logFilePath}");
+            UpdateClock();
+            _clockTimer.Start();
+            UpdateRainbowTimer();
+            Log($"Logs folder: {_logDirectory}");
             Log($"Web session path: {_webSessionPath}");
             Log($"Favorites file: {_favoritesFilePath}");
             Log($"History file: {_historyFilePath}");
@@ -445,6 +508,9 @@ public class MainForm : Form
 
             // Decides at every startup whether the update banner is shown; it runs in the background.
             _ = CheckForUpdatesAsync();
+
+            // A custom font from Google Fonts loads from the local cache (downloading it only the first time).
+            _ = ApplyCustomFontAsync();
         };
 
         FormClosing += (_, _) => CleanupWebSession();
@@ -452,6 +518,11 @@ public class MainForm : Form
         {
             UpdateTabLayout();
             UpdateResponsiveLayout();
+            if (_palette.Gradient is not null)
+            {
+                // The gradient spans the whole window, so every surface changes when the window is resized.
+                InvalidateThemeSurfaces();
+            }
         };
         DpiChanged += (_, _) =>
         {
@@ -506,6 +577,8 @@ public class MainForm : Form
         _logsViewButton.Margin = ScalePadding(0, 0, 6, 0);
         _webViewToggleButton.Margin = ScalePadding(0, 0, 6, 0);
         _settingsButton.Margin = new Padding(0);
+        _menuClockLabel.Margin = ScalePadding(6, 0, 10, 0);
+        UpdateClockMinimumWidth();
 
         _addressBarPanel.Height = ScaleByDpi(104);
         _addressBarPanel.Padding = ScalePadding(8, 8, 8, 6);
@@ -584,11 +657,103 @@ public class MainForm : Form
         }
     }
 
-    private static string InitializeLogFilePath()
+    /// <summary>
+    /// Logs are kept with the rest of PhantomHaze's data, one file per day, so the Master Log (Settings -> About)
+    /// really holds everything since PhantomHaze was installed. Until v1.3.5 they were written to %TEMP%, which
+    /// Windows clears on its own; any logs still there are moved here.
+    /// </summary>
+    private static string InitializeLogDirectory()
     {
-        string logDir = Path.Combine(Path.GetTempPath(), "PhantomHaze", "logs");
-        Directory.CreateDirectory(logDir);
-        return Path.Combine(logDir, $"phantomhaze-{DateTime.UtcNow:yyyyMMdd}.log");
+        string logDirectory = Path.Combine(GetAppDataDirectory(), "logs");
+        try
+        {
+            Directory.CreateDirectory(logDirectory);
+            MigrateLegacyLogs(logDirectory);
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+            // Logging is best effort; Log() ignores write failures.
+        }
+
+        return logDirectory;
+    }
+
+    private static void MigrateLegacyLogs(string logDirectory)
+    {
+        string legacyDirectory = Path.Combine(Path.GetTempPath(), "PhantomHaze", "logs");
+        if (!Directory.Exists(legacyDirectory))
+        {
+            return;
+        }
+
+        foreach (string source in Directory.EnumerateFiles(legacyDirectory, LogFileSearchPattern).ToList())
+        {
+            try
+            {
+                string target = Path.Combine(logDirectory, Path.GetFileName(source));
+                if (File.Exists(target))
+                {
+                    // Both folders have a file for the same day: the older (temp) lines go first.
+                    WriteFileAtomically(target, File.ReadAllText(source) + File.ReadAllText(target));
+                    File.Delete(source);
+                }
+                else
+                {
+                    File.Move(source, target);
+                }
+            }
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+            {
+                // Tried again at the next start.
+            }
+        }
+
+        try
+        {
+            if (!Directory.EnumerateFileSystemEntries(legacyDirectory).Any())
+            {
+                Directory.Delete(legacyDirectory);
+            }
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+            // Not important.
+        }
+    }
+
+    private const string LogFileSearchPattern = "phantomhaze-*.log";
+
+    /// <summary>Today's log file. Computed for every entry, so a session that runs past midnight starts a new file.</summary>
+    private string GetCurrentLogFilePath()
+    {
+        return Path.Combine(_logDirectory, $"phantomhaze-{DateTime.Now.ToString("yyyyMMdd", CultureInfo.InvariantCulture)}.log");
+    }
+
+    /// <summary>Every log file PhantomHaze has written (the Master Log), oldest first.</summary>
+    private List<PhantomLogFile> GetLogFiles()
+    {
+        try
+        {
+            if (!Directory.Exists(_logDirectory))
+            {
+                return new List<PhantomLogFile>();
+            }
+
+            return new DirectoryInfo(_logDirectory)
+                .EnumerateFiles(LogFileSearchPattern)
+                .OrderBy(file => file.Name, StringComparer.OrdinalIgnoreCase)
+                .Select(file => new PhantomLogFile(file.Name, file.FullName, file.Length, file.LastWriteTimeUtc))
+                .ToList();
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+            return new List<PhantomLogFile>();
+        }
+    }
+
+    private static string GetAppDataDirectory()
+    {
+        return Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "PhantomHaze");
     }
 
     private static string InitializeWebSessionPath()
@@ -733,6 +898,25 @@ public class MainForm : Form
         {
             settings.HistoryRetentionDays = 1;
         }
+
+        if (!Enum.IsDefined(settings.GradientDirection))
+        {
+            settings.GradientDirection = ThemeGradientDirection.Horizontal;
+        }
+
+        if (!Enum.IsDefined(settings.TextColorMode))
+        {
+            settings.TextColorMode = TextColorMode.Automatic;
+        }
+
+        settings.CustomThemeColor = NormalizeColorSetting(settings.CustomThemeColor, DefaultCustomThemeColor);
+        settings.GradientStartColor = NormalizeColorSetting(settings.GradientStartColor, DefaultGradientStartColor);
+        settings.GradientEndColor = NormalizeColorSetting(settings.GradientEndColor, DefaultGradientEndColor);
+        settings.CustomTextColor = NormalizeColorSetting(settings.CustomTextColor, DefaultCustomTextColor);
+        settings.CustomFontUrl = !string.IsNullOrWhiteSpace(settings.CustomFontUrl) &&
+                                 GoogleFontLoader.TryNormalizeFontUrl(settings.CustomFontUrl, out string fontUrl, out _)
+            ? fontUrl
+            : string.Empty;
 
         settings.StartingPage = NormalizeStartPage(settings.StartingPage);
 
@@ -1247,51 +1431,10 @@ public class MainForm : Form
         RebuildExtensionMenuButtons();
         RebuildExtensionLauncherButtons();
         PositionExtensionLauncherPanel();
-    }
 
-    private void RebuildExtensionMenuButtons()
-    {
-        _extensionMenuButtonsPanel.SuspendLayout();
-        try
-        {
-            // The overflow button is permanent; only the per-extension buttons are recreated.
-            _extensionMenuButtonsPanel.Controls.Remove(_extensionMenuOverflowButton);
-            foreach (Control control in _extensionMenuButtonsPanel.Controls.OfType<Control>().ToArray())
-            {
-                control.Dispose();
-            }
-
-            _extensionMenuButtonsPanel.Controls.Clear();
-            _overflowedExtensionMenuButtons.Clear();
-
-            foreach (LoadedExtension extension in GetEnabledExtensions())
-            {
-                foreach (PhantomExtensionAppButtonDefinition appButton in extension.Definition.AppButtons)
-                {
-                    var button = new Button();
-                    ConfigureMenuButton(button, appButton.Label);
-                    button.MinimumSize = new Size(ScaleByDpi(64), 0);
-                    // Labels come from extensions: show '&' literally instead of turning it into a mnemonic.
-                    button.UseMnemonic = false;
-                    button.AccessibleName = string.IsNullOrWhiteSpace(appButton.Label) ? appButton.Id : appButton.Label;
-                    button.Click += (_, _) => ExecuteExtensionAppButton(extension, appButton);
-                    button.Tag = new ExtensionMenuCommand(extension, appButton);
-                    _extensionMenuButtonsPanel.Controls.Add(button);
-                }
-            }
-
-            ConfigureMenuButton(_extensionMenuOverflowButton, "»");
-            _extensionMenuOverflowButton.MinimumSize = new Size(ScaleByDpi(40), 0);
-            _extensionMenuOverflowButton.Visible = false;
-            _extensionMenuButtonsPanel.Controls.Add(_extensionMenuOverflowButton);
-        }
-        finally
-        {
-            _extensionMenuButtonsPanel.ResumeLayout(true);
-        }
-
-        ApplyThemeToDynamicExtensionControls();
-        UpdateExtensionMenuOverflow();
+        // Re-applies colours, fonts and the extensions' ui.element / ui.svg / ui.shape customisations, so controls
+        // customised by an extension that was just disabled or uninstalled go back to how they normally look.
+        ApplyTheme();
     }
 
     /// <summary>
@@ -1358,36 +1501,6 @@ public class MainForm : Form
         return Math.Max(preferred.Width, button.MinimumSize.Width) + button.Margin.Horizontal;
     }
 
-    private void ShowExtensionMenuOverflow()
-    {
-        foreach (ToolStripItem item in _extensionMenuOverflowMenu.Items.Cast<ToolStripItem>().ToArray())
-        {
-            item.Dispose();
-        }
-
-        _extensionMenuOverflowMenu.Items.Clear();
-        foreach (Button hiddenButton in _overflowedExtensionMenuButtons)
-        {
-            if (hiddenButton.IsDisposed || hiddenButton.Tag is not ExtensionMenuCommand command)
-            {
-                continue;
-            }
-
-            // '&' is doubled so menu items show extension labels literally, like the toolbar buttons do.
-            var item = new ToolStripMenuItem(hiddenButton.Text.Replace("&", "&&", StringComparison.Ordinal))
-            {
-                AccessibleName = hiddenButton.AccessibleName,
-            };
-            item.Click += (_, _) => ExecuteExtensionAppButton(command.Extension, command.AppButton);
-            _extensionMenuOverflowMenu.Items.Add(item);
-        }
-
-        if (_extensionMenuOverflowMenu.Items.Count > 0)
-        {
-            _extensionMenuOverflowMenu.Show(_extensionMenuOverflowButton, new Point(0, _extensionMenuOverflowButton.Height));
-        }
-    }
-
     private void RebuildExtensionLauncherButtons()
     {
         _extensionLauncherToolTip.RemoveAll();
@@ -1438,15 +1551,19 @@ public class MainForm : Form
 
     private void ApplyThemeToDynamicExtensionControls()
     {
-        bool darkTheme = IsDarkTheme();
-        Color buttonBackColor = GetCommandButtonBackColor();
-        Color buttonTextColor = darkTheme ? Color.FromArgb(225, 233, 244) : SystemColors.ControlText;
-        Color buttonBorderColor = darkTheme ? Color.FromArgb(105, 116, 132) : Color.FromArgb(158, 177, 201);
+        Color buttonTextColor = ResolveTextColor(_palette.ButtonText);
+        Color buttonBackColor = ResolveSurfaceBack(_palette.ButtonBack, buttonTextColor);
+        Color buttonBorderColor = _palette.ButtonBorder;
 
         foreach (Button button in _extensionMenuButtonsPanel.Controls.OfType<Button>())
         {
-            button.BackColor = buttonBackColor;
-            button.ForeColor = buttonTextColor;
+            // Page buttons are view switchers and are coloured with Logs and Web View (UpdateWebViewToggleVisual).
+            if (button.Tag is not ExtensionMenuEntry { Kind: ExtensionMenuEntryKind.Page })
+            {
+                button.BackColor = buttonBackColor;
+                button.ForeColor = buttonTextColor;
+            }
+
             button.FlatAppearance.BorderColor = buttonBorderColor;
             button.FlatAppearance.BorderSize = 1;
         }
@@ -1458,20 +1575,6 @@ public class MainForm : Form
             button.FlatAppearance.BorderColor = buttonBorderColor;
             button.FlatAppearance.BorderSize = 1;
         }
-    }
-
-    private void ExecuteExtensionAppButton(LoadedExtension extension, PhantomExtensionAppButtonDefinition appButton)
-    {
-        string resolvedMessage = ResolveExtensionPlaceholders(appButton.Message, extension);
-        Log($"[{NormalizeForLog(extension.Definition.Name)}] {NormalizeForLog(appButton.Label)}: {NormalizeForLog(resolvedMessage)}");
-
-        // The message can contain the user's setting values, so the dialog is protected like the app's windows.
-        ShowCaptureProtectedDialog(() => MessageBox.Show(
-            this,
-            resolvedMessage,
-            extension.Definition.Name,
-            MessageBoxButtons.OK,
-            MessageBoxIcon.Information));
     }
 
     /// <summary>
@@ -1561,7 +1664,7 @@ public class MainForm : Form
 
     private Color GetExtensionWindowBackColor()
     {
-        return IsDarkTheme() ? Color.FromArgb(38, 44, 52) : Color.White;
+        return _palette.ExtensionWindowBack;
     }
 
     private async Task InitializeExtensionWindowAsync(ExtensionWindowState state)
@@ -1600,15 +1703,7 @@ public class MainForm : Form
                 return;
             }
 
-            CoreWebView2 core = webView.CoreWebView2;
-            core.Settings.AreDevToolsEnabled = false;
-            core.Settings.AreDefaultContextMenusEnabled = true;
-            core.NewWindowRequested += OnExtensionWindowNewWindowRequested;
-            // The window only ever shows the extension's own UI: links that would navigate it to a web page open
-            // in a protected tab instead, and web.block rules apply to everything the UI itself loads.
-            core.NavigationStarting += OnExtensionWindowNavigationStarting;
-            core.WebResourceRequested += OnExtensionWindowWebResourceRequested;
-            AddWebResourceRequestedFilterForAllFrames(core);
+            ConfigureExtensionSurfaceCore(webView.CoreWebView2);
             RenderExtensionWindow(state);
         }
         catch (Exception ex)
@@ -1671,8 +1766,8 @@ public class MainForm : Form
 
         if (state.FallbackBox is { IsDisposed: false } fallbackBox)
         {
-            fallbackBox.BackColor = IsDarkTheme() ? Color.FromArgb(31, 36, 43) : Color.White;
-            fallbackBox.ForeColor = IsDarkTheme() ? Color.FromArgb(228, 236, 247) : Color.Black;
+            fallbackBox.BackColor = _palette.FallbackBack;
+            fallbackBox.ForeColor = _palette.FallbackText;
             string fallbackText = $"Extension UI fallback for '{extension.Definition.Name}'\n\n" +
                                   "The extension UI could not be displayed with WebView2.\n\n" +
                                   ResolveExtensionPlaceholders(extension.Definition.Ui.Html, extension);
@@ -1834,19 +1929,40 @@ public class MainForm : Form
 
     private string BuildExtensionUiDocument(LoadedExtension extension)
     {
+        return BuildExtensionHtmlDocument(extension, extension.Definition.Ui.Html, extension.Definition.Ui.Title);
+    }
+
+    /// <summary>
+    /// The document shown in an extension window (ui.html) or extension page (app.page). Fragments are wrapped in a
+    /// page that follows the app's theme, text colour and font; complete documents (with &lt;html&gt;) are used as written.
+    /// </summary>
+    private string BuildExtensionHtmlDocument(LoadedExtension extension, string html, string title)
+    {
         // Placeholder values are user-entered text, not markup, so they are HTML-encoded here.
-        string resolvedHtml = ResolveExtensionPlaceholders(
-            extension.Definition.Ui.Html,
-            extension,
-            PhantomExtensionPlaceholderContext.Html);
-        if (extension.Definition.Ui.Html.Contains("<html", StringComparison.OrdinalIgnoreCase))
+        string resolvedHtml = ResolveExtensionPlaceholders(html, extension, PhantomExtensionPlaceholderContext.Html);
+        if (html.Contains("<html", StringComparison.OrdinalIgnoreCase))
         {
             return resolvedHtml;
         }
 
-        string textColor = IsDarkTheme() ? "#E4ECF7" : "#111111";
-        string backColor = IsDarkTheme() ? "#262C34" : "#FFFFFF";
-        string encodedTitle = WebUtility.HtmlEncode(extension.Definition.Ui.Title);
+        ThemePalette palette = _palette;
+        // Rainbow text would need constant re-rendering, so documents use the theme's text colour in that mode.
+        Color text = _settings.TextColorMode == TextColorMode.Rainbow ? palette.DocumentText : ResolveTextColor(palette.DocumentText);
+        string textColor = PhantomColorParser.ToHex(text);
+        string background = palette.Gradient is ThemeGradient gradient
+            ? string.Create(CultureInfo.InvariantCulture, $"linear-gradient({gradient.CssAngle}, {PhantomColorParser.ToHex(gradient.Start)}, {PhantomColorParser.ToHex(gradient.End)}) fixed")
+            : PhantomColorParser.ToHex(palette.DocumentBack);
+        string fontFamily = "\"Segoe UI\", sans-serif";
+        string fontLink = string.Empty;
+        if (_appFont is not null)
+        {
+            // The window's browser process cannot see fonts loaded into PhantomHaze itself, so it loads the same
+            // Google Fonts stylesheet (only fonts.googleapis.com links are ever stored in this setting).
+            fontFamily = $"\"{_appFont.Family.Replace("\"", string.Empty, StringComparison.Ordinal)}\", {fontFamily}";
+            fontLink = $"<link rel=\"stylesheet\" href=\"{WebUtility.HtmlEncode(_appFont.CssUrl)}\">";
+        }
+
+        string encodedTitle = WebUtility.HtmlEncode(title);
         return $$"""
 <!doctype html>
 <html>
@@ -1854,13 +1970,16 @@ public class MainForm : Form
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>{{encodedTitle}}</title>
+  {{fontLink}}
   <style>
     body {
       margin: 0;
       padding: 16px;
-      font-family: "Segoe UI", sans-serif;
+      min-height: 100vh;
+      box-sizing: border-box;
+      font-family: {{fontFamily}};
       color: {{textColor}};
-      background: {{backColor}};
+      background: {{background}};
     }
   </style>
 </head>
@@ -1992,6 +2111,7 @@ public class MainForm : Form
         BuildProtectionDisableMenu();
         ProtectPopupMenuFromCapture(_disableProtectionMenu);
         ProtectPopupMenuFromCapture(_extensionMenuOverflowMenu);
+        ProtectPopupMenuFromCapture(_extensionDropdownMenu);
         ProtectPopupMenuFromCapture(_updateBannerSnoozeMenu);
 
         _statusLabel.Dock = DockStyle.Top;
@@ -2018,13 +2138,17 @@ public class MainForm : Form
         _logBox.ReadOnly = true;
         _logBox.ScrollBars = ScrollBars.Vertical;
         _logBox.Dock = DockStyle.Fill;
-        _logBox.Font = new Font("Consolas", 9);
+        _logBox.Font = _logFont;
 
         _webViewHostPanel.Dock = DockStyle.Fill;
         _webViewHostPanel.Visible = false;
 
+        _extensionPageHostPanel.Dock = DockStyle.Fill;
+        _extensionPageHostPanel.Visible = false;
+
         _contentHostPanel.Dock = DockStyle.Fill;
         _contentHostPanel.Controls.Add(_webViewHostPanel);
+        _contentHostPanel.Controls.Add(_extensionPageHostPanel);
         _contentHostPanel.Controls.Add(_logBox);
         _contentHostPanel.Controls.Add(_historyPanel);
         _contentHostPanel.Controls.Add(_findPanel);
@@ -2044,6 +2168,14 @@ public class MainForm : Form
         Controls.Add(_updateBannerPanel);
         Controls.Add(_menuBarPanel);
 
+        foreach (ThemedPanel surface in ThemeSurfaces)
+        {
+            surface.BackgroundPainter = PaintThemeGradient;
+        }
+
+        BuildUiTargetBindings();
+        // Taken before any custom font is applied, so the default fonts can always be restored.
+        RegisterOriginalFonts(this);
         ApplyDpiAwareMetrics();
         ApplyTheme();
         UpdateWebViewToggleVisual();
@@ -2062,21 +2194,24 @@ public class MainForm : Form
         // Extension buttons live in the stretching column (where the spacer used to be), so however many buttons
         // extensions add, the built-in controls - Settings in particular - always keep their space. Buttons that
         // do not fit are moved into an overflow (») menu by UpdateExtensionMenuOverflow.
+        // Columns: logo | Logs | Web View | extension pages and buttons (stretches) | clock | Settings.
         var menuLayout = new TableLayoutPanel
         {
             Dock = DockStyle.Fill,
-            ColumnCount = 5,
+            ColumnCount = 6,
             RowCount = 1,
             Margin = new Padding(0),
             Padding = new Padding(0),
             AutoSize = true,
             AutoSizeMode = AutoSizeMode.GrowAndShrink,
         };
+        _menuLayout = menuLayout;
         menuLayout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
         menuLayout.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
         menuLayout.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
         menuLayout.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
         menuLayout.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100f));
+        menuLayout.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
         menuLayout.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
 
         var logoLayout = new TableLayoutPanel
@@ -2089,6 +2224,7 @@ public class MainForm : Form
             AutoSize = true,
             AutoSizeMode = AutoSizeMode.GrowAndShrink,
         };
+        _menuLogoLayout = logoLayout;
         logoLayout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
         logoLayout.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
         logoLayout.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
@@ -2096,15 +2232,17 @@ public class MainForm : Form
         _menuLogoPictureBox.SizeMode = PictureBoxSizeMode.Zoom;
         _menuLogoPictureBox.Size = new Size(ScaleByDpi(24), ScaleByDpi(24));
         _menuLogoPictureBox.Margin = ScalePadding(0, 3, 8, 3);
-        _menuLogoPictureBox.Image = Icon?.ToBitmap() ?? DefaultTabIcon;
+        _defaultLogoImage = Icon?.ToBitmap() ?? DefaultTabIcon;
+        _menuLogoPictureBox.Image = _defaultLogoImage;
 
         _menuLogoLabel.Text = "PhantomHaze";
         // Without AutoSize a Label keeps its default 100px width, which cut the bold name off at "Phantom".
         _menuLogoLabel.AutoSize = true;
         _menuLogoLabel.Dock = DockStyle.Fill;
-        _menuLogoLabel.Font = new Font("Segoe UI", 10, FontStyle.Bold);
+        _menuLogoLabel.Font = _menuTitleFont;
         _menuLogoLabel.TextAlign = ContentAlignment.MiddleLeft;
         _menuLogoLabel.Margin = ScalePadding(0, 0, 10, 0);
+        _menuLogoLabel.UseMnemonic = false;
 
         logoLayout.Controls.Add(_menuLogoPictureBox, 0, 0);
         logoLayout.Controls.Add(_menuLogoLabel, 1, 0);
@@ -2141,15 +2279,67 @@ public class MainForm : Form
         _settingsButton.Margin = new Padding(0);
         _settingsButton.FlatStyle = FlatStyle.Flat;
         _settingsButton.FlatAppearance.BorderSize = 1;
+        _settingsButton.UseMnemonic = false;
         _settingsButton.Click += (_, _) => OpenSettingsWindow();
+
+        // A live clock (with seconds) from the computer's clock, to the left of Settings.
+        _menuClockLabel.AutoSize = true;
+        _menuClockLabel.Anchor = AnchorStyles.Left;
+        _menuClockLabel.TextAlign = ContentAlignment.MiddleCenter;
+        _menuClockLabel.Font = _menuButtonFontRegular;
+        _menuClockLabel.Margin = ScalePadding(6, 0, 10, 0);
+        _menuClockLabel.UseMnemonic = false;
+        _menuClockLabel.AccessibleName = "Clock";
+        _menuClockLabel.AccessibleRole = AccessibleRole.StaticText;
+        // The width is reserved for the widest time, so the buttons beside the clock never shift as it ticks.
+        _menuClockLabel.FontChanged += (_, _) => UpdateClockMinimumWidth();
+        UpdateClock();
 
         menuLayout.Controls.Add(logoLayout, 0, 0);
         menuLayout.Controls.Add(_logsViewButton, 1, 0);
         menuLayout.Controls.Add(_webViewToggleButton, 2, 0);
         menuLayout.Controls.Add(_extensionMenuButtonsPanel, 3, 0);
-        menuLayout.Controls.Add(_settingsButton, 4, 0);
+        menuLayout.Controls.Add(_menuClockLabel, 4, 0);
+        menuLayout.Controls.Add(_settingsButton, 5, 0);
 
         _menuBarPanel.Controls.Add(menuLayout);
+    }
+
+    /// <summary>Shows the computer's current time, including seconds. Never logged: it changes every second.</summary>
+    private void UpdateClock()
+    {
+        DateTime now = DateTime.Now;
+        string text = now.ToString("T", CultureInfo.CurrentCulture);
+        if (!string.Equals(_menuClockLabel.Text, text, StringComparison.Ordinal))
+        {
+            _menuClockLabel.Text = text;
+        }
+
+        // Timers drift; aiming just past the next whole second keeps the seconds in step with the system clock.
+        _clockTimer.Interval = Math.Clamp(1000 - now.Millisecond + 15, 50, 1015);
+    }
+
+    private void UpdateClockMinimumWidth()
+    {
+        Font font = _menuClockLabel.Font;
+        char widestDigit = "0123456789"
+            .OrderByDescending(digit => TextRenderer.MeasureText(digit.ToString(), font).Width)
+            .First();
+
+        // Morning and evening times can differ in shape (for example AM/PM), so both are measured.
+        int width = 0;
+        foreach (DateTime sample in new[] { new DateTime(2000, 1, 1, 10, 0, 0), new DateTime(2000, 1, 1, 22, 0, 0) })
+        {
+            string text = sample.ToString("T", CultureInfo.CurrentCulture);
+            string widest = new(text.Select(character => char.IsDigit(character) ? widestDigit : character).ToArray());
+            width = Math.Max(width, TextRenderer.MeasureText(widest, font).Width);
+        }
+
+        var minimum = new Size(width + _menuClockLabel.Padding.Horizontal, 0);
+        if (_menuClockLabel.MinimumSize != minimum)
+        {
+            _menuClockLabel.MinimumSize = minimum;
+        }
     }
 
     private void ConfigureMenuButton(Button button, string text)
@@ -2545,6 +2735,7 @@ public class MainForm : Form
             Margin = new Padding(0),
             Padding = new Padding(0),
         };
+        _addressInputLayout = addressInputLayout;
         addressInputLayout.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100f));
         addressInputLayout.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, ScaleByDpi(32)));
 
@@ -2562,7 +2753,7 @@ public class MainForm : Form
         _favoriteButton.Text = "✩";
         _favoriteButton.Dock = DockStyle.Fill;
         _favoriteButton.Margin = ScalePadding(3, 2, 0, 2);
-        _favoriteButton.Font = new Font("Segoe UI", 11, FontStyle.Bold);
+        _favoriteButton.Font = _favoriteButtonFont;
         _favoriteButton.FlatStyle = FlatStyle.Flat;
         _favoriteButton.FlatAppearance.BorderColor = SystemColors.ControlDark;
         _favoriteButton.FlatAppearance.BorderSize = 1;
@@ -2597,7 +2788,7 @@ public class MainForm : Form
         _zoomLabel.Dock = DockStyle.Fill;
         _zoomLabel.TextAlign = ContentAlignment.MiddleCenter;
         _zoomLabel.Margin = ScalePadding(3, 2, 3, 2);
-        _zoomLabel.Font = new Font("Segoe UI", 9, FontStyle.Regular);
+        _zoomLabel.Font = _zoomLabelFont;
 
         _zoomSlider.Minimum = 50;
         _zoomSlider.Maximum = 200;
@@ -2639,7 +2830,7 @@ public class MainForm : Form
 
         _newTabButton.Text = "+";
         _newTabButton.Dock = DockStyle.Fill;
-        _newTabButton.Font = new Font("Segoe UI", 12, FontStyle.Bold);
+        _newTabButton.Font = _newTabButtonFont;
         _newTabButton.TextAlign = ContentAlignment.MiddleCenter;
         _newTabButton.FlatStyle = FlatStyle.Flat;
         _newTabButton.FlatAppearance.BorderColor = SystemColors.ControlDark;
@@ -2665,7 +2856,8 @@ public class MainForm : Form
     {
         button.AutoSize = false;
         button.Margin = ScalePadding(3, 2, 3, 2);
-        button.Font = new Font("Segoe UI", 9, FontStyle.Regular);
+        button.Font = _stripButtonFont;
+        button.UseMnemonic = false;
     }
 
     private void BuildHistoryPanel()
@@ -2809,7 +3001,9 @@ public class MainForm : Form
             return;
         }
 
-        if (_webViewModeEnabled == enableWebView)
+        // An extension page (app.page) is a third view: from there, Logs and Web View always switch.
+        bool extensionPageShown = _activeExtensionPageKey is not null;
+        if (_webViewModeEnabled == enableWebView && !extensionPageShown)
         {
             UpdateWebViewToggleVisual();
             return;
@@ -2835,6 +3029,7 @@ public class MainForm : Form
                     }
                 }
 
+                HideExtensionPageView();
                 _webViewModeEnabled = true;
                 _addressBarPanel.Visible = true;
                 _webViewHostPanel.Visible = true;
@@ -2869,30 +3064,46 @@ public class MainForm : Form
                 return;
             }
 
-            _webViewModeSwitchVersion++;
-            HideWebViewLoadingOverlay();
-            _webViewModeEnabled = false;
-            _historyPanel.Visible = false;
-            _historyButton.BackColor = GetCommandButtonBackColor();
-            HideFindPanel(clearHighlights: true);
+            HideExtensionPageView();
+            bool wasWebView = _webViewModeEnabled;
+            if (wasWebView)
+            {
+                LeaveWebViewMode();
+            }
 
-            _addressBarPanel.Visible = false;
-            _webViewHostPanel.Visible = false;
-            _logBox.Visible = true;
-            _logBox.BringToFront();
-            // BringToFront put the log box above the extension launcher; restore the launcher on top.
-            PositionExtensionLauncherPanel();
-            UpdateTabVisibilityAndRendering();
-            UpdateWebViewToggleVisual();
-            UpdateZoomControlsForActiveTab();
-            UpdateNavigationButtons();
-            UpdateFavoriteButtonState();
-            Log("Web View mode disabled; log panel restored.");
+            ShowLogPanel();
+            Log(wasWebView ? "Web View mode disabled; log panel restored." : "Log panel restored.");
         }
         finally
         {
             _webViewModeSwitchInProgress = false;
         }
+    }
+
+    /// <summary>Hides Web View (address bar, tabs, history and find panels) without deciding what is shown instead.</summary>
+    private void LeaveWebViewMode()
+    {
+        _webViewModeSwitchVersion++;
+        HideWebViewLoadingOverlay();
+        _webViewModeEnabled = false;
+        _historyPanel.Visible = false;
+        _historyButton.BackColor = GetCommandButtonBackColor();
+        HideFindPanel(clearHighlights: true);
+        _addressBarPanel.Visible = false;
+        _webViewHostPanel.Visible = false;
+        UpdateTabVisibilityAndRendering();
+        UpdateZoomControlsForActiveTab();
+        UpdateNavigationButtons();
+        UpdateFavoriteButtonState();
+    }
+
+    private void ShowLogPanel()
+    {
+        _logBox.Visible = true;
+        _logBox.BringToFront();
+        // BringToFront put the log box above the extension launcher; restore the launcher on top.
+        PositionExtensionLauncherPanel();
+        UpdateWebViewToggleVisual();
     }
 
     private void ShowWebViewLoadingOverlay()
@@ -2975,23 +3186,32 @@ public class MainForm : Form
                source.Equals("about:blank", StringComparison.OrdinalIgnoreCase);
     }
 
+    /// <summary>Highlights the active view: Logs, Web View or one of the extension pages.</summary>
     private void UpdateWebViewToggleVisual()
     {
-        bool darkTheme = IsDarkTheme();
-        Color selectedBackColor = darkTheme ? Color.FromArgb(73, 84, 100) : Color.FromArgb(201, 214, 232);
-        Color normalBackColor = darkTheme ? Color.FromArgb(52, 60, 72) : Color.FromArgb(224, 228, 235);
-        Color selectedTextColor = darkTheme ? Color.White : Color.FromArgb(30, 36, 43);
-        Color normalTextColor = darkTheme ? Color.FromArgb(210, 220, 232) : Color.FromArgb(72, 77, 86);
+        ThemePalette palette = _palette;
 
-        _logsViewButton.Font = _webViewModeEnabled ? _menuButtonFontRegular : _menuButtonFontBold;
-        _webViewToggleButton.Font = _webViewModeEnabled ? _menuButtonFontBold : _menuButtonFontRegular;
+        void StyleViewButton(Button button, bool selected)
+        {
+            button.BackColor = selected ? palette.ViewSelectedBack : palette.ViewNormalBack;
+            button.ForeColor = ResolveTextColor(selected ? palette.ViewSelectedText : palette.ViewNormalText);
+        }
 
-        _logsViewButton.BackColor = _webViewModeEnabled ? normalBackColor : selectedBackColor;
-        _webViewToggleButton.BackColor = _webViewModeEnabled ? selectedBackColor : normalBackColor;
+        StyleViewButton(_logsViewButton, IsLogsViewSelected);
+        StyleViewButton(_webViewToggleButton, _webViewModeEnabled);
+        foreach (Button button in _extensionMenuButtonsPanel.Controls.OfType<Button>())
+        {
+            if (button.Tag is ExtensionMenuEntry { Kind: ExtensionMenuEntryKind.Page } entry)
+            {
+                StyleViewButton(button, IsActiveExtensionPage(entry));
+            }
+        }
 
-        _logsViewButton.ForeColor = _webViewModeEnabled ? normalTextColor : selectedTextColor;
-        _webViewToggleButton.ForeColor = _webViewModeEnabled ? selectedTextColor : normalTextColor;
+        // Fonts (bold marks the selected view) and extension customisations are applied on top.
+        ApplyUiElementState();
     }
+
+    private bool IsLogsViewSelected => !_webViewModeEnabled && _activeExtensionPageKey is null;
 
     private void UpdateTabVisibilityAndRendering()
     {
@@ -3158,7 +3378,9 @@ public class MainForm : Form
             Dock = DockStyle.Right,
             Width = ScaleByDpi(22),
             Text = "X",
-            Font = _tabCloseFontRegular,
+            Font = MapFont(_tabCloseFontRegular),
+            Tag = TabCloseButtonTag,
+            AccessibleName = "Close tab",
             TextAlign = ContentAlignment.MiddleCenter,
             Padding = new Padding(0),
             Margin = new Padding(0),
@@ -3176,7 +3398,8 @@ public class MainForm : Form
             AutoEllipsis = true,
             Text = "New Tab",
             TextAlign = ContentAlignment.MiddleLeft,
-            Font = new Font("Segoe UI", 8.5f, FontStyle.Regular),
+            Font = _tabTitleFont,
+            UseMnemonic = false,
             Padding = new Padding(6, 0, 0, 0),
             Cursor = Cursors.Hand,
         };
@@ -3184,6 +3407,8 @@ public class MainForm : Form
         header.Controls.Add(titleLabel);
         header.Controls.Add(closeButton);
         header.Controls.Add(faviconBox);
+        RegisterOriginalFonts(header);
+        ApplyAppFontToTree(header);
         return header;
     }
 
@@ -3390,21 +3615,10 @@ public class MainForm : Form
             if (_webViewModeEnabled)
             {
                 BrowserTab? replacement = await CreateTabAsync(GetConfiguredStartPage(), activate: true);
-                if (replacement is null)
+                if (replacement is null && _webViewModeEnabled)
                 {
-                    _webViewModeEnabled = false;
-                    _historyPanel.Visible = false;
-                    _historyButton.BackColor = GetCommandButtonBackColor();
-                    HideFindPanel(clearHighlights: true);
-                    _addressBarPanel.Visible = false;
-                    _webViewHostPanel.Visible = false;
-                    _logBox.Visible = true;
-                    _logBox.BringToFront();
-                    PositionExtensionLauncherPanel();
-                    UpdateTabVisibilityAndRendering();
-                    UpdateNavigationButtons();
-                    UpdateFavoriteButtonState();
-                    UpdateWebViewToggleVisual();
+                    LeaveWebViewMode();
+                    ShowLogPanel();
                 }
             }
 
@@ -3483,26 +3697,18 @@ public class MainForm : Form
 
     private void UpdateTabHeaderVisuals()
     {
-        bool darkTheme = IsDarkTheme();
-        Color activeTabColor = darkTheme ? Color.FromArgb(69, 81, 97) : Color.FromArgb(221, 233, 255);
-        Color inactiveTabColor = darkTheme ? Color.FromArgb(53, 61, 73) : Color.FromArgb(235, 240, 247);
-        Color activeCloseColor = darkTheme ? Color.FromArgb(76, 87, 103) : Color.FromArgb(228, 235, 247);
-        Color inactiveCloseColor = darkTheme ? Color.FromArgb(63, 72, 85) : Color.FromArgb(243, 244, 247);
-        Color activeTextColor = darkTheme ? Color.FromArgb(240, 245, 252) : Color.Black;
-        Color inactiveTextColor = darkTheme ? Color.FromArgb(200, 211, 226) : Color.FromArgb(35, 35, 35);
+        ThemePalette palette = _palette;
+        Color activeTextColor = ResolveTextColor(palette.TabActiveText);
+        Color inactiveTextColor = ResolveTextColor(palette.TabInactiveText);
 
         foreach (BrowserTab tab in _tabs)
         {
             bool active = ReferenceEquals(tab, _activeTab);
-            tab.HeaderPanel.BackColor = active
-                ? activeTabColor
-                : inactiveTabColor;
-
-            tab.CloseButton.BackColor = active
-                ? activeCloseColor
-                : inactiveCloseColor;
-
-            tab.TitleLabel.ForeColor = active ? activeTextColor : inactiveTextColor;
+            Color textColor = active ? activeTextColor : inactiveTextColor;
+            tab.HeaderPanel.BackColor = ResolveSurfaceBack(active ? palette.TabActiveBack : palette.TabInactiveBack, textColor);
+            tab.CloseButton.BackColor = ResolveSurfaceBack(active ? palette.TabCloseActiveBack : palette.TabCloseInactiveBack, textColor);
+            tab.CloseButton.ForeColor = textColor;
+            tab.TitleLabel.ForeColor = textColor;
         }
     }
 
@@ -3541,7 +3747,7 @@ public class MainForm : Form
                 tab.HeaderPanel.Padding = ScalePadding(0, 3, 0, 2);
                 tab.TitleLabel.Visible = false;
                 tab.CloseButton.Width = closeWidth;
-                tab.CloseButton.Font = _tabCloseFontCompact;
+                tab.CloseButton.Font = MapFont(_tabCloseFontCompact);
                 tab.CloseButton.FlatAppearance.BorderSize = 0;
                 tab.FaviconBox.Width = iconWidth;
                 tab.FaviconBox.Height = iconWidth;
@@ -3551,7 +3757,7 @@ public class MainForm : Form
                 tab.HeaderPanel.Padding = ScalePadding(4, 4, 4, 3);
                 tab.TitleLabel.Visible = true;
                 tab.CloseButton.Width = regularCloseWidth;
-                tab.CloseButton.Font = _tabCloseFontRegular;
+                tab.CloseButton.Font = MapFont(_tabCloseFontRegular);
                 tab.CloseButton.FlatAppearance.BorderSize = 1;
                 tab.FaviconBox.Width = ScaleByDpi(16);
                 tab.FaviconBox.Height = ScaleByDpi(16);
@@ -3970,7 +4176,20 @@ public class MainForm : Form
         _activeTab.ZoomPercent = _zoomSlider.Value;
         _activeTab.WebView.ZoomFactor = zoom;
 
-        Log($"Tab {_activeTab.Id} zoom set to {_zoomSlider.Value}%.");
+        // Dragging the slider changes the zoom many times a second; only the final value is logged.
+        _pendingZoomLog = (_activeTab.Id, _zoomSlider.Value);
+        _zoomLogTimer.Stop();
+        _zoomLogTimer.Start();
+    }
+
+    private void OnZoomLogTimerTick(object? sender, EventArgs e)
+    {
+        _zoomLogTimer.Stop();
+        if (_pendingZoomLog is (int tabId, int percent))
+        {
+            _pendingZoomLog = null;
+            Log($"Tab {tabId} zoom set to {percent}%.");
+        }
     }
 
     private void UpdateNavigationButtons()
@@ -4058,7 +4277,7 @@ public class MainForm : Form
                 await ApplyExtensionWebContentAsync(tab, navigationSequence);
                 await RefreshTabFaviconAsync(tab);
                 Log($"Tab {tab.Id} navigation completed: {currentUrl}");
-                await LogCookieJarSnapshotAsync(currentUrl, tab);
+                QueueCookieRegistrationCheck(tab);
             }
             else
             {
@@ -4818,27 +5037,29 @@ public class MainForm : Form
 
     private void UpdateFavoriteButtonState()
     {
-        bool darkTheme = IsDarkTheme();
-        Color idleBackColor = darkTheme ? Color.FromArgb(67, 76, 90) : SystemColors.Control;
-        Color idleForeColor = darkTheme ? Color.FromArgb(225, 233, 244) : SystemColors.ControlText;
+        Color idleForeColor = ResolveTextColor(_palette.FavoriteIdleText);
+        Color idleBackColor = ResolveSurfaceBack(_palette.FavoriteIdleBack, idleForeColor);
 
         bool enabled = _webViewModeEnabled && _activeTab is not null;
         _favoriteButton.Enabled = enabled;
-        _favoriteButton.Text = "✩";
-        if (!enabled)
+        bool isFavorite = false;
+        if (enabled)
         {
-            _favoriteButton.BackColor = idleBackColor;
-            _favoriteButton.ForeColor = idleForeColor;
-            return;
+            string? currentUrl = GetActiveTabUrl();
+            isFavorite = TryNormalizeUrl(currentUrl, out string normalizedCurrentUrl) &&
+                _favoriteUrls.Any(url => url.Equals(normalizedCurrentUrl, StringComparison.OrdinalIgnoreCase));
         }
-
-        string? currentUrl = GetActiveTabUrl();
-        bool isFavorite = TryNormalizeUrl(currentUrl, out string normalizedCurrentUrl) &&
-            _favoriteUrls.Any(url => url.Equals(normalizedCurrentUrl, StringComparison.OrdinalIgnoreCase));
 
         _favoriteButton.BackColor = isFavorite ? Color.Gold : idleBackColor;
         _favoriteButton.ForeColor = isFavorite ? Color.Black : idleForeColor;
-        _favoriteButton.Text = isFavorite ? "★" : "✩";
+        string text = isFavorite ? "★" : "✩";
+        if (!string.Equals(_favoriteButton.Text, text, StringComparison.Ordinal))
+        {
+            _favoriteButton.Text = text;
+        }
+
+        // An extension may have replaced the star with an SVG (ui.svg address.favorite).
+        ApplyUiElementState();
     }
 
     private void LoadFavorites()
@@ -4976,35 +5197,11 @@ public class MainForm : Form
             return;
         }
 
-        if (!_webViewModeEnabled)
-        {
-            return;
-        }
-
-        if (e.ResourceContext != CoreWebView2WebResourceContext.Document)
-        {
-            return;
-        }
-
-        if (!e.Request.Headers.Contains("Cookie"))
-        {
-            return;
-        }
-
-        try
-        {
-            string cookieHeader = e.Request.Headers.GetHeader("Cookie");
-            string safeUri = TrimForLog(e.Request.Uri, 220);
-            string safeHeader = TrimForLog(DescribeCookieHeaderForLog(cookieHeader), 1200);
-            Log($"Tab {tab.Id} cookie request header to {safeUri}: {safeHeader}");
-        }
-        catch (Exception ex)
-        {
-            Log($"Cookie request header logging failed for {e.Request.Uri}: {ex.Message}");
-        }
+        // Cookies sent with requests are no longer logged one by one: new cookies are summarised in a single
+        // "N cookies were registered" line (see QueueCookieRegistrationCheck).
     }
 
-    private async void OnWebResourceResponseReceived(object? sender, CoreWebView2WebResourceResponseReceivedEventArgs e)
+    private void OnWebResourceResponseReceived(object? sender, CoreWebView2WebResourceResponseReceivedEventArgs e)
     {
         if (!_webViewModeEnabled || !TryGetTabFromSender(sender, out BrowserTab tab))
         {
@@ -5014,63 +5211,75 @@ public class MainForm : Form
         try
         {
             CoreWebView2WebResourceResponseView? response = e.Response;
-            if (response is null)
+            if (response is not null &&
+                response.Headers.Any(header => header.Key.Equals("Set-Cookie", StringComparison.OrdinalIgnoreCase)))
             {
-                return;
-            }
-
-            bool sawSetCookie = false;
-            foreach ((string key, string value) in response.Headers)
-            {
-                if (!key.Equals("Set-Cookie", StringComparison.OrdinalIgnoreCase))
-                {
-                    continue;
-                }
-
-                sawSetCookie = true;
-                Log($"Tab {tab.Id} Set-Cookie from {e.Request.Uri}: {DescribeSetCookieHeaderForLog(value)}");
-            }
-
-            if (sawSetCookie)
-            {
-                await LogCookieJarSnapshotAsync(e.Request.Uri, tab);
+                QueueCookieRegistrationCheck(tab);
             }
         }
-        catch (Exception ex)
+        catch (Exception ex) when (ex is InvalidOperationException or ObjectDisposedException or System.Runtime.InteropServices.COMException)
         {
-            Log($"Set-Cookie logging failed for {e.Request.Uri}: {ex.Message}");
+            // The tab is closing; nothing to report.
         }
     }
 
-    private async Task LogCookieJarSnapshotAsync(string source, BrowserTab tab)
+    /// <summary>
+    /// Cookies used to be logged one line each - every cookie in the jar after every page load and every Set-Cookie
+    /// response - which buried everything else in the log. Now new cookies are counted a moment after a page load or
+    /// a burst of Set-Cookie responses and reported in one line: "[time] 12 cookies were registered".
+    /// Cookie names and values are never logged.
+    /// </summary>
+    private void QueueCookieRegistrationCheck(BrowserTab tab)
     {
-        if (tab.WebView.CoreWebView2 is null)
+        _cookieCheckTab = tab;
+        _cookieCheckTimer.Stop();
+        _cookieCheckTimer.Start();
+    }
+
+    private async void OnCookieCheckTimerTick(object? sender, EventArgs e)
+    {
+        _cookieCheckTimer.Stop();
+        if (_cookieCheckInProgress)
+        {
+            // A check is still waiting for WebView2; look again once it is done.
+            _cookieCheckTimer.Start();
+            return;
+        }
+
+        // Every tab shares one cookie store, so any live tab can be asked.
+        CoreWebView2? core = _cookieCheckTab is { } preferred && _tabs.Contains(preferred) ? preferred.WebView.CoreWebView2 : null;
+        core ??= _tabs.Select(candidate => candidate.WebView.CoreWebView2).FirstOrDefault(candidate => candidate is not null);
+        _cookieCheckTab = null;
+        if (core is null)
         {
             return;
         }
 
+        _cookieCheckInProgress = true;
         try
         {
-            IReadOnlyList<CoreWebView2Cookie> cookies = await tab.WebView.CoreWebView2.CookieManager.GetCookiesAsync(null);
-            if (cookies.Count == 0)
-            {
-                Log($"Cookie jar after {source}: (empty)");
-                return;
-            }
-
-            Log($"Cookie jar after {source}: {cookies.Count} cookie(s).");
+            IReadOnlyList<CoreWebView2Cookie> cookies = await core.CookieManager.GetCookiesAsync(null);
+            int registered = 0;
             foreach (CoreWebView2Cookie cookie in cookies)
             {
-                string expires = cookie.IsSession
-                    ? "session"
-                    : cookie.Expires.ToLocalTime().ToString("yyyy-MM-dd HH:mm:ss");
+                if (_knownCookieKeys.Add($"{cookie.Name}\n{cookie.Domain}\n{cookie.Path}"))
+                {
+                    registered++;
+                }
+            }
 
-                Log($"Cookie: {NormalizeForLog(cookie.Name)}={HiddenCookieValue}; domain={NormalizeForLog(cookie.Domain)}; path={NormalizeForLog(cookie.Path)}; secure={cookie.IsSecure}; httpOnly={cookie.IsHttpOnly}; sameSite={cookie.SameSite}; expires={expires}");
+            if (registered > 0 && !IsDisposed)
+            {
+                Log(registered == 1 ? "1 cookie was registered" : $"{registered} cookies were registered");
             }
         }
-        catch (Exception ex)
+        catch (Exception ex) when (ex is InvalidOperationException or ObjectDisposedException or System.Runtime.InteropServices.COMException)
         {
-            Log($"Cookie jar snapshot failed after {source}: {ex.Message}");
+            // The tab closed while its cookies were being read.
+        }
+        finally
+        {
+            _cookieCheckInProgress = false;
         }
     }
 
@@ -5085,6 +5294,12 @@ public class MainForm : Form
         _historyPanel.Visible = false;
         _findPanel.Visible = false;
         _protectionRestoreTimer.Stop();
+        _clockTimer.Stop();
+        _rainbowTimer.Stop();
+        _cookieCheckTimer.Stop();
+        _zoomLogTimer.Stop();
+        _fontLoadCancellation?.Cancel();
+        OnZoomLogTimerTick(this, EventArgs.Empty);
 
         foreach (BrowserTab tab in _tabs.ToArray())
         {
@@ -5110,12 +5325,26 @@ public class MainForm : Form
         _openExtensionWindowsById.Clear();
         _protectedAuxiliaryWindows.Clear();
 
+        foreach (ExtensionPageState pageState in _extensionPages.Values.ToArray())
+        {
+            DisposeExtensionPage(pageState);
+        }
+
+        _extensionPages.Clear();
+        _activeExtensionPageKey = null;
+
         try
         {
             _extensionLauncherToolTip.Dispose();
             _extensionMenuOverflowMenu.Dispose();
+            _extensionDropdownMenu.Dispose();
+            _extensionUiToolTip.Dispose();
             _updateBannerToolTip.Dispose();
             _updateBannerSnoozeMenu.Dispose();
+            _clockTimer.Dispose();
+            _rainbowTimer.Dispose();
+            _cookieCheckTimer.Dispose();
+            _zoomLogTimer.Dispose();
         }
         catch
         {
@@ -5131,18 +5360,8 @@ public class MainForm : Form
             // Best effort cleanup only.
         }
 
-        try
-        {
-            _tabCloseFontRegular.Dispose();
-            _tabCloseFontCompact.Dispose();
-            _menuButtonFontRegular.Dispose();
-            _menuButtonFontBold.Dispose();
-        }
-        catch
-        {
-            // Best effort cleanup only.
-        }
-
+        // Shared fonts are disposed in Dispose(bool), after the controls using them: disposing them here, while the
+        // window can still repaint, risked drawing with a disposed font.
         TryDeleteDirectoryWithRetry(_webSessionPath);
     }
 
@@ -5424,88 +5643,6 @@ public class MainForm : Form
             : "(No history in this session)";
     }
 
-    private bool IsDarkTheme() => _settings.Theme == AppTheme.Dark;
-
-    private Color GetCommandButtonBackColor()
-    {
-        return IsDarkTheme()
-            ? Color.FromArgb(67, 76, 90)
-            : SystemColors.Control;
-    }
-
-    private Color GetHistoryButtonActiveBackColor()
-    {
-        return IsDarkTheme()
-            ? Color.FromArgb(86, 96, 111)
-            : Color.LightSteelBlue;
-    }
-
-    private void ApplyTheme()
-    {
-        bool darkTheme = IsDarkTheme();
-        Color appBackColor = darkTheme ? Color.FromArgb(31, 36, 43) : Color.FromArgb(246, 249, 253);
-        Color panelBackColor = darkTheme ? Color.FromArgb(40, 45, 53) : Color.FromArgb(243, 247, 252);
-        Color menuBackColor = darkTheme ? Color.FromArgb(52, 60, 72) : Color.FromArgb(224, 228, 235);
-        Color textColor = darkTheme ? Color.FromArgb(224, 233, 245) : Color.FromArgb(25, 25, 25);
-        Color inputBackColor = darkTheme ? Color.FromArgb(54, 62, 74) : Color.White;
-        Color inputTextColor = darkTheme ? Color.FromArgb(234, 241, 252) : Color.Black;
-        Color buttonBackColor = GetCommandButtonBackColor();
-        Color buttonTextColor = darkTheme ? Color.FromArgb(225, 233, 244) : SystemColors.ControlText;
-        Color buttonBorderColor = darkTheme ? Color.FromArgb(105, 116, 132) : Color.FromArgb(158, 177, 201);
-
-        BackColor = appBackColor;
-        _menuBarPanel.BackColor = menuBackColor;
-        _menuLogoLabel.ForeColor = textColor;
-        _addressBarPanel.BackColor = panelBackColor;
-        _contentHostPanel.BackColor = appBackColor;
-        _extensionLauncherPanel.BackColor = panelBackColor;
-        _webViewHostPanel.BackColor = appBackColor;
-        _webViewLoadingOverlayPanel.BackColor = darkTheme
-            ? Color.FromArgb(31, 36, 43)
-            : Color.FromArgb(246, 249, 253);
-        _webViewLoadingLabel.ForeColor = textColor;
-        _historyPanel.BackColor = panelBackColor;
-        _findPanel.BackColor = panelBackColor;
-
-        _addressBarTextBox.BackColor = inputBackColor;
-        _addressBarTextBox.ForeColor = inputTextColor;
-        _historyListBox.BackColor = inputBackColor;
-        _historyListBox.ForeColor = inputTextColor;
-        _favoritesListBox.BackColor = inputBackColor;
-        _favoritesListBox.ForeColor = inputTextColor;
-        _findTextBox.BackColor = inputBackColor;
-        _findTextBox.ForeColor = inputTextColor;
-        _logBox.BackColor = darkTheme ? Color.FromArgb(23, 27, 33) : Color.White;
-        _logBox.ForeColor = darkTheme ? Color.FromArgb(210, 225, 240) : Color.Black;
-
-        _historyTitleLabel.ForeColor = textColor;
-        _favoritesTitleLabel.ForeColor = textColor;
-        _zoomLabel.ForeColor = textColor;
-        _findCountLabel.ForeColor = textColor;
-
-        foreach (Button button in new[] { _toggleButton, _backButton, _goButton, _refreshButton, _historyButton, _newTabButton, _historyClearButton, _findCloseButton, _settingsButton, _updateBannerUpdateButton })
-        {
-            button.BackColor = buttonBackColor;
-            button.ForeColor = buttonTextColor;
-            button.FlatAppearance.BorderColor = buttonBorderColor;
-        }
-
-        _historyButton.BackColor = _historyPanel.Visible
-            ? GetHistoryButtonActiveBackColor()
-            : buttonBackColor;
-
-        _favoriteButton.FlatAppearance.BorderColor = buttonBorderColor;
-        _webViewToggleButton.FlatAppearance.BorderColor = buttonBorderColor;
-        _logsViewButton.FlatAppearance.BorderColor = buttonBorderColor;
-
-        UpdateProtectionStatusVisual();
-        ApplyThemeToUpdateBanner();
-        UpdateWebViewToggleVisual();
-        UpdateFavoriteButtonState();
-        UpdateTabHeaderVisuals();
-        ApplyThemeToDynamicExtensionControls();
-    }
-
     private List<ExtensionListItem> BuildExtensionDraftItems(
         IReadOnlyList<InstalledExtensionEntry> draftExtensions,
         IReadOnlyDictionary<string, string> stagedSourcesById)
@@ -5744,17 +5881,6 @@ public class MainForm : Form
         return string.IsNullOrWhiteSpace(name) ? "extension.phext" : name;
     }
 
-    private static void ApplyColorsRecursively(Control control, Color backColor, Color foreColor)
-    {
-        control.BackColor = backColor;
-        control.ForeColor = foreColor;
-
-        foreach (Control child in control.Controls)
-        {
-            ApplyColorsRecursively(child, backColor, foreColor);
-        }
-    }
-
     private void OpenSettingsWindow()
     {
         AppSettings draftSettings = _settings.Clone();
@@ -5762,16 +5888,20 @@ public class MainForm : Form
             .Select(entry => entry.Clone())
             .ToList();
         var stagedSourcesByExtensionId = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
-        bool darkTheme = IsDarkTheme();
 
-        static Label BuildSettingsLabel(string text)
+        // One set of fonts for the whole window, disposed with it (they used to be created per label and leaked).
+        using var dialogFont = new Font("Segoe UI", 9, FontStyle.Regular);
+        using var dialogBoldFont = new Font("Segoe UI", 9, FontStyle.Bold);
+        using var dialogTitleFont = new Font("Segoe UI", 16, FontStyle.Bold);
+
+        Label BuildSettingsLabel(string text)
         {
             return new Label
             {
                 Text = text,
                 Dock = DockStyle.Fill,
                 TextAlign = ContentAlignment.MiddleLeft,
-                Font = new Font("Segoe UI", 9, FontStyle.Regular),
+                Font = dialogFont,
             };
         }
 
@@ -5803,16 +5933,34 @@ public class MainForm : Form
             Dock = DockStyle.Fill,
         };
 
+        // Set by Backup -> Import: the import has already been applied, so this window's draft must not be saved.
+        bool settingsImported = false;
+
         var generalTab = new TabPage("General");
+        SettingsTab appearanceTab = BuildAppearanceTab(draftSettings, settingsWindow, dialogBoldFont);
         var extensionsTab = new TabPage("Extensions");
+        SettingsTab backupTab = BuildBackupTab(settingsWindow, dialogBoldFont, onImported: () =>
+        {
+            settingsImported = true;
+            settingsWindow.DialogResult = DialogResult.Abort;
+        });
+        SettingsTab aboutTab = BuildAboutTab(settingsWindow, dialogBoldFont, dialogTitleFont);
+        SettingsTab[] customTabs = [appearanceTab, backupTab, aboutTab];
         settingsTabs.TabPages.Add(generalTab);
+        settingsTabs.TabPages.Add(appearanceTab.Page);
         settingsTabs.TabPages.Add(extensionsTab);
+        settingsTabs.TabPages.Add(backupTab.Page);
+        settingsTabs.TabPages.Add(aboutTab.Page);
+        settingsTabs.SelectedIndexChanged += (_, _) =>
+        {
+            customTabs.FirstOrDefault(tab => ReferenceEquals(tab.Page, settingsTabs.SelectedTab))?.Shown?.Invoke();
+        };
 
         var generalLayout = new TableLayoutPanel
         {
             Dock = DockStyle.Fill,
             ColumnCount = 2,
-            RowCount = 7,
+            RowCount = 6,
             Padding = ScalePadding(12, 12, 12, 12),
         };
         generalLayout.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, ScaleByDpi(250)));
@@ -5822,17 +5970,7 @@ public class MainForm : Form
         generalLayout.RowStyles.Add(new RowStyle(SizeType.Absolute, ScaleByDpi(36)));
         generalLayout.RowStyles.Add(new RowStyle(SizeType.Absolute, ScaleByDpi(36)));
         generalLayout.RowStyles.Add(new RowStyle(SizeType.Absolute, ScaleByDpi(36)));
-        generalLayout.RowStyles.Add(new RowStyle(SizeType.Absolute, ScaleByDpi(36)));
         generalLayout.RowStyles.Add(new RowStyle(SizeType.Percent, 100f));
-
-        var themeComboBox = new ComboBox
-        {
-            Dock = DockStyle.Fill,
-            DropDownStyle = ComboBoxStyle.DropDownList,
-        };
-        themeComboBox.Items.Add(new OptionItem<AppTheme>(AppTheme.Light, "Light"));
-        themeComboBox.Items.Add(new OptionItem<AppTheme>(AppTheme.Dark, "Dark"));
-        themeComboBox.SelectedIndex = draftSettings.Theme == AppTheme.Dark ? 1 : 0;
 
         var renderInBackgroundCheckBox = new CheckBox
         {
@@ -5907,23 +6045,21 @@ public class MainForm : Form
             Text = draftSettings.StartingPage,
         };
 
-        generalLayout.Controls.Add(BuildSettingsLabel("Theme"), 0, 0);
-        generalLayout.Controls.Add(themeComboBox, 1, 0);
-
-        generalLayout.Controls.Add(renderInBackgroundCheckBox, 0, 1);
+        // The theme moved to the Appearance tab, together with the text colour and font.
+        generalLayout.Controls.Add(renderInBackgroundCheckBox, 0, 0);
         generalLayout.SetColumnSpan(renderInBackgroundCheckBox, 2);
 
-        generalLayout.Controls.Add(persistHistoryCheckBox, 0, 2);
+        generalLayout.Controls.Add(persistHistoryCheckBox, 0, 1);
         generalLayout.SetColumnSpan(persistHistoryCheckBox, 2);
 
-        generalLayout.Controls.Add(BuildSettingsLabel("Saved history retention"), 0, 3);
-        generalLayout.Controls.Add(retentionComboBox, 1, 3);
+        generalLayout.Controls.Add(BuildSettingsLabel("Saved history retention"), 0, 2);
+        generalLayout.Controls.Add(retentionComboBox, 1, 2);
 
-        generalLayout.Controls.Add(BuildSettingsLabel("Default search engine"), 0, 4);
-        generalLayout.Controls.Add(searchEngineComboBox, 1, 4);
+        generalLayout.Controls.Add(BuildSettingsLabel("Default search engine"), 0, 3);
+        generalLayout.Controls.Add(searchEngineComboBox, 1, 3);
 
-        generalLayout.Controls.Add(BuildSettingsLabel("Web View starting page"), 0, 5);
-        generalLayout.Controls.Add(startPageTextBox, 1, 5);
+        generalLayout.Controls.Add(BuildSettingsLabel("Web View starting page"), 0, 4);
+        generalLayout.Controls.Add(startPageTextBox, 1, 4);
 
         generalTab.Controls.Add(generalLayout);
 
@@ -5981,7 +6117,7 @@ public class MainForm : Form
             Text = "Installed extensions",
             Dock = DockStyle.Fill,
             TextAlign = ContentAlignment.MiddleLeft,
-            Font = new Font("Segoe UI", 9, FontStyle.Bold),
+            Font = dialogBoldFont,
         };
 
         var extensionSplit = new SplitContainer
@@ -6072,41 +6208,60 @@ public class MainForm : Form
             {
                 _ = numericEditor.Value;
             }
+
+            // Input that cannot be saved keeps the window open (the button's DialogResult is undone).
+            string? problem = customTabs.Select(tab => tab.Validate?.Invoke()).FirstOrDefault(message => message is not null);
+            if (problem is not null)
+            {
+                settingsWindow.DialogResult = DialogResult.None;
+                ShowCaptureProtectedDialog(() => MessageBox.Show(settingsWindow, problem, "PhantomHaze", MessageBoxButtons.OK, MessageBoxIcon.Warning));
+            }
         };
 
-        void ApplySettingsInputColors(Control control)
+        void UninstallDraftExtension(ExtensionListItem item)
         {
-            Color inputBackColor = Color.FromArgb(55, 64, 77);
-            Color inputForeColor = Color.FromArgb(228, 236, 247);
-
-            switch (control)
+            string name = item.ToString();
+            DialogResult answer = ShowCaptureProtectedDialog(() => MessageBox.Show(
+                settingsWindow,
+                $"Uninstall \"{name}\"?\n\nIt is removed, together with its settings, when you click Save.",
+                "PhantomHaze",
+                MessageBoxButtons.YesNo,
+                MessageBoxIcon.Warning,
+                MessageBoxDefaultButton.Button2));
+            if (answer != DialogResult.Yes)
             {
-                case TextBoxBase textBox:
-                    textBox.BackColor = inputBackColor;
-                    textBox.ForeColor = inputForeColor;
-                    break;
-                case ComboBox comboBox:
-                    comboBox.BackColor = inputBackColor;
-                    comboBox.ForeColor = inputForeColor;
-                    break;
-                case CheckedListBox checkedListBox:
-                    checkedListBox.BackColor = inputBackColor;
-                    checkedListBox.ForeColor = inputForeColor;
-                    break;
-                case ListBox listBox:
-                    listBox.BackColor = inputBackColor;
-                    listBox.ForeColor = inputForeColor;
-                    break;
-                case NumericUpDown numericUpDown:
-                    numericUpDown.BackColor = inputBackColor;
-                    numericUpDown.ForeColor = inputForeColor;
-                    break;
+                return;
             }
 
-            foreach (Control child in control.Controls)
+            // Rebuilding the list disposes the details panel - including the button whose Click is still being
+            // handled - so it runs once the click has finished.
+            settingsWindow.BeginInvoke(new Action(() =>
             {
-                ApplySettingsInputColors(child);
-            }
+                if (settingsWindow.IsDisposed)
+                {
+                    return;
+                }
+
+                draftSettings.Extensions.Remove(item.Installation);
+                stagedSourcesByExtensionId.Remove(item.Installation.Id);
+                RefreshExtensionDraftList();
+                extensionStatusLabel.Text = $"\"{name}\" will be uninstalled when you click Save.";
+            }));
+        }
+
+        Control BuildUninstallButtonRow(ExtensionListItem item)
+        {
+            var uninstallButton = new Button
+            {
+                Text = "Uninstall this extension",
+                AutoSize = true,
+                Height = ScaleByDpi(30),
+                Margin = ScalePadding(0, 12, 0, 6),
+                ForeColor = Color.FromArgb(178, 34, 34),
+                AccessibleDescription = "Marks this extension for uninstallation; it is removed when you click Save.",
+            };
+            uninstallButton.Click += (_, _) => UninstallDraftExtension(item);
+            return uninstallButton;
         }
 
         void RenderSelectedExtensionSettings()
@@ -6134,13 +6289,26 @@ public class MainForm : Form
 
             if (!string.IsNullOrWhiteSpace(selectedItem.LoadError))
             {
-                extensionSettingsPanel.Controls.Add(new Label
+                // A broken extension can still be uninstalled from here.
+                var errorLayout = new FlowLayoutPanel
                 {
                     Dock = DockStyle.Top,
                     AutoSize = true,
+                    FlowDirection = FlowDirection.TopDown,
+                    WrapContents = false,
+                };
+                errorLayout.Controls.Add(new Label
+                {
+                    AutoSize = true,
+                    MaximumSize = new Size(Math.Max(ScaleByDpi(200), extensionSettingsPanel.ClientSize.Width - ScaleByDpi(24)), 0),
                     Text = $"This extension failed to load:\n{selectedItem.LoadError}",
                     ForeColor = Color.FromArgb(197, 70, 70),
+                    UseMnemonic = false,
                 });
+                errorLayout.Controls.Add(BuildUninstallButtonRow(selectedItem));
+                ApplyDialogTheme(errorLayout);
+                extensionSettingsPanel.Controls.Add(errorLayout);
+                ApplyAppFontToDialog(errorLayout);
                 return;
             }
 
@@ -6172,7 +6340,7 @@ public class MainForm : Form
                     Text = label,
                     Dock = DockStyle.Fill,
                     TextAlign = ContentAlignment.MiddleLeft,
-                    Font = new Font("Segoe UI", 9, FontStyle.Bold),
+                    Font = dialogBoldFont,
                     Margin = ScalePadding(0, 0, 8, 6),
                 }, 0, row);
 
@@ -6205,7 +6373,7 @@ public class MainForm : Form
                     Text = "Extension settings",
                     Dock = DockStyle.Fill,
                     TextAlign = ContentAlignment.MiddleLeft,
-                    Font = new Font("Segoe UI", 9, FontStyle.Bold),
+                    Font = dialogBoldFont,
                     Margin = ScalePadding(0, 8, 0, 6),
                 };
                 detailsLayout.Controls.Add(settingsHeader, 0, row);
@@ -6336,13 +6504,15 @@ public class MainForm : Form
                 row++;
             }
 
-            if (darkTheme)
-            {
-                ApplyColorsRecursively(detailsLayout, Color.FromArgb(38, 44, 52), Color.FromArgb(228, 236, 247));
-                ApplySettingsInputColors(detailsLayout);
-            }
+            // Every extension's panel ends with a way to uninstall just that extension.
+            detailsLayout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+            Control uninstallRow = BuildUninstallButtonRow(selectedItem);
+            detailsLayout.Controls.Add(uninstallRow, 0, row);
+            detailsLayout.SetColumnSpan(uninstallRow, 2);
 
+            ApplyDialogTheme(detailsLayout);
             extensionSettingsPanel.Controls.Add(detailsLayout);
+            ApplyAppFontToDialog(detailsLayout);
         }
 
         void RefreshExtensionDraftList(string? preferredExtensionId = null)
@@ -6447,8 +6617,9 @@ public class MainForm : Form
                 EnsureExtensionSettingValues(existing, definition);
 
                 stagedSourcesByExtensionId[definition.Id] = rawSource;
-                extensionStatusLabel.Text = $"Imported '{definition.Name}'. Click Save to install it.";
                 RefreshExtensionDraftList(definition.Id);
+                // Set after the refresh, which writes its own summary to this label.
+                extensionStatusLabel.Text = $"Imported '{definition.Name}'. Click Save to install it.";
             }
             catch (Exception ex)
             {
@@ -6482,36 +6653,23 @@ public class MainForm : Form
 
             draftSettings.Extensions.Clear();
             stagedSourcesByExtensionId.Clear();
-            extensionStatusLabel.Text = "All extensions are marked for uninstallation. Click Save to apply.";
             RefreshExtensionDraftList();
+            extensionStatusLabel.Text = "All extensions are marked for uninstallation. Click Save to apply.";
         };
 
         RefreshExtensionDraftList();
 
-        if (darkTheme)
-        {
-            settingsWindow.BackColor = Color.FromArgb(38, 44, 52);
-            ApplyColorsRecursively(settingsWindow, Color.FromArgb(38, 44, 52), Color.FromArgb(228, 236, 247));
-            ApplySettingsInputColors(settingsWindow);
-
-            saveButton.BackColor = Color.FromArgb(67, 76, 90);
-            saveButton.ForeColor = Color.FromArgb(228, 236, 247);
-            cancelButton.BackColor = Color.FromArgb(67, 76, 90);
-            cancelButton.ForeColor = Color.FromArgb(228, 236, 247);
-        }
-
+        ApplyDialogTheme(settingsWindow);
+        ApplyAppFontToDialog(settingsWindow);
         RegisterProtectedAuxiliaryWindow(settingsWindow, "Settings");
 
-        if (settingsWindow.ShowDialog(this) != DialogResult.OK)
+        DialogResult result = settingsWindow.ShowDialog(this);
+        if (settingsImported || result != DialogResult.OK)
         {
             return;
         }
 
-        if (themeComboBox.SelectedItem is OptionItem<AppTheme> themeOption)
-        {
-            draftSettings.Theme = themeOption.Value;
-        }
-
+        appearanceTab.ApplyTo?.Invoke(draftSettings);
         draftSettings.RenderWebViewInBackground = renderInBackgroundCheckBox.Checked;
         draftSettings.PersistHistoryAcrossSessions = persistHistoryCheckBox.Checked;
 
@@ -6562,17 +6720,31 @@ public class MainForm : Form
             return;
         }
 
+        ApplyCommittedSettings(draftSettings, stagedSourcesByExtensionId.Keys);
+        Log("Settings updated and saved.");
+    }
+
+    /// <summary>
+    /// Makes settings that were just written to disk (Settings saved, or a .phstg file imported) take effect: reloads
+    /// the extensions and refreshes everything that depends on settings.
+    /// </summary>
+    /// <param name="newOrUpdatedExtensionIds">Extensions whose source changed; they announce themselves (app.log) again.</param>
+    private void ApplyCommittedSettings(AppSettings newSettings, IEnumerable<string> newOrUpdatedExtensionIds)
+    {
         HashSet<string> previouslyActiveExtensionIds = _loadedExtensions
             .Where(IsExtensionActive)
             .Select(extension => extension.Definition.Id)
             .ToHashSet(StringComparer.OrdinalIgnoreCase);
+        var updated = new HashSet<string>(newOrUpdatedExtensionIds, StringComparer.OrdinalIgnoreCase);
+        string previousFontUrl = _settings.CustomFontUrl;
 
-        _settings = draftSettings;
+        _settings = newSettings;
         LoadInstalledExtensions(extension =>
             !previouslyActiveExtensionIds.Contains(extension.Definition.Id) ||
-            stagedSourcesByExtensionId.ContainsKey(extension.Definition.Id));
+            updated.Contains(extension.Definition.Id));
         RefreshExtensionSurface();
         RefreshOpenExtensionWindows();
+        RefreshExtensionPages();
 
         if (_settings.PersistHistoryAcrossSessions)
         {
@@ -6587,7 +6759,12 @@ public class MainForm : Form
         RefreshHistoryPanelItems();
         UpdateTabVisibilityAndRendering();
         ApplyTheme();
-        Log("Settings updated and saved.");
+        UpdateRainbowTimer();
+        if (!string.Equals(previousFontUrl, _settings.CustomFontUrl, StringComparison.Ordinal) ||
+            (_appFont is null && _settings.CustomFontUrl.Length > 0))
+        {
+            _ = ApplyCustomFontAsync();
+        }
     }
 
     /// <summary>
@@ -6683,16 +6860,16 @@ public class MainForm : Form
 
     private void Log(string message)
     {
-        string entry = $"[{DateTime.Now:HH:mm:ss}] {message}{Environment.NewLine}";
+        string entry = $"[{DateTime.Now.ToString("HH:mm:ss", CultureInfo.InvariantCulture)}] {message}{Environment.NewLine}";
         AppendLogEntryToUi(entry);
 
         try
         {
-            File.AppendAllText(_logFilePath, entry);
+            File.AppendAllText(GetCurrentLogFilePath(), entry);
         }
         catch
         {
-            // Keep the app functional if temp storage is unavailable.
+            // Keep the app functional if the logs folder is unavailable.
         }
     }
 
@@ -6725,39 +6902,6 @@ public class MainForm : Form
 
     private static string NormalizeForLog(string? value)
         => (value ?? string.Empty).Replace("\r", "\\r").Replace("\n", "\\n");
-
-    // Cookie values (session ids, login tokens) never go into the log: it is shown on screen and written to a file in
-    // %TEMP% that outlives the session, while cookies themselves are meant to exist only in memory for the session.
-    private const string HiddenCookieValue = "<value hidden>";
-
-    /// <summary>"a=1; b=2" (a Cookie request header) becomes "a=&lt;value hidden&gt;; b=&lt;value hidden&gt;".</summary>
-    private static string DescribeCookieHeaderForLog(string? cookieHeader)
-    {
-        IEnumerable<string> names = (cookieHeader ?? string.Empty)
-            .Split(';', StringSplitOptions.TrimEntries | StringSplitOptions.RemoveEmptyEntries)
-            .Select(pair => $"{GetCookieName(pair)}={HiddenCookieValue}");
-        return NormalizeForLog(string.Join("; ", names));
-    }
-
-    /// <summary>
-    /// "id=abc; Path=/; HttpOnly" (a Set-Cookie header) becomes "id=&lt;value hidden&gt;; Path=/; HttpOnly". The
-    /// attributes after the first ';' (Path, Domain, Expires, Secure, ...) describe the cookie and are kept.
-    /// </summary>
-    private static string DescribeSetCookieHeaderForLog(string? setCookieHeader)
-    {
-        string header = setCookieHeader ?? string.Empty;
-        int attributesStart = header.IndexOf(';');
-        string nameValue = attributesStart < 0 ? header : header[..attributesStart];
-        string attributes = attributesStart < 0 ? string.Empty : header[attributesStart..];
-        return NormalizeForLog($"{GetCookieName(nameValue)}={HiddenCookieValue}{attributes}");
-    }
-
-    private static string GetCookieName(string nameValuePair)
-    {
-        // Without '=' the whole text is the value of a nameless cookie (RFC 6265), so nothing of it is shown.
-        int separator = nameValuePair.IndexOf('=');
-        return separator < 0 ? string.Empty : nameValuePair[..separator].Trim();
-    }
 
     private static string TrimForLog(string? value, int maxLength)
     {
