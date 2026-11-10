@@ -73,6 +73,384 @@ internal sealed class PhantomExtensionUiDefinition
     public bool HasUi => !string.IsNullOrWhiteSpace(Html);
 }
 
+/// <summary>What a menu.button, a menu.option or an app.button does when it is clicked.</summary>
+internal enum PhantomExtensionActionKind
+{
+    /// <summary>Shows a message box (what app.button has always done).</summary>
+    Message,
+
+    /// <summary>Opens an http(s) address in a new protected tab.</summary>
+    Url,
+
+    /// <summary>Shows one of the extension's own pages (app.page).</summary>
+    Page,
+
+    /// <summary>Opens the extension's ui.html window.</summary>
+    Window,
+
+    /// <summary>Switches to a built-in view: "logs" or "web".</summary>
+    View,
+
+    /// <summary>Writes a line to the log panel.</summary>
+    Log,
+}
+
+internal sealed class PhantomExtensionActionDefinition
+{
+    public PhantomExtensionActionKind Kind { get; init; }
+
+    /// <summary>The message, address, page id or view name the action uses ("" for window).</summary>
+    public string Value { get; init; } = string.Empty;
+}
+
+internal enum PhantomExtensionMenuItemKind
+{
+    /// <summary>A top-bar button that runs one action (app.button and menu.button).</summary>
+    Button,
+
+    /// <summary>A top-bar button that opens a list of options (menu.dropdown with its menu.option lines).</summary>
+    Dropdown,
+}
+
+internal sealed class PhantomExtensionMenuOptionDefinition
+{
+    public string Label { get; init; } = string.Empty;
+    public PhantomExtensionActionDefinition Action { get; init; } = new();
+}
+
+/// <summary>A control an extension adds to the top menu bar, kept in the order the file declares it.</summary>
+internal sealed class PhantomExtensionMenuItemDefinition
+{
+    public string Id { get; init; } = string.Empty;
+    public string Label { get; init; } = string.Empty;
+    public PhantomExtensionMenuItemKind Kind { get; init; }
+
+    /// <summary>The action of a Button; null for a Dropdown.</summary>
+    public PhantomExtensionActionDefinition? Action { get; init; }
+
+    /// <summary>The options of a Dropdown, in declaration order; empty for a Button.</summary>
+    public List<PhantomExtensionMenuOptionDefinition> Options { get; } = new();
+}
+
+/// <summary>
+/// A page of the extension's own (app.page). It gets a button next to Logs and Web View and is shown in the main
+/// content area, like those built-in views.
+/// </summary>
+internal sealed class PhantomExtensionPageDefinition
+{
+    public string Id { get; init; } = string.Empty;
+    public string Label { get; init; } = string.Empty;
+    public string Html { get; init; } = string.Empty;
+}
+
+/// <summary>A property of a built-in or extension-owned control that ui.element can change.</summary>
+internal enum PhantomUiProperty
+{
+    Text,
+    Tooltip,
+    Visible,
+    Background,
+    Foreground,
+    Border,
+    Font,
+    FontSize,
+    FontStyle,
+}
+
+internal enum PhantomUiFontStyle
+{
+    Regular,
+    Bold,
+    Italic,
+    BoldItalic,
+}
+
+/// <summary>The outlines ui.shape can give a control.</summary>
+internal enum PhantomUiShape
+{
+    Rectangle,
+    Rounded,
+    Pill,
+    Circle,
+    Ellipse,
+    Diamond,
+    Triangle,
+    Hexagon,
+    Star,
+}
+
+/// <summary>One ui.element line: a single property change on one control.</summary>
+internal sealed class PhantomExtensionUiEditDefinition
+{
+    public string Target { get; init; } = string.Empty;
+    public PhantomUiProperty Property { get; init; }
+
+    /// <summary>The text of a text/tooltip edit or the family of a font edit.</summary>
+    public string Text { get; init; } = string.Empty;
+
+    public bool Flag { get; init; }
+    public Color Color { get; init; }
+    public float Number { get; init; }
+    public PhantomUiFontStyle FontStyle { get; init; }
+    public int LineNumber { get; init; }
+}
+
+/// <summary>One ui.svg block: an SVG graphic that replaces how a control looks.</summary>
+internal sealed class PhantomExtensionUiSvgDefinition
+{
+    public string Target { get; init; } = string.Empty;
+    public PhantomSvgDocument Document { get; init; } = null!;
+    public int LineNumber { get; init; }
+}
+
+/// <summary>One ui.shape line: an outline and fill colour that replace a control's rectangular look.</summary>
+internal sealed class PhantomExtensionUiShapeDefinition
+{
+    public string Target { get; init; } = string.Empty;
+    public PhantomUiShape Shape { get; init; }
+    public Color Fill { get; init; }
+    public Color? Outline { get; init; }
+    public int LineNumber { get; init; }
+}
+
+[Flags]
+internal enum PhantomUiCapabilities
+{
+    None = 0,
+    Text = 1 << 0,
+    Tooltip = 1 << 1,
+    Visible = 1 << 2,
+    Background = 1 << 3,
+    Foreground = 1 << 4,
+    Border = 1 << 5,
+    Font = 1 << 6,
+    Svg = 1 << 7,
+    Shape = 1 << 8,
+}
+
+internal sealed record PhantomUiTargetInfo(string Name, string Description, PhantomUiCapabilities Capabilities);
+
+/// <summary>
+/// The built-in controls extensions may customise with ui.element, ui.svg and ui.shape, and what each one allows.
+/// The protection banner and the protection button are deliberately not listed: an extension must never be able to
+/// make PhantomHaze look protected when it is not. The Settings button can be restyled but never hidden, so an
+/// extension can never lock the user out of the place where it is disabled or uninstalled.
+/// </summary>
+internal static class PhantomUiTargets
+{
+    private const PhantomUiCapabilities ButtonLike =
+        PhantomUiCapabilities.Text | PhantomUiCapabilities.Tooltip | PhantomUiCapabilities.Visible |
+        PhantomUiCapabilities.Background | PhantomUiCapabilities.Foreground | PhantomUiCapabilities.Border |
+        PhantomUiCapabilities.Font | PhantomUiCapabilities.Svg | PhantomUiCapabilities.Shape;
+
+    /// <summary>What an extension may change on its own top-bar buttons, dropdowns and page buttons.</summary>
+    public const PhantomUiCapabilities OwnElementCapabilities = ButtonLike & ~PhantomUiCapabilities.Visible;
+
+    public static IReadOnlyList<PhantomUiTargetInfo> BuiltIn { get; } =
+    [
+        new("menu.bar", "The top menu bar", PhantomUiCapabilities.Background),
+        new("menu.logo", "The PhantomHaze logo in the menu bar",
+            PhantomUiCapabilities.Tooltip | PhantomUiCapabilities.Visible | PhantomUiCapabilities.Background |
+            PhantomUiCapabilities.Svg | PhantomUiCapabilities.Shape),
+        new("menu.title", "The PhantomHaze name next to the logo",
+            PhantomUiCapabilities.Text | PhantomUiCapabilities.Tooltip | PhantomUiCapabilities.Visible |
+            PhantomUiCapabilities.Background | PhantomUiCapabilities.Foreground | PhantomUiCapabilities.Font |
+            PhantomUiCapabilities.Svg | PhantomUiCapabilities.Shape),
+        new("menu.logs", "The Logs button", ButtonLike),
+        new("menu.webview", "The Web View button", ButtonLike),
+        new("menu.clock", "The clock to the left of Settings",
+            PhantomUiCapabilities.Tooltip | PhantomUiCapabilities.Visible | PhantomUiCapabilities.Background |
+            PhantomUiCapabilities.Foreground | PhantomUiCapabilities.Font | PhantomUiCapabilities.Shape),
+        new("menu.settings", "The Settings button (it can be restyled but never hidden)", ButtonLike & ~PhantomUiCapabilities.Visible),
+        new("address.bar", "The address box",
+            PhantomUiCapabilities.Tooltip | PhantomUiCapabilities.Background | PhantomUiCapabilities.Foreground |
+            PhantomUiCapabilities.Font),
+        new("address.favorite", "The favourite (star) button",
+            PhantomUiCapabilities.Tooltip | PhantomUiCapabilities.Visible | PhantomUiCapabilities.Border |
+            PhantomUiCapabilities.Font | PhantomUiCapabilities.Svg | PhantomUiCapabilities.Shape),
+        new("address.back", "The Back button", ButtonLike),
+        new("address.go", "The Go button", ButtonLike),
+        new("address.refresh", "The Refresh button", ButtonLike),
+        new("address.history", "The History button", ButtonLike),
+        new("address.zoom", "The zoom percentage label",
+            PhantomUiCapabilities.Tooltip | PhantomUiCapabilities.Visible | PhantomUiCapabilities.Background |
+            PhantomUiCapabilities.Foreground | PhantomUiCapabilities.Font),
+        new("tabs.new", "The new tab (+) button", ButtonLike),
+        new("log.panel", "The log panel",
+            PhantomUiCapabilities.Background | PhantomUiCapabilities.Foreground | PhantomUiCapabilities.Font),
+        new("history.panel", "The history and favourites panel", PhantomUiCapabilities.Background),
+    ];
+
+    private static readonly Dictionary<string, PhantomUiTargetInfo> BuiltInByName =
+        BuiltIn.ToDictionary(target => target.Name, StringComparer.OrdinalIgnoreCase);
+
+    public static bool TryGetBuiltIn(string? name, out PhantomUiTargetInfo info)
+    {
+        info = null!;
+        return name is not null && BuiltInByName.TryGetValue(name.Trim(), out info!);
+    }
+
+    public static PhantomUiCapabilities GetRequiredCapability(PhantomUiProperty property) => property switch
+    {
+        PhantomUiProperty.Text => PhantomUiCapabilities.Text,
+        PhantomUiProperty.Tooltip => PhantomUiCapabilities.Tooltip,
+        PhantomUiProperty.Visible => PhantomUiCapabilities.Visible,
+        PhantomUiProperty.Background => PhantomUiCapabilities.Background,
+        PhantomUiProperty.Foreground => PhantomUiCapabilities.Foreground,
+        PhantomUiProperty.Border => PhantomUiCapabilities.Border,
+        _ => PhantomUiCapabilities.Font,
+    };
+
+    public static string GetPropertyName(PhantomUiProperty property) => property switch
+    {
+        PhantomUiProperty.FontSize => "fontsize",
+        PhantomUiProperty.FontStyle => "fontstyle",
+        _ => property.ToString().ToLowerInvariant(),
+    };
+}
+
+/// <summary>Colour values used by .phext files and the theme settings: #RGB, #RRGGBB, rgb(r, g, b) or a CSS colour name.</summary>
+internal static class PhantomColorParser
+{
+    public static bool TryParse(string? text, out Color color)
+    {
+        color = Color.Empty;
+        string value = (text ?? string.Empty).Trim();
+        if (value.Length == 0)
+        {
+            return false;
+        }
+
+        if (value[0] == '#')
+        {
+            return TryParseHex(value.AsSpan(1), out color);
+        }
+
+        if (value.StartsWith("rgb", StringComparison.OrdinalIgnoreCase))
+        {
+            return TryParseRgbFunction(value, out color);
+        }
+
+        // Only CSS colour names; Windows "system" colour names (Control, Window, ...) would follow the OS theme.
+        Color named = Color.FromName(value);
+        if (!named.IsKnownColor || named.IsSystemColor)
+        {
+            return false;
+        }
+
+        color = Color.FromArgb(named.A, named.R, named.G, named.B);
+        return true;
+    }
+
+    /// <summary>Parses a colour for a window control: it must be fully opaque, because WinForms controls reject see-through colours.</summary>
+    public static bool TryParseOpaque(string? text, out Color color)
+    {
+        if (!TryParse(text, out color) || color.A == 0)
+        {
+            color = Color.Empty;
+            return false;
+        }
+
+        color = Color.FromArgb(255, color.R, color.G, color.B);
+        return true;
+    }
+
+    public static string ToHex(Color color) => string.Create(CultureInfo.InvariantCulture, $"#{color.R:X2}{color.G:X2}{color.B:X2}");
+
+    private static bool TryParseHex(ReadOnlySpan<char> hex, out Color color)
+    {
+        color = Color.Empty;
+        foreach (char character in hex)
+        {
+            if (!char.IsAsciiHexDigit(character))
+            {
+                return false;
+            }
+        }
+
+        static int Nibble(char character) => Convert.ToInt32(character.ToString(), 16);
+        static int Byte(ReadOnlySpan<char> pair) => int.Parse(pair, NumberStyles.HexNumber, CultureInfo.InvariantCulture);
+
+        switch (hex.Length)
+        {
+            case 3:
+            case 4:
+            {
+                int r = Nibble(hex[0]) * 17;
+                int g = Nibble(hex[1]) * 17;
+                int b = Nibble(hex[2]) * 17;
+                int a = hex.Length == 4 ? Nibble(hex[3]) * 17 : 255;
+                color = Color.FromArgb(a, r, g, b);
+                return true;
+            }
+            case 6:
+            case 8:
+            {
+                int r = Byte(hex[..2]);
+                int g = Byte(hex[2..4]);
+                int b = Byte(hex[4..6]);
+                int a = hex.Length == 8 ? Byte(hex[6..8]) : 255;
+                color = Color.FromArgb(a, r, g, b);
+                return true;
+            }
+            default:
+                return false;
+        }
+    }
+
+    private static bool TryParseRgbFunction(string value, out Color color)
+    {
+        color = Color.Empty;
+        int open = value.IndexOf('(');
+        int close = value.LastIndexOf(')');
+        if (open < 0 || close <= open)
+        {
+            return false;
+        }
+
+        string[] parts = value[(open + 1)..close]
+            .Split(new[] { ',', ' ', '/' }, StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+        if (parts.Length is not (3 or 4))
+        {
+            return false;
+        }
+
+        var channels = new int[3];
+        for (int i = 0; i < 3; i++)
+        {
+            if (!TryParseChannel(parts[i], 255, out channels[i]))
+            {
+                return false;
+            }
+        }
+
+        int alpha = 255;
+        if (parts.Length == 4 && !TryParseChannel(parts[3], 1, out alpha))
+        {
+            return false;
+        }
+
+        color = Color.FromArgb(alpha, channels[0], channels[1], channels[2]);
+        return true;
+    }
+
+    /// <param name="scale">255 for colour channels; 1 for alpha, which is written as 0..1 (or a percentage).</param>
+    private static bool TryParseChannel(string text, int scale, out int channel)
+    {
+        channel = 0;
+        bool percent = text.EndsWith('%');
+        string number = percent ? text[..^1] : text;
+        if (!double.TryParse(number, NumberStyles.Float, CultureInfo.InvariantCulture, out double parsed) || double.IsNaN(parsed))
+        {
+            return false;
+        }
+
+        double fraction = percent ? parsed / 100.0 : parsed / scale;
+        channel = (int)Math.Round(Math.Clamp(fraction, 0, 1) * 255);
+        return true;
+    }
+}
+
 internal sealed class PhantomExtensionDefinition
 {
     public string Id { get; set; } = string.Empty;
@@ -88,6 +466,21 @@ internal sealed class PhantomExtensionDefinition
     public List<PhantomExtensionAppButtonDefinition> AppButtons { get; } = new();
     public List<PhantomExtensionWebScriptDefinition> WebScripts { get; } = new();
     public List<PhantomExtensionWebBlockDefinition> WebBlocks { get; } = new();
+
+    /// <summary>Top-bar buttons and dropdowns (app.button, menu.button, menu.dropdown) in declaration order.</summary>
+    public List<PhantomExtensionMenuItemDefinition> MenuItems { get; } = new();
+
+    public List<PhantomExtensionPageDefinition> Pages { get; } = new();
+    public List<PhantomExtensionUiEditDefinition> UiEdits { get; } = new();
+    public List<PhantomExtensionUiSvgDefinition> UiSvgs { get; } = new();
+    public List<PhantomExtensionUiShapeDefinition> UiShapes { get; } = new();
+
+    public bool HasUiCustomizations => UiEdits.Count > 0 || UiSvgs.Count > 0 || UiShapes.Count > 0;
+
+    public PhantomExtensionPageDefinition? FindPage(string? pageId)
+    {
+        return Pages.FirstOrDefault(page => page.Id.Equals(pageId ?? string.Empty, StringComparison.OrdinalIgnoreCase));
+    }
 }
 
 internal sealed class PhextParseException : Exception
@@ -115,9 +508,15 @@ internal static class PhextParser
         var definition = new PhantomExtensionDefinition();
 
         var seenSettings = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-        var seenButtons = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        // app.button, menu.button, menu.dropdown and app.page ids share one namespace: ui.element, ui.svg and
+        // ui.shape refer to an extension's own controls by these ids.
+        var seenElements = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         var seenScripts = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         var seenBlocks = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        var dropdownsById = new Dictionary<string, PhantomExtensionMenuItemDefinition>(StringComparer.OrdinalIgnoreCase);
+        // Checked once the whole file is read, because pages and ui.html may be declared after the lines using them.
+        var pendingActionChecks = new List<(PhantomExtensionActionDefinition Action, int LineNumber)>();
+        var pendingTargetChecks = new List<(string Target, PhantomUiCapabilities Required, string What, int LineNumber)>();
 
         for (int i = 0; i < lines.Length; i++)
         {
@@ -259,14 +658,176 @@ internal static class PhextParser
                 case "app.button":
                 {
                     RequireArgCount(args, 4, lineNumber);
+                    // Unlike the newer commands, app.button ids may match a built-in element name (files written
+                    // before ui.* existed keep working); ui.* lines then always mean the built-in element.
                     string id = ValidateIdentifier(args[1], lineNumber, "app button id");
-                    EnsureUnique(seenButtons, id, lineNumber, "app button id");
+                    EnsureUnique(seenElements, id, lineNumber, "element id");
 
                     definition.AppButtons.Add(new PhantomExtensionAppButtonDefinition
                     {
                         Id = id,
                         Label = args[2].Trim(),
                         Message = args[3],
+                    });
+
+                    // An app.button is a menu.button whose action is "message".
+                    definition.MenuItems.Add(new PhantomExtensionMenuItemDefinition
+                    {
+                        Id = id,
+                        Label = args[2].Trim(),
+                        Kind = PhantomExtensionMenuItemKind.Button,
+                        Action = new PhantomExtensionActionDefinition { Kind = PhantomExtensionActionKind.Message, Value = args[3] },
+                    });
+                    break;
+                }
+                case "menu.button":
+                {
+                    RequireArgCount(args, 5, lineNumber);
+                    string id = ValidateElementId(args[1], lineNumber, "menu button id");
+                    EnsureUnique(seenElements, id, lineNumber, "element id");
+                    PhantomExtensionActionDefinition action = ParseAction(args[3], args[4], lineNumber);
+                    pendingActionChecks.Add((action, lineNumber));
+
+                    definition.MenuItems.Add(new PhantomExtensionMenuItemDefinition
+                    {
+                        Id = id,
+                        Label = args[2].Trim(),
+                        Kind = PhantomExtensionMenuItemKind.Button,
+                        Action = action,
+                    });
+                    break;
+                }
+                case "menu.dropdown":
+                {
+                    RequireArgCount(args, 3, lineNumber);
+                    string id = ValidateElementId(args[1], lineNumber, "menu dropdown id");
+                    EnsureUnique(seenElements, id, lineNumber, "element id");
+
+                    var dropdown = new PhantomExtensionMenuItemDefinition
+                    {
+                        Id = id,
+                        Label = args[2].Trim(),
+                        Kind = PhantomExtensionMenuItemKind.Dropdown,
+                    };
+                    definition.MenuItems.Add(dropdown);
+                    dropdownsById[id] = dropdown;
+                    break;
+                }
+                case "menu.option":
+                {
+                    RequireArgCount(args, 5, lineNumber);
+                    string dropdownId = ValidateIdentifier(args[1], lineNumber, "menu dropdown id");
+                    if (!dropdownsById.TryGetValue(dropdownId, out PhantomExtensionMenuItemDefinition? dropdown))
+                    {
+                        throw new PhextParseException(
+                            lineNumber,
+                            $"menu.option refers to the dropdown '{dropdownId}', which is not declared above it. Declare it first with menu.dropdown.");
+                    }
+
+                    if (dropdown.Options.Count >= MaximumDropdownOptions)
+                    {
+                        throw new PhextParseException(lineNumber, $"A dropdown can have at most {MaximumDropdownOptions} options.");
+                    }
+
+                    PhantomExtensionActionDefinition action = ParseAction(args[3], args[4], lineNumber);
+                    pendingActionChecks.Add((action, lineNumber));
+                    dropdown.Options.Add(new PhantomExtensionMenuOptionDefinition
+                    {
+                        Label = args[2].Trim(),
+                        Action = action,
+                    });
+                    break;
+                }
+                case "app.page":
+                {
+                    RequireArgCount(args, 4, lineNumber);
+                    string id = ValidateElementId(args[1], lineNumber, "page id");
+                    EnsureUnique(seenElements, id, lineNumber, "element id");
+
+                    string terminator = ParseHereDocToken(args[3], lineNumber);
+                    string html = ReadBlock(lines, ref i, lineNumber, terminator);
+                    if (string.IsNullOrWhiteSpace(html))
+                    {
+                        throw new PhextParseException(lineNumber, "app.page content block cannot be empty.");
+                    }
+
+                    string label = args[2].Trim();
+                    definition.Pages.Add(new PhantomExtensionPageDefinition
+                    {
+                        Id = id,
+                        Label = string.IsNullOrWhiteSpace(label) ? id : label,
+                        Html = html,
+                    });
+                    break;
+                }
+                case "ui.element":
+                {
+                    RequireArgCount(args, 4, lineNumber);
+                    string target = ParseUiTargetName(args[1], lineNumber);
+                    PhantomUiProperty property = ParseUiProperty(args[2], lineNumber);
+                    pendingTargetChecks.Add((
+                        target,
+                        PhantomUiTargets.GetRequiredCapability(property),
+                        $"the '{PhantomUiTargets.GetPropertyName(property)}' property",
+                        lineNumber));
+                    definition.UiEdits.Add(BuildUiEdit(target, property, args[3], lineNumber));
+                    break;
+                }
+                case "ui.svg":
+                {
+                    RequireArgCount(args, 3, lineNumber);
+                    string target = ParseUiTargetName(args[1], lineNumber);
+                    pendingTargetChecks.Add((target, PhantomUiCapabilities.Svg, "ui.svg", lineNumber));
+
+                    string svgSource;
+                    if (args[2].StartsWith("<<", StringComparison.Ordinal))
+                    {
+                        string terminator = ParseHereDocToken(args[2], lineNumber);
+                        svgSource = ReadBlock(lines, ref i, lineNumber, terminator);
+                    }
+                    else if (!PhantomSvgDocument.TryDecodeDataUri(args[2], out svgSource))
+                    {
+                        throw new PhextParseException(
+                            lineNumber,
+                            "ui.svg expects a <<TAG block or a data:image/svg+xml URI.");
+                    }
+
+                    PhantomSvgDocument document;
+                    try
+                    {
+                        document = PhantomSvgDocument.Parse(svgSource);
+                    }
+                    catch (FormatException ex)
+                    {
+                        throw new PhextParseException(lineNumber, $"ui.svg: {ex.Message}");
+                    }
+
+                    definition.UiSvgs.Add(new PhantomExtensionUiSvgDefinition
+                    {
+                        Target = target,
+                        Document = document,
+                        LineNumber = lineNumber,
+                    });
+                    break;
+                }
+                case "ui.shape":
+                {
+                    if (args.Count is not (4 or 5))
+                    {
+                        throw new PhextParseException(
+                            lineNumber,
+                            $"'{args[0]}' expects 3 or 4 argument(s) but received {args.Count - 1}.");
+                    }
+
+                    string target = ParseUiTargetName(args[1], lineNumber);
+                    pendingTargetChecks.Add((target, PhantomUiCapabilities.Shape, "ui.shape", lineNumber));
+                    definition.UiShapes.Add(new PhantomExtensionUiShapeDefinition
+                    {
+                        Target = target,
+                        Shape = ParseShape(args[2], lineNumber),
+                        Fill = ParseOpaqueColor(args[3], lineNumber, "fill colour"),
+                        Outline = args.Count == 5 ? ParseOpaqueColor(args[4], lineNumber, "outline colour") : null,
+                        LineNumber = lineNumber,
                     });
                     break;
                 }
@@ -385,7 +946,238 @@ internal static class PhextParser
             definition.Ui.Title = $"{definition.Name} UI";
         }
 
+        foreach ((PhantomExtensionActionDefinition action, int actionLine) in pendingActionChecks)
+        {
+            if (action.Kind == PhantomExtensionActionKind.Page && definition.FindPage(action.Value) is null)
+            {
+                throw new PhextParseException(actionLine, $"The page action refers to '{action.Value}', but this file has no app.page with that id.");
+            }
+
+            if (action.Kind == PhantomExtensionActionKind.Window && !definition.Ui.HasUi)
+            {
+                throw new PhextParseException(actionLine, "The window action opens the ui.html window, but this file has no ui.html block.");
+            }
+        }
+
+        foreach ((string target, PhantomUiCapabilities required, string what, int targetLine) in pendingTargetChecks)
+        {
+            PhantomUiCapabilities allowed;
+            string description;
+            if (PhantomUiTargets.TryGetBuiltIn(target, out PhantomUiTargetInfo builtIn))
+            {
+                allowed = builtIn.Capabilities;
+                description = builtIn.Name;
+            }
+            else if (seenElements.Contains(target))
+            {
+                allowed = PhantomUiTargets.OwnElementCapabilities;
+                description = $"this extension's own '{target}' control";
+            }
+            else
+            {
+                throw new PhextParseException(
+                    targetLine,
+                    $"Unknown UI element '{target}'. Use a built-in element (listed in PHEXT_GUIDE.md) or the id of one of " +
+                    "this extension's app.button, menu.button, menu.dropdown or app.page controls.");
+            }
+
+            if ((allowed & required) != 0)
+            {
+                continue;
+            }
+
+            if (required == PhantomUiCapabilities.Visible && target.Equals("menu.settings", StringComparison.OrdinalIgnoreCase))
+            {
+                throw new PhextParseException(targetLine, "menu.settings cannot be hidden: Settings is where extensions are disabled and uninstalled.");
+            }
+
+            throw new PhextParseException(targetLine, $"{char.ToUpperInvariant(what[0])}{what[1..]} cannot be used on {description}.");
+        }
+
         return definition;
+    }
+
+    private const int MaximumDropdownOptions = 50;
+
+    /// <summary>An id for an extension's own control. Built-in element names are reserved so ui.* targets stay unambiguous.</summary>
+    private static string ValidateElementId(string value, int lineNumber, string label)
+    {
+        string id = ValidateIdentifier(value, lineNumber, label);
+        if (PhantomUiTargets.TryGetBuiltIn(id, out _))
+        {
+            throw new PhextParseException(lineNumber, $"{label} '{id}' is reserved for a built-in PhantomHaze element. Choose another id.");
+        }
+
+        return id;
+    }
+
+    private static string ParseUiTargetName(string value, int lineNumber)
+    {
+        string target = value.Trim();
+        if (!ValidIdentifierRegex.IsMatch(target))
+        {
+            throw new PhextParseException(lineNumber, $"UI element '{value}' is invalid. Use a name such as menu.settings.");
+        }
+
+        return PhantomUiTargets.TryGetBuiltIn(target, out PhantomUiTargetInfo builtIn) ? builtIn.Name : target;
+    }
+
+    private static PhantomUiProperty ParseUiProperty(string value, int lineNumber)
+    {
+        return value.Trim().ToLowerInvariant() switch
+        {
+            "text" or "label" => PhantomUiProperty.Text,
+            "tooltip" => PhantomUiProperty.Tooltip,
+            "visible" => PhantomUiProperty.Visible,
+            "background" or "background-color" or "backcolor" => PhantomUiProperty.Background,
+            "foreground" or "color" or "text-color" or "forecolor" => PhantomUiProperty.Foreground,
+            "border" or "border-color" => PhantomUiProperty.Border,
+            "font" or "font-family" => PhantomUiProperty.Font,
+            "fontsize" or "font-size" => PhantomUiProperty.FontSize,
+            "fontstyle" or "font-style" => PhantomUiProperty.FontStyle,
+            _ => throw new PhextParseException(
+                lineNumber,
+                $"Unknown UI property '{value}'. Use text, tooltip, visible, background, foreground, border, font, fontsize or fontstyle."),
+        };
+    }
+
+    private static PhantomExtensionUiEditDefinition BuildUiEdit(string target, PhantomUiProperty property, string rawValue, int lineNumber)
+    {
+        switch (property)
+        {
+            case PhantomUiProperty.Text:
+            case PhantomUiProperty.Tooltip:
+                return new PhantomExtensionUiEditDefinition { Target = target, Property = property, Text = rawValue, LineNumber = lineNumber };
+
+            case PhantomUiProperty.Visible:
+                return new PhantomExtensionUiEditDefinition { Target = target, Property = property, Flag = ParseBoolean(rawValue.Trim(), lineNumber), LineNumber = lineNumber };
+
+            case PhantomUiProperty.Background:
+            case PhantomUiProperty.Foreground:
+            case PhantomUiProperty.Border:
+                return new PhantomExtensionUiEditDefinition
+                {
+                    Target = target,
+                    Property = property,
+                    Color = ParseOpaqueColor(rawValue, lineNumber, $"{PhantomUiTargets.GetPropertyName(property)} colour"),
+                    LineNumber = lineNumber,
+                };
+
+            case PhantomUiProperty.Font:
+            {
+                string family = rawValue.Trim();
+                if (family.Length is 0 or > 64 || family.Any(char.IsControl))
+                {
+                    throw new PhextParseException(lineNumber, "font expects the name of a font installed on Windows, such as \"Consolas\".");
+                }
+
+                return new PhantomExtensionUiEditDefinition { Target = target, Property = property, Text = family, LineNumber = lineNumber };
+            }
+
+            case PhantomUiProperty.FontSize:
+            {
+                if (!float.TryParse(rawValue.Trim(), NumberStyles.Float, CultureInfo.InvariantCulture, out float size) ||
+                    float.IsNaN(size) || size < 6 || size > 48)
+                {
+                    throw new PhextParseException(lineNumber, $"fontsize expects a size in points between 6 and 48 but received '{rawValue}'.");
+                }
+
+                return new PhantomExtensionUiEditDefinition { Target = target, Property = property, Number = size, LineNumber = lineNumber };
+            }
+
+            default:
+            {
+                PhantomUiFontStyle style = rawValue.Trim().ToLowerInvariant().Replace(" ", string.Empty, StringComparison.Ordinal) switch
+                {
+                    "regular" or "normal" => PhantomUiFontStyle.Regular,
+                    "bold" => PhantomUiFontStyle.Bold,
+                    "italic" => PhantomUiFontStyle.Italic,
+                    "bold-italic" or "bolditalic" or "italic-bold" => PhantomUiFontStyle.BoldItalic,
+                    _ => throw new PhextParseException(lineNumber, $"fontstyle expects regular, bold, italic or bold-italic but received '{rawValue}'."),
+                };
+
+                return new PhantomExtensionUiEditDefinition { Target = target, Property = property, FontStyle = style, LineNumber = lineNumber };
+            }
+        }
+    }
+
+    private static PhantomUiShape ParseShape(string value, int lineNumber)
+    {
+        return value.Trim().ToLowerInvariant() switch
+        {
+            "rectangle" or "rect" or "square" => PhantomUiShape.Rectangle,
+            "rounded" or "rounded-rectangle" or "roundrect" => PhantomUiShape.Rounded,
+            "pill" or "capsule" => PhantomUiShape.Pill,
+            "circle" => PhantomUiShape.Circle,
+            "ellipse" or "oval" => PhantomUiShape.Ellipse,
+            "diamond" => PhantomUiShape.Diamond,
+            "triangle" => PhantomUiShape.Triangle,
+            "hexagon" => PhantomUiShape.Hexagon,
+            "star" => PhantomUiShape.Star,
+            _ => throw new PhextParseException(
+                lineNumber,
+                $"Unknown shape '{value}'. Use rectangle, rounded, pill, circle, ellipse, diamond, triangle, hexagon or star."),
+        };
+    }
+
+    private static Color ParseOpaqueColor(string value, int lineNumber, string label)
+    {
+        if (PhantomColorParser.TryParseOpaque(value, out Color color))
+        {
+            return color;
+        }
+
+        throw new PhextParseException(
+            lineNumber,
+            $"'{value}' is not a valid {label}. Use #RGB, #RRGGBB, rgb(r, g, b) or a colour name such as \"steelblue\".");
+    }
+
+    private static PhantomExtensionActionDefinition ParseAction(string kindText, string value, int lineNumber)
+    {
+        PhantomExtensionActionKind kind = kindText.Trim().ToLowerInvariant() switch
+        {
+            "message" => PhantomExtensionActionKind.Message,
+            "url" => PhantomExtensionActionKind.Url,
+            "page" => PhantomExtensionActionKind.Page,
+            "window" => PhantomExtensionActionKind.Window,
+            "view" => PhantomExtensionActionKind.View,
+            "log" => PhantomExtensionActionKind.Log,
+            _ => throw new PhextParseException(
+                lineNumber,
+                $"Unknown action '{kindText}'. Use message, url, page, window, view or log."),
+        };
+
+        switch (kind)
+        {
+            case PhantomExtensionActionKind.Url:
+            {
+                string url = value.Trim();
+                if (!url.StartsWith("https://", StringComparison.OrdinalIgnoreCase) &&
+                    !url.StartsWith("http://", StringComparison.OrdinalIgnoreCase))
+                {
+                    throw new PhextParseException(lineNumber, $"The url action needs an http:// or https:// address but received '{value}'.");
+                }
+
+                return new PhantomExtensionActionDefinition { Kind = kind, Value = url };
+            }
+            case PhantomExtensionActionKind.Page:
+                return new PhantomExtensionActionDefinition { Kind = kind, Value = ValidateIdentifier(value.Trim(), lineNumber, "page id") };
+            case PhantomExtensionActionKind.View:
+            {
+                string view = value.Trim().ToLowerInvariant() switch
+                {
+                    "logs" or "log" => "logs",
+                    "web" or "webview" or "web-view" => "web",
+                    _ => throw new PhextParseException(lineNumber, $"The view action accepts logs or web but received '{value}'."),
+                };
+
+                return new PhantomExtensionActionDefinition { Kind = kind, Value = view };
+            }
+            case PhantomExtensionActionKind.Window:
+                return new PhantomExtensionActionDefinition { Kind = kind, Value = string.Empty };
+            default:
+                return new PhantomExtensionActionDefinition { Kind = kind, Value = value };
+        }
     }
 
     private static void EnsureUnique(HashSet<string> seenKeys, string key, int lineNumber, string label)
@@ -898,6 +1690,9 @@ internal enum PhantomExtensionPlaceholderContext
 
     /// <summary>Values are HTML-encoded.</summary>
     Html,
+
+    /// <summary>Values are percent-encoded, so a setting can never change which site a url action opens.</summary>
+    UrlComponent,
 }
 
 internal static class PhantomExtensionPlaceholders
@@ -956,6 +1751,7 @@ internal static class PhantomExtensionPlaceholders
             {
                 PhantomExtensionPlaceholderContext.JavaScriptString => PhantomExtensionScriptBuilder.EscapeJavaScriptStringContent(value),
                 PhantomExtensionPlaceholderContext.Html => WebUtility.HtmlEncode(value),
+                PhantomExtensionPlaceholderContext.UrlComponent => Uri.EscapeDataString(value),
                 _ => value,
             };
         });
@@ -1221,6 +2017,22 @@ internal static class PhantomExtensionIconFactory
     private static bool TryCreateImageFromBase64(string token, out Image? image)
     {
         image = null;
+
+        // SVG icons (data:image/svg+xml;base64,... or data:image/svg+xml,...) are drawn by PhantomHaze's own renderer.
+        if (PhantomSvgDocument.TryDecodeDataUri(token, out string svgSource))
+        {
+            try
+            {
+                PhantomSvgDocument document = PhantomSvgDocument.Parse(svgSource);
+                image = PhantomSvgRenderer.Render(document, new Size(64, 64), Color.FromArgb(60, 66, 76));
+                return true;
+            }
+            catch (Exception)
+            {
+                return false;
+            }
+        }
+
         string payload = token;
         const string base64Prefix = "base64:";
         const string dataPrefix = "data:image";
