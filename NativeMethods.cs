@@ -44,6 +44,26 @@ internal static class NativeMethods
     [DllImport("kernel32.dll")]
     private static extern uint GetCurrentThreadId();
 
+    // Makes a downloaded font (Settings -> Appearance -> Font) available to GDI text drawing in this process only.
+    // FR_PRIVATE fonts are not installed for other programs and disappear when PhantomHaze exits.
+    private const uint FR_PRIVATE = 0x10;
+
+    [DllImport("gdi32.dll", CharSet = CharSet.Unicode, EntryPoint = "AddFontResourceExW")]
+    private static extern int AddFontResourceEx(string name, uint flags, IntPtr reserved);
+
+    /// <summary>Registers a font file for GDI in this process only. Returns false if Windows did not accept it.</summary>
+    public static bool RegisterPrivateFontFile(string path)
+    {
+        try
+        {
+            return AddFontResourceEx(path, FR_PRIVATE, IntPtr.Zero) > 0;
+        }
+        catch (Exception ex) when (ex is DllNotFoundException or EntryPointNotFoundException)
+        {
+            return false;
+        }
+    }
+
     [DllImport("user32.dll", CharSet = CharSet.Unicode, EntryPoint = "GetClassNameW")]
     private static extern int GetClassName(IntPtr hWnd, [Out] char[] lpClassName, int nMaxCount);
 
