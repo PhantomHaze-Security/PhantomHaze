@@ -18,7 +18,7 @@
       v1.3.5-beta), which the update banner compares with the matching line of ver-banner.csv on the main branch
       (line 1: latest stable, line 2: latest beta). The window title shows "Beta" for beta builds.
     -->
-    <PhantomHazeReleaseChannel>beta</PhantomHazeReleaseChannel>
+    <PhantomHazeReleaseChannel>stable</PhantomHazeReleaseChannel>
     <InformationalVersion>v$(Version)-$(PhantomHazeReleaseChannel)</InformationalVersion>
     <ApplicationIcon>icon.ico</ApplicationIcon>
   </PropertyGroup>
