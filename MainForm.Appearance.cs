@@ -99,7 +99,7 @@ public partial class MainForm
         public ThemeGradient? Gradient { get; init; }
     }
 
-    // The Light and Dark palettes reproduce the colours PhantomHaze has always used.
+    // Dark is the new browser-chrome default; Light remains available as a user-selectable theme.
     private static readonly ThemePalette LightPalette = new()
     {
         IsDark = false,
@@ -145,29 +145,29 @@ public partial class MainForm
     {
         IsDark = true,
         UseSystemDialogColors = false,
-        AppBack = Color.FromArgb(31, 36, 43),
-        PanelBack = Color.FromArgb(40, 45, 53),
-        MenuBack = Color.FromArgb(52, 60, 72),
+        AppBack = Color.FromArgb(33, 35, 41),
+        PanelBack = Color.FromArgb(34, 36, 42),
+        MenuBack = Color.FromArgb(34, 36, 42),
         Text = Color.FromArgb(224, 233, 245),
         InputBack = Color.FromArgb(54, 62, 74),
         InputText = Color.FromArgb(234, 241, 252),
         ButtonBack = Color.FromArgb(67, 76, 90),
         ButtonText = Color.FromArgb(225, 233, 244),
-        ButtonBorder = Color.FromArgb(105, 116, 132),
+        ButtonBorder = Color.FromArgb(92, 143, 136),
         HistoryButtonActive = Color.FromArgb(86, 96, 111),
-        ViewSelectedBack = Color.FromArgb(73, 84, 100),
-        ViewNormalBack = Color.FromArgb(52, 60, 72),
-        ViewSelectedText = Color.White,
-        ViewNormalText = Color.FromArgb(210, 220, 232),
-        TabActiveBack = Color.FromArgb(69, 81, 97),
-        TabInactiveBack = Color.FromArgb(53, 61, 73),
-        TabCloseActiveBack = Color.FromArgb(76, 87, 103),
-        TabCloseInactiveBack = Color.FromArgb(63, 72, 85),
+        ViewSelectedBack = Color.FromArgb(231, 255, 245),
+        ViewNormalBack = Color.FromArgb(172, 190, 185),
+        ViewSelectedText = Color.FromArgb(34, 36, 42),
+        ViewNormalText = Color.FromArgb(34, 36, 42),
+        TabActiveBack = Color.FromArgb(100, 100, 100),
+        TabInactiveBack = Color.FromArgb(52, 60, 72),
+        TabCloseActiveBack = Color.FromArgb(100, 100, 100),
+        TabCloseInactiveBack = Color.FromArgb(52, 60, 72),
         TabActiveText = Color.FromArgb(240, 245, 252),
         TabInactiveText = Color.FromArgb(200, 211, 226),
-        LogBack = Color.FromArgb(23, 27, 33),
+        LogBack = Color.FromArgb(33, 35, 41),
         LogText = Color.FromArgb(210, 225, 240),
-        OverlayBack = Color.FromArgb(31, 36, 43),
+        OverlayBack = Color.FromArgb(33, 35, 41),
         FavoriteIdleBack = Color.FromArgb(67, 76, 90),
         FavoriteIdleText = Color.FromArgb(225, 233, 244),
         ExtensionWindowBack = Color.FromArgb(38, 44, 52),
@@ -206,15 +206,16 @@ public partial class MainForm
 
     private Button[] CommandButtons =>
     [
-        _toggleButton, _backButton, _goButton, _refreshButton, _historyButton, _newTabButton,
-        _historyClearButton, _findCloseButton, _settingsButton, _updateBannerUpdateButton,
+        _toggleButton, _backButton, _forwardButton, _goButton, _refreshButton, _historyButton,
+        _zoomInButton, _zoomOutButton, _newTabButton, _historyClearButton, _findCloseButton,
+        _settingsButton, _updateBannerUpdateButton,
     ];
 
     /// <summary>The panels a gradient theme paints (everything else shows them through a transparent background).</summary>
     private ThemedPanel[] ThemeSurfaces =>
     [
-        _menuBarPanel, _addressBarPanel, _historyPanel, _contentHostPanel, _webViewHostPanel, _extensionPageHostPanel,
-        _webViewLoadingOverlayPanel,
+        _menuBarPanel, _chromePanel, _protectionCardPanel, _addressBarPanel, _tabsHostPanel, _historyPanel,
+        _contentHostPanel, _webViewHostPanel, _extensionPageHostPanel, _webViewLoadingOverlayPanel,
     ];
 
     private ToolStrip[] PopupMenus => [_disableProtectionMenu, _extensionMenuOverflowMenu, _extensionDropdownMenu, _updateBannerSnoozeMenu];
@@ -382,7 +383,10 @@ public partial class MainForm
 
         BackColor = palette.AppBack;
         _menuBarPanel.BackColor = palette.MenuBack;
+        _chromePanel.BackColor = palette.MenuBack;
+        _protectionCardPanel.BackColor = palette.MenuBack;
         _addressBarPanel.BackColor = palette.PanelBack;
+        _tabsHostPanel.BackColor = IsDarkTheme() ? Color.FromArgb(52, 60, 72) : palette.MenuBack;
         _contentHostPanel.BackColor = palette.AppBack;
         _webViewHostPanel.BackColor = palette.AppBack;
         _extensionPageHostPanel.BackColor = palette.AppBack;
@@ -401,6 +405,17 @@ public partial class MainForm
         _logsViewButton.FlatAppearance.BorderColor = palette.ButtonBorder;
 
         ApplyGradientTransparency(palette.Gradient is not null);
+        if (palette.Gradient is null)
+        {
+            _menuLayout!.BackColor = palette.MenuBack;
+            _extensionMenuButtonsPanel.BackColor = palette.MenuBack;
+            _addressRootLayout!.BackColor = palette.PanelBack;
+            _addressStripLayout!.BackColor = palette.PanelBack;
+            _tabsLayout!.BackColor = _tabsHostPanel.BackColor;
+            _tabsFlowPanel.BackColor = _tabsHostPanel.BackColor;
+        }
+
+        _zoomLabel.BackColor = Color.Transparent;
         UpdateProtectionStatusVisual();
         ApplyThemeToUpdateBanner();
         ApplyTextColors();
@@ -443,6 +458,38 @@ public partial class MainForm
         }
 
         _historyButton.BackColor = _historyPanel.Visible ? GetHistoryButtonActiveBackColor() : buttonBack;
+        Color chromeBack = IsDarkTheme() ? Color.FromArgb(34, 36, 42) : buttonBack;
+        Color navigationBack = IsDarkTheme() ? Color.FromArgb(231, 245, 255) : buttonBack;
+        Color chromeText = IsDarkTheme() ? Color.FromArgb(231, 245, 255) : buttonText;
+        foreach (Button button in new[] { _backButton, _forwardButton })
+        {
+            button.BackColor = navigationBack;
+            button.ForeColor = Color.FromArgb(20, 21, 22);
+            button.FlatAppearance.BorderColor = Color.FromArgb(20, 21, 22);
+        }
+
+        _favoriteButton.BackColor = chromeBack;
+        _favoriteButton.ForeColor = chromeText;
+        _zoomInButton.BackColor = chromeBack;
+        _zoomOutButton.BackColor = chromeBack;
+        _zoomInButton.ForeColor = chromeText;
+        _zoomOutButton.ForeColor = chromeText;
+        _refreshButton.BackColor = Color.White;
+        _refreshButton.ForeColor = Color.FromArgb(34, 36, 42);
+        _historyButton.BackColor = _historyPanel.Visible
+            ? GetHistoryButtonActiveBackColor()
+            : (IsDarkTheme() ? Color.FromArgb(34, 36, 42) : buttonBack);
+        _historyButton.ForeColor = IsDarkTheme() ? chromeText : buttonText;
+        _historyButton.FlatAppearance.BorderColor = IsDarkTheme() ? Color.FromArgb(92, 143, 136) : palette.ButtonBorder;
+        _zoomLabel.ForeColor = IsDarkTheme() ? chromeText : text;
+        _addressBarTextBox.BackColor = Color.White;
+        _addressBarTextBox.ForeColor = Color.FromArgb(34, 36, 42);
+        _newTabButton.BackColor = Color.FromArgb(52, 60, 72);
+        _newTabButton.ForeColor = Color.FromArgb(231, 245, 255);
+        _settingsButton.BackColor = IsDarkTheme() ? Color.FromArgb(34, 36, 42) : buttonBack;
+        _settingsButton.ForeColor = IsDarkTheme() ? chromeText : buttonText;
+        _toggleButton.BackColor = Color.FromArgb(240, 240, 240);
+        _toggleButton.ForeColor = Color.FromArgb(34, 36, 42);
 
         UpdateTabHeaderVisuals();
         UpdateFavoriteButtonState();
@@ -455,7 +502,7 @@ public partial class MainForm
         Control?[] containers =
         [
             _menuLayout, _menuLogoLayout, _extensionMenuButtonsPanel, _menuLogoLabel, _menuLogoPictureBox, _menuClockLabel,
-            _addressRootLayout, _addressStripLayout, _addressInputLayout, _tabsLayout, _tabsFlowPanel, _zoomLabel,
+            _addressRootLayout, _addressStripLayout, _tabsLayout, _tabsFlowPanel, _zoomLabel,
             _historyLayout, _historyTitleLabel, _favoritesTitleLabel, _webViewLoadingLabel,
         ];
 
@@ -1336,11 +1383,20 @@ public partial class MainForm
         foreach (Font font in new[]
                  {
                      _tabCloseFontRegular, _tabCloseFontCompact, _menuButtonFontRegular, _menuButtonFontBold, _menuTitleFont,
-                     _tabTitleFont, _stripButtonFont, _favoriteButtonFont, _zoomLabelFont, _newTabButtonFont, _logFont,
+                     _tabTitleFont, _stripButtonFont, _chromeIconFont, _chromeRefreshFont, _favoriteButtonFont,
+                     _zoomLabelFont, _newTabButtonFont, _logFont,
                  })
         {
             font.Dispose();
         }
+
+        foreach (Region region in _nativeChromeRegions.Values)
+        {
+            region.Dispose();
+        }
+
+        _nativeChromeRegions.Clear();
+        _nativeChromeRegionSizes.Clear();
 
         foreach (Font font in _googleFontCache.Values.Concat(_systemFontCache.Values))
         {

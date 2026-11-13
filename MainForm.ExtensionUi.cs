@@ -685,17 +685,17 @@ public partial class MainForm
         Bind("menu.bar", _menuBarPanel);
         Bind("menu.logo", _menuLogoPictureBox, image: () => _defaultLogoImage);
         Bind("menu.title", _menuLogoLabel, text: () => "PhantomHaze", font: () => MapFont(_menuTitleFont));
-        Bind("menu.logs", _logsViewButton, text: () => "Logs", font: () => MapFont(IsLogsViewSelected ? _menuButtonFontBold : _menuButtonFontRegular));
-        Bind("menu.webview", _webViewToggleButton, text: () => "Web View", font: () => MapFont(_webViewModeEnabled ? _menuButtonFontBold : _menuButtonFontRegular));
+        Bind("menu.logs", _logsViewButton, text: () => "Log", font: () => MapFont(IsLogsViewSelected ? _menuButtonFontBold : _menuButtonFontRegular));
+        Bind("menu.webview", _webViewToggleButton, text: () => "Web", font: () => MapFont(_webViewModeEnabled ? _menuButtonFontBold : _menuButtonFontRegular));
         Bind("menu.clock", _menuClockLabel, font: () => MapFont(_menuButtonFontRegular));
         // These two inherit the window's font; MapFont(Font) is that same font unless an app font is in use.
-        Bind("menu.settings", _settingsButton, text: () => "Settings", font: () => MapFont(Font));
+        Bind("menu.settings", _settingsButton, text: () => "⚙", font: () => MapFont(_chromeIconFont));
         Bind("address.bar", _addressBarTextBox, font: () => MapFont(Font));
         Bind("address.favorite", _favoriteButton, font: () => MapFont(_favoriteButtonFont));
-        Bind("address.back", _backButton, text: () => "Back", font: () => MapFont(_stripButtonFont));
+        Bind("address.back", _backButton, text: () => "←", font: () => MapFont(_chromeIconFont));
         Bind("address.go", _goButton, text: () => "Go", font: () => MapFont(_stripButtonFont));
-        Bind("address.refresh", _refreshButton, text: () => "Refresh", font: () => MapFont(_stripButtonFont));
-        Bind("address.history", _historyButton, text: () => "History", font: () => MapFont(_stripButtonFont));
+        Bind("address.refresh", _refreshButton, text: () => "⟳", font: () => MapFont(_chromeRefreshFont));
+        Bind("address.history", _historyButton, text: () => "Favorites", font: () => MapFont(_stripButtonFont));
         Bind("address.zoom", _zoomLabel, font: () => MapFont(_zoomLabelFont));
         Bind("tabs.new", _newTabButton, text: () => "+", font: () => MapFont(_newTabButtonFont));
         Bind("log.panel", _logBox, font: () => MapFont(_logFont));
@@ -736,6 +736,12 @@ public partial class MainForm
                     ApplyExtensionElementState(button, entry, customization);
                 }
             }
+
+            foreach (Control control in new Control[] { _settingsButton, _backButton, _forwardButton, _favoriteButton, _zoomInButton, _zoomOutButton })
+            {
+                SetCircleChromeRegion(control);
+            }
+            SetPillChromeRegion(_historyButton);
 
             // Gradient surfaces repaint when a solid background override starts or stops covering them.
             if (!previousBackgroundOverrides.SetEquals(_surfacesWithBackgroundOverride))
