@@ -228,13 +228,21 @@ internal enum PhantomUiCapabilities
     Shape = 1 << 8,
 }
 
-internal sealed record PhantomUiTargetInfo(string Name, string Description, PhantomUiCapabilities Capabilities);
+/// <param name="IdReserved">
+/// True for the element names that have existed since ui.* was introduced (v1.3.5): an extension's own menu.button,
+/// menu.dropdown or app.page may not use them as its id. Names added later are not reserved, so an extension written
+/// before they existed keeps loading when one of its own controls happens to have that id; ui.* lines in that file
+/// then keep meaning its own control, exactly as they did before.
+/// </param>
+internal sealed record PhantomUiTargetInfo(string Name, string Description, PhantomUiCapabilities Capabilities, bool IdReserved = true);
 
 /// <summary>
 /// The built-in controls extensions may customise with ui.element, ui.svg and ui.shape, and what each one allows.
-/// The protection banner and the protection button are deliberately not listed: an extension must never be able to
-/// make PhantomHaze look protected when it is not. The Settings button can be restyled but never hidden, so an
-/// extension can never lock the user out of the place where it is disabled or uninstalled.
+/// Together they cover the whole PhantomHaze window, with deliberate exceptions. The protection status and the
+/// protection button are not listed: an extension must never be able to make PhantomHaze look protected when it is
+/// not. The update banner is not listed either, so an extension cannot hide that a newer version is available. The
+/// Settings button can be restyled but never hidden, so an extension can never lock the user out of the place where
+/// it is disabled or uninstalled, and Clear History cannot be hidden because it is a privacy control.
 /// </summary>
 internal static class PhantomUiTargets
 {
@@ -243,51 +251,100 @@ internal static class PhantomUiTargets
         PhantomUiCapabilities.Background | PhantomUiCapabilities.Foreground | PhantomUiCapabilities.Border |
         PhantomUiCapabilities.Font | PhantomUiCapabilities.Svg | PhantomUiCapabilities.Shape;
 
+    private const PhantomUiCapabilities LabelLike =
+        PhantomUiCapabilities.Text | PhantomUiCapabilities.Foreground | PhantomUiCapabilities.Font;
+
+    private const PhantomUiCapabilities ListLike =
+        PhantomUiCapabilities.Background | PhantomUiCapabilities.Foreground | PhantomUiCapabilities.Font;
+
     /// <summary>What an extension may change on its own top-bar buttons, dropdowns and page buttons.</summary>
     public const PhantomUiCapabilities OwnElementCapabilities = ButtonLike & ~PhantomUiCapabilities.Visible;
 
     public static IReadOnlyList<PhantomUiTargetInfo> BuiltIn { get; } =
     [
-        new("menu.bar", "The top menu bar", PhantomUiCapabilities.Background),
-        new("menu.logo", "The PhantomHaze logo in the menu bar",
+        // ---- The top bar ----
+        new("menu.bar", "The top bar: the row with Log, Web and Settings and the frame around the address row", PhantomUiCapabilities.Background),
+        new("menu.logo", "The PhantomHaze logo (only shown when an extension shows or customises it)",
             PhantomUiCapabilities.Tooltip | PhantomUiCapabilities.Visible | PhantomUiCapabilities.Background |
             PhantomUiCapabilities.Svg | PhantomUiCapabilities.Shape),
-        new("menu.title", "The PhantomHaze name next to the logo",
+        new("menu.title", "The PhantomHaze name next to the logo (only shown when an extension shows or customises it)",
             PhantomUiCapabilities.Text | PhantomUiCapabilities.Tooltip | PhantomUiCapabilities.Visible |
             PhantomUiCapabilities.Background | PhantomUiCapabilities.Foreground | PhantomUiCapabilities.Font |
             PhantomUiCapabilities.Svg | PhantomUiCapabilities.Shape),
-        new("menu.logs", "The Logs button", ButtonLike),
-        new("menu.webview", "The Web View button", ButtonLike),
-        new("menu.clock", "The clock to the left of Settings",
+        new("menu.logs", "The Log button", ButtonLike),
+        new("menu.webview", "The Web button", ButtonLike),
+        new("menu.clock", "The clock",
             PhantomUiCapabilities.Tooltip | PhantomUiCapabilities.Visible | PhantomUiCapabilities.Background |
             PhantomUiCapabilities.Foreground | PhantomUiCapabilities.Font | PhantomUiCapabilities.Shape),
         new("menu.settings", "The Settings button (it can be restyled but never hidden)", ButtonLike & ~PhantomUiCapabilities.Visible),
-        new("address.bar", "The address box",
+
+        // ---- The address row ----
+        new("address.panel", "The row that holds the address box and its buttons", PhantomUiCapabilities.Background, IdReserved: false),
+        new("address.bar", "The address box (border: its outline)",
             PhantomUiCapabilities.Tooltip | PhantomUiCapabilities.Background | PhantomUiCapabilities.Foreground |
-            PhantomUiCapabilities.Font),
+            PhantomUiCapabilities.Border | PhantomUiCapabilities.Font),
         new("address.favorite", "The favourite (star) button",
             PhantomUiCapabilities.Tooltip | PhantomUiCapabilities.Visible | PhantomUiCapabilities.Border |
             PhantomUiCapabilities.Font | PhantomUiCapabilities.Svg | PhantomUiCapabilities.Shape),
         new("address.back", "The Back button", ButtonLike),
-        new("address.go", "The Go button", ButtonLike),
+        new("address.forward", "The Forward button", ButtonLike, IdReserved: false),
+        new("address.go", "The Go button (only shown when an extension shows or customises it)", ButtonLike),
         new("address.refresh", "The Refresh button", ButtonLike),
-        new("address.history", "The History button", ButtonLike),
-        new("address.zoom", "The zoom percentage label",
+        new("address.history", "The Favorites button, which opens the history and favourites panel", ButtonLike),
+        new("address.zoom", "The zoom percentage (background and border: the zoom control around it)",
             PhantomUiCapabilities.Tooltip | PhantomUiCapabilities.Visible | PhantomUiCapabilities.Background |
-            PhantomUiCapabilities.Foreground | PhantomUiCapabilities.Font),
+            PhantomUiCapabilities.Foreground | PhantomUiCapabilities.Border | PhantomUiCapabilities.Font),
+        new("address.zoomin", "The zoom in (+) button", ButtonLike, IdReserved: false),
+        new("address.zoomout", "The zoom out (-) button", ButtonLike, IdReserved: false),
+
+        // ---- The tab strip ----
+        new("tabs.bar", "The tab strip", PhantomUiCapabilities.Background, IdReserved: false),
         new("tabs.new", "The new tab (+) button", ButtonLike),
-        new("log.panel", "The log panel",
-            PhantomUiCapabilities.Background | PhantomUiCapabilities.Foreground | PhantomUiCapabilities.Font),
+        new("tabs.tab", "Every tab (font: the tab titles)", ListLike, IdReserved: false),
+        new("tabs.active", "The selected tab, on top of tabs.tab",
+            PhantomUiCapabilities.Background | PhantomUiCapabilities.Foreground, IdReserved: false),
+        new("tabs.close", "The close button of every tab",
+            PhantomUiCapabilities.Text | PhantomUiCapabilities.Background | PhantomUiCapabilities.Foreground |
+            PhantomUiCapabilities.Border, IdReserved: false),
+
+        // ---- The content area ----
+        new("log.panel", "The log panel", ListLike),
         new("history.panel", "The history and favourites panel", PhantomUiCapabilities.Background),
+        new("history.title", "The heading above the history list", LabelLike, IdReserved: false),
+        new("history.list", "The history list", ListLike, IdReserved: false),
+        new("history.clear", "The Clear History button (it can be restyled but never hidden)",
+            ButtonLike & ~PhantomUiCapabilities.Visible, IdReserved: false),
+        new("favorites.title", "The heading above the favourites list", LabelLike, IdReserved: false),
+        new("favorites.list", "The favourites list", ListLike, IdReserved: false),
+        new("find.panel", "The find-in-page panel", PhantomUiCapabilities.Background, IdReserved: false),
+        new("find.box", "The find-in-page text box", PhantomUiCapabilities.Tooltip | ListLike, IdReserved: false),
+        new("find.count", "The find-in-page match count",
+            PhantomUiCapabilities.Foreground | PhantomUiCapabilities.Font, IdReserved: false),
+        new("find.close", "The find-in-page close button", ButtonLike & ~PhantomUiCapabilities.Visible, IdReserved: false),
+        new("loading.panel", "The panel shown while Web View is loading", PhantomUiCapabilities.Background, IdReserved: false),
+        new("loading.label", "The text shown while Web View is loading", LabelLike, IdReserved: false),
     ];
 
     private static readonly Dictionary<string, PhantomUiTargetInfo> BuiltInByName =
         BuiltIn.ToDictionary(target => target.Name, StringComparer.OrdinalIgnoreCase);
 
+    /// <summary>Every built-in element name, for error messages (the language has no separate reference file).</summary>
+    public static string BuiltInNameList { get; } = string.Join(", ", BuiltIn.Select(target => target.Name));
+
     public static bool TryGetBuiltIn(string? name, out PhantomUiTargetInfo info)
     {
         info = null!;
         return name is not null && BuiltInByName.TryGetValue(name.Trim(), out info!);
+    }
+
+    /// <summary>
+    /// Whether a ui.* target means the built-in element of that name rather than one of the extension's own controls.
+    /// Reserved names always mean the built-in element; a newer name means the extension's own control when the
+    /// extension declares one with that id (see <see cref="PhantomUiTargetInfo"/>).
+    /// </summary>
+    public static bool ResolvesToBuiltIn(string? name, bool extensionDeclaresOwnControl, out PhantomUiTargetInfo info)
+    {
+        return TryGetBuiltIn(name, out info) && (info.IdReserved || !extensionDeclaresOwnControl);
     }
 
     public static PhantomUiCapabilities GetRequiredCapability(PhantomUiProperty property) => property switch
@@ -659,7 +716,8 @@ internal static class PhextParser
                 {
                     RequireArgCount(args, 4, lineNumber);
                     // Unlike the newer commands, app.button ids may match a built-in element name (files written
-                    // before ui.* existed keep working); ui.* lines then always mean the built-in element.
+                    // before ui.* existed keep working); ui.* lines then mean the built-in element when its name is
+                    // one of the original, reserved ones (see PhantomUiTargets.ResolvesToBuiltIn).
                     string id = ValidateIdentifier(args[1], lineNumber, "app button id");
                     EnsureUnique(seenElements, id, lineNumber, "element id");
 
@@ -963,12 +1021,13 @@ internal static class PhextParser
         {
             PhantomUiCapabilities allowed;
             string description;
-            if (PhantomUiTargets.TryGetBuiltIn(target, out PhantomUiTargetInfo builtIn))
+            bool ownControl = seenElements.Contains(target);
+            if (PhantomUiTargets.ResolvesToBuiltIn(target, ownControl, out PhantomUiTargetInfo builtIn))
             {
                 allowed = builtIn.Capabilities;
                 description = builtIn.Name;
             }
-            else if (seenElements.Contains(target))
+            else if (ownControl)
             {
                 allowed = PhantomUiTargets.OwnElementCapabilities;
                 description = $"this extension's own '{target}' control";
@@ -977,8 +1036,8 @@ internal static class PhextParser
             {
                 throw new PhextParseException(
                     targetLine,
-                    $"Unknown UI element '{target}'. Use a built-in element (listed in PHEXT_GUIDE.md) or the id of one of " +
-                    "this extension's app.button, menu.button, menu.dropdown or app.page controls.");
+                    $"Unknown UI element '{target}'. Use the id of one of this extension's app.button, menu.button, " +
+                    $"menu.dropdown or app.page controls, or a built-in element: {PhantomUiTargets.BuiltInNameList}.");
             }
 
             if ((allowed & required) != 0)
@@ -991,6 +1050,11 @@ internal static class PhextParser
                 throw new PhextParseException(targetLine, "menu.settings cannot be hidden: Settings is where extensions are disabled and uninstalled.");
             }
 
+            if (required == PhantomUiCapabilities.Visible && target.Equals("history.clear", StringComparison.OrdinalIgnoreCase))
+            {
+                throw new PhextParseException(targetLine, "history.clear cannot be hidden: clearing the history must always stay possible.");
+            }
+
             throw new PhextParseException(targetLine, $"{char.ToUpperInvariant(what[0])}{what[1..]} cannot be used on {description}.");
         }
 
@@ -999,11 +1063,14 @@ internal static class PhextParser
 
     private const int MaximumDropdownOptions = 50;
 
-    /// <summary>An id for an extension's own control. Built-in element names are reserved so ui.* targets stay unambiguous.</summary>
+    /// <summary>
+    /// An id for an extension's own control. The original built-in element names are reserved so ui.* targets stay
+    /// unambiguous; element names added later are not, so files written before they existed keep loading.
+    /// </summary>
     private static string ValidateElementId(string value, int lineNumber, string label)
     {
         string id = ValidateIdentifier(value, lineNumber, label);
-        if (PhantomUiTargets.TryGetBuiltIn(id, out _))
+        if (PhantomUiTargets.TryGetBuiltIn(id, out PhantomUiTargetInfo builtIn) && builtIn.IdReserved)
         {
             throw new PhextParseException(lineNumber, $"{label} '{id}' is reserved for a built-in PhantomHaze element. Choose another id.");
         }

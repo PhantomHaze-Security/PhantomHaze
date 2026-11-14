@@ -126,7 +126,9 @@ internal static class NativeMethods
     // declaring Windows 10/11 support. RtlGetVersion in ntdll is unaffected
     // by that shim, so it's the only reliable way to confirm the real build
     // number without also having to get the manifest right.
-    [StructLayout(LayoutKind.Sequential)]
+    // Unicode: RtlGetVersion fills an RTL_OSVERSIONINFOEXW, whose szCSDVersion is 128 wide characters. With the
+    // default (ANSI) layout the structure was 128 bytes too small and its size did not match either variant.
+    [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
     private struct OSVERSIONINFOEX
     {
         public uint dwOSVersionInfoSize;

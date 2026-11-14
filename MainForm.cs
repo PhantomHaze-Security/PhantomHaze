@@ -284,6 +284,9 @@ public partial class MainForm : Form
         public int ZoomPercent { get; set; }
         public bool IsNavigationPending { get; set; }
 
+        /// <summary>The size the header's rounded outline was built for (empty while the header is rectangular).</summary>
+        public Size RoundedHeaderSize { get; set; }
+
         // Incremented on every NavigationStarting so async work started for one document can detect that the
         // tab has moved on before touching the new document.
         public int NavigationSequence { get; set; }
@@ -324,7 +327,6 @@ public partial class MainForm : Form
     private readonly Button _refreshButton = new();
     private readonly Button _historyButton = new();
     private readonly Label _zoomLabel = new();
-    private readonly TrackBar _zoomSlider = new();
     private readonly Button _zoomInButton = new();
     private readonly Button _zoomOutButton = new();
     private readonly FlowLayoutPanel _tabsFlowPanel = new();
@@ -363,6 +365,9 @@ public partial class MainForm : Form
     private readonly Font _favoriteButtonFont = new("Segoe UI", 11, FontStyle.Bold);
     private readonly Font _zoomLabelFont = new("Segoe UI", 9, FontStyle.Regular);
     private readonly Font _newTabButtonFont = new("Segoe UI", 12, FontStyle.Bold);
+    private readonly Font _panelTitleFont = new("Segoe UI", 10, FontStyle.Bold);
+    private readonly Font _listFont = new("Segoe UI", 9, FontStyle.Regular);
+    private readonly Font _loadingFont = new("Segoe UI", 11, FontStyle.Bold);
     private readonly Font _logFont = new("Consolas", 9);
     private readonly string _logDirectory;
     private readonly string _fontCacheDirectory;
@@ -379,8 +384,8 @@ public partial class MainForm : Form
     private readonly Dictionary<string, LoadedExtension> _loadedExtensionById = new(StringComparer.OrdinalIgnoreCase);
     private readonly Dictionary<string, ExtensionWindowState> _openExtensionWindowsById = new(StringComparer.OrdinalIgnoreCase);
     private readonly Dictionary<Form, AuxiliaryWindowProtection> _protectedAuxiliaryWindows = new();
-    private readonly Dictionary<Control, Region> _nativeChromeRegions = new();
-    private readonly Dictionary<Control, Size> _nativeChromeRegionSizes = new();
+    // The built-in controls that are drawn round (see MakeRound).
+    private readonly Dictionary<Control, RoundControlState> _roundControls = new();
     private readonly ToolTip _extensionLauncherToolTip = new();
     private readonly Button _extensionMenuOverflowButton = new();
     private readonly ContextMenuStrip _extensionMenuOverflowMenu = new();
@@ -433,6 +438,13 @@ public partial class MainForm : Form
     private readonly System.Windows.Forms.Timer _zoomLogTimer = new() { Interval = 700 };
     private (int TabId, int Percent)? _pendingZoomLog;
 
+    // The zoom of the active tab, as shown by the zoom control.
+    private const int MinimumZoomPercent = 50;
+    private const int MaximumZoomPercent = 200;
+    private const int ZoomStepPercent = 10;
+    private int _zoomPercent = 100;
+    private bool _zoomLabelCompact;
+
     /// <summary>Marks tab close buttons, whose font is chosen by UpdateTabLayout rather than the app font walk.</summary>
     private static readonly object TabCloseButtonTag = new();
 
@@ -447,6 +459,26 @@ public partial class MainForm : Form
     private const int CompactHistoryButtonWidth = 78;
     private const int CompactZoomControlsWidth = 130;
     private const int MinimumAddressInputWidth = 180;
+    private const int GoButtonWidth = 56;
+    private const int FavoriteButtonWidth = 42;
+    private const int RoundIconButtonWidth = 34;
+    private const int SettingsButtonSize = 38;
+    private const int ViewButtonWidth = 70;
+    private const int NewTabButtonWidth = 40;
+    private const int ProtectionCardWidth = 270;
+    private const int MenuRowHeight = 48;
+    private const int AddressRowHeight = 50;
+    private const int TabRowHeight = 34;
+
+    // Columns of the address strip (BuildAddressBar).
+    private const int AddressStripBackColumn = 0;
+    private const int AddressStripForwardColumn = 1;
+    private const int AddressStripInputColumn = 2;
+    private const int AddressStripGoColumn = 3;
+    private const int AddressStripFavoriteColumn = 4;
+    private const int AddressStripHistoryColumn = 5;
+    private const int AddressStripZoomColumn = 6;
+    private const int AddressStripColumnCount = 7;
     private static readonly Image DefaultTabIcon = SystemIcons.Application.ToBitmap();
     private static readonly int[] ValidHistoryRetentionDays = new[] { 1, 7, 14, 30, 80, -1 };
     private const string ExtensionStagingFileSuffix = ".phext-staging";
@@ -534,6 +566,7 @@ public partial class MainForm : Form
             {
                 // The gradient spans the whole window, so every surface changes when the window is resized.
                 InvalidateThemeSurfaces();
+                UpdateProtectionStatusVisual();
             }
         };
         DpiChanged += (_, _) =>
@@ -566,8 +599,10 @@ public partial class MainForm : Form
 
         _chromePanel.Padding = ScalePadding(8, 4, 8, 4);
         _menuBarPanel.Padding = ScalePadding(8, 4, 8, 4);
-        _settingsButton.MinimumSize = new Size(ScaleByDpi(38), ScaleByDpi(38));
-        _settingsButton.Size = new Size(ScaleByDpi(38), ScaleByDpi(38));
+        int menuLogoSize = ScaleByDpi(24);
+        _menuLogoPictureBox.Size = new Size(menuLogoSize, menuLogoSize);
+        _menuLogoPictureBox.Margin = ScalePadding(0, 2, 8, 2);
+        _menuLogoLabel.Margin = ScalePadding(0, 0, 10, 0);
         _settingsButton.Margin = new Padding(0, 0, ScaleByDpi(8), 0);
         _statusLabel.Height = ScaleByDpi(34);
         _toggleButton.Height = ScaleByDpi(36);
@@ -578,39 +613,27 @@ public partial class MainForm : Form
         _updateBannerUpdateButton.Padding = ScalePadding(10, 0, 10, 0);
         _updateBannerUpdateButton.Margin = ScalePadding(8, 0, 6, 0);
         _updateBannerSnoozeButton.Size = new Size(ScaleByDpi(30), ScaleByDpi(26));
-        _logsViewButton.MinimumSize = new Size(ScaleByDpi(70), 0);
-        _webViewToggleButton.MinimumSize = new Size(ScaleByDpi(70), 0);
         _logsViewButton.Padding = ScalePadding(8, 4, 8, 4);
         _webViewToggleButton.Padding = ScalePadding(8, 4, 8, 4);
         if (_menuViewsLayout is not null)
         {
-            _menuViewsLayout.ColumnStyles[0].Width = ScaleByDpi(70);
-            _menuViewsLayout.ColumnStyles[1].Width = ScaleByDpi(70);
+            _menuViewsLayout.Margin = ScalePadding(0, 0, 8, 0);
         }
+
         _menuClockLabel.Margin = ScalePadding(6, 0, 10, 0);
         UpdateClockMinimumWidth();
 
-        _addressBarPanel.Height = ScaleByDpi(50);
         _addressBarPanel.Padding = ScalePadding(8, 4, 8, 4);
-        if (_addressInputLayout is not null && _addressInputLayout.ColumnStyles.Count > 1)
-        {
-            _addressInputLayout.ColumnStyles[1].Width = ScaleByDpi(34);
-        }
-        if (_zoomLayout is not null && _zoomLayout.ColumnStyles.Count > 2)
-        {
-            _zoomLayout.ColumnStyles[1].Width = ScaleByDpi(34);
-            _zoomLayout.ColumnStyles[2].Width = ScaleByDpi(34);
-        }
         _protectionCardPanel.Padding = ScalePadding(4, 0, 4, 0);
         _tabsHostPanel.Padding = ScalePadding(8, 2, 8, 0);
 
-        if (_chromeLayout is not null && _chromeLayout.ColumnStyles.Count > 1)
+        if (_chromeLayout is not null && _chromeLayout.ColumnStyles.Count > 1 && _chromeLayout.RowStyles.Count >= 3)
         {
-            _chromeLayout.ColumnStyles[1].Width = ScaleByDpi(270);
-            _chromeLayout.RowStyles[0].Height = ScaleByDpi(48);
-            _chromeLayout.RowStyles[1].Height = ScaleByDpi(50);
-            _chromeLayout.RowStyles[2].Height = ScaleByDpi(34);
+            _chromeLayout.ColumnStyles[1].Width = ScaleByDpi(ProtectionCardWidth);
+            _chromeLayout.RowStyles[0].Height = ScaleByDpi(MenuRowHeight);
+            _chromeLayout.RowStyles[1].Height = ScaleByDpi(AddressRowHeight);
         }
+
         if (_protectionLayout is not null && _protectionLayout.RowStyles.Count > 1)
         {
             _protectionLayout.RowStyles[1].Height = ScaleByDpi(34);
@@ -619,10 +642,6 @@ public partial class MainForm : Form
         if (_tabsLayout is not null)
         {
             _tabsLayout.Margin = new Padding(0);
-            if (_tabsLayout.ColumnStyles.Count > 1)
-            {
-                _tabsLayout.ColumnStyles[1].Width = ScaleByDpi(40);
-            }
         }
 
         if (_historyLayout is not null && _historyLayout.RowStyles.Count >= 5)
@@ -658,13 +677,14 @@ public partial class MainForm : Form
         _historyButton.Margin = stripButtonMargin;
 
         _favoriteButton.Margin = ScalePadding(2, 2, 2, 2);
-        _zoomSlider.Margin = ScalePadding(3, 4, 3, 2);
         _zoomInButton.Margin = stripButtonMargin;
         _zoomOutButton.Margin = stripButtonMargin;
         _newTabButton.MinimumSize = new Size(ScaleByDpi(36), ScaleByDpi(28));
         _newTabButton.Margin = ScalePadding(2, 0, 0, 0);
 
-        UpdateAddressStripLayout();
+        // The column widths and the height of the top bar follow the scale, the view and what extensions show.
+        UpdateChromeMetrics();
+        UpdateChromeHeight();
     }
 
     private void TrySetWindowIcon()
@@ -912,7 +932,8 @@ public partial class MainForm : Form
     {
         if (!Enum.IsDefined(settings.Theme))
         {
-            settings.Theme = AppTheme.Light;
+            // The same theme a new installation starts with.
+            settings.Theme = new AppSettings().Theme;
         }
 
         if (!Enum.IsDefined(settings.DefaultSearchEngine))
@@ -2213,11 +2234,14 @@ public partial class MainForm : Form
         _menuBarPanel.Dock = DockStyle.Fill;
         _menuBarPanel.Padding = ScalePadding(8, 4, 8, 4);
 
-        // Extension buttons share the remaining space; overflow keeps Settings reachable at narrow widths.
+        // Columns: logo and name (only shown when an extension asks for them) | Log / Web | Settings | extension pages
+        // and buttons (stretches) | clock. Extension buttons live in the stretching column, so however many buttons
+        // extensions add, the built-in controls always keep their space. Buttons that do not fit are moved into an
+        // overflow (») menu by UpdateExtensionMenuOverflow.
         var menuLayout = new TableLayoutPanel
         {
             Dock = DockStyle.Fill,
-            ColumnCount = 3,
+            ColumnCount = 5,
             RowCount = 1,
             Margin = new Padding(0),
             Padding = new Padding(0),
@@ -2226,7 +2250,50 @@ public partial class MainForm : Form
         menuLayout.RowStyles.Add(new RowStyle(SizeType.Percent, 100f));
         menuLayout.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
         menuLayout.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
+        menuLayout.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
         menuLayout.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100f));
+        menuLayout.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
+
+        // The logo and the name are no longer part of the standard top bar. They stay available to extensions
+        // (menu.logo and menu.title), which show them by customising them or with "visible true".
+        var logoLayout = new TableLayoutPanel
+        {
+            Dock = DockStyle.Fill,
+            ColumnCount = 2,
+            RowCount = 1,
+            Margin = new Padding(0),
+            Padding = new Padding(0),
+            AutoSize = true,
+            AutoSizeMode = AutoSizeMode.GrowAndShrink,
+        };
+        _menuLogoLayout = logoLayout;
+        logoLayout.RowStyles.Add(new RowStyle(SizeType.Percent, 100f));
+        logoLayout.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
+        logoLayout.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
+
+        _menuLogoPictureBox.SizeMode = PictureBoxSizeMode.Zoom;
+        _menuLogoPictureBox.Size = new Size(ScaleByDpi(24), ScaleByDpi(24));
+        _menuLogoPictureBox.Margin = ScalePadding(0, 2, 8, 2);
+        _menuLogoPictureBox.Anchor = AnchorStyles.Left;
+        _menuLogoPictureBox.AccessibleName = "PhantomHaze logo";
+        // Also the logo shown in Settings -> About.
+        _defaultLogoImage = Icon?.ToBitmap() ?? DefaultTabIcon;
+        _menuLogoPictureBox.Image = _defaultLogoImage;
+
+        _menuLogoLabel.Text = "PhantomHaze";
+        // Without AutoSize a Label keeps its default 100px width, which cut the bold name off at "Phantom".
+        _menuLogoLabel.AutoSize = true;
+        _menuLogoLabel.Dock = DockStyle.Fill;
+        _menuLogoLabel.Font = _menuTitleFont;
+        _menuLogoLabel.TextAlign = ContentAlignment.MiddleLeft;
+        _menuLogoLabel.Margin = ScalePadding(0, 0, 10, 0);
+        _menuLogoLabel.UseMnemonic = false;
+
+        logoLayout.Controls.Add(_menuLogoPictureBox, 0, 0);
+        logoLayout.Controls.Add(_menuLogoLabel, 1, 0);
+        HideUntilRequested(_menuLogoPictureBox);
+        HideUntilRequested(_menuLogoLabel);
+        HideUntilRequested(logoLayout);
 
         var viewLayout = new TableLayoutPanel
         {
@@ -2241,35 +2308,30 @@ public partial class MainForm : Form
         };
         _menuViewsLayout = viewLayout;
         viewLayout.RowStyles.Add(new RowStyle(SizeType.Percent, 100f));
-        viewLayout.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, ScaleByDpi(70)));
-        viewLayout.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, ScaleByDpi(70)));
+        viewLayout.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, ScaleByDpi(ViewButtonWidth)));
+        viewLayout.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, ScaleByDpi(ViewButtonWidth)));
 
-        ConfigureMenuButton(_logsViewButton, "Logs");
+        ConfigureMenuButton(_logsViewButton, "Log");
+        _logsViewButton.AccessibleName = "Logs";
         _logsViewButton.Click += async (_, _) => await SetWebViewModeAsync(enableWebView: false);
 
         ConfigureMenuButton(_webViewToggleButton, "Web");
+        _webViewToggleButton.AccessibleName = "Web View";
         _webViewToggleButton.Click += async (_, _) => await SetWebViewModeAsync(enableWebView: true);
-        _logsViewButton.Text = "Log";
-        _logsViewButton.AutoSize = false;
-        _logsViewButton.Dock = DockStyle.Fill;
-        _logsViewButton.Margin = new Padding(0);
-        _webViewToggleButton.AutoSize = false;
-        _webViewToggleButton.Dock = DockStyle.Fill;
-        _webViewToggleButton.Margin = new Padding(0);
-        _logsViewButton.FlatAppearance.BorderSize = 1;
-        _webViewToggleButton.FlatAppearance.BorderSize = 1;
-        _logsViewButton.FlatAppearance.BorderColor = Color.FromArgb(92, 143, 136);
-        _webViewToggleButton.FlatAppearance.BorderColor = Color.FromArgb(92, 143, 136);
-        viewLayout.Paint += (_, e) =>
+
+        // The two buttons fill the halves of one pill; their widths are the pill's columns (UpdateChromeMetrics).
+        foreach (Button viewButton in new[] { _logsViewButton, _webViewToggleButton })
         {
-            using var pen = new Pen(Color.FromArgb(92, 143, 136), Math.Max(1f, ScaleByDpi(1)));
-            using GraphicsPath path = CreateRoundedRectanglePath(
-                new RectangleF(0.5f, 0.5f, Math.Max(1, viewLayout.Width - 1), Math.Max(1, viewLayout.Height - 1)),
-                viewLayout.Height / 2f);
-            e.Graphics.SmoothingMode = SmoothingMode.AntiAlias;
-            e.Graphics.DrawPath(pen, path);
-        };
-        ApplyPillRegion(viewLayout);
+            viewButton.AutoSize = false;
+            viewButton.MinimumSize = Size.Empty;
+            viewButton.Dock = DockStyle.Fill;
+            viewButton.Margin = new Padding(0);
+            viewButton.Padding = ScalePadding(8, 4, 8, 4);
+            viewButton.UseMnemonic = false;
+            viewButton.FlatAppearance.BorderSize = 1;
+        }
+
+        MakeRound(viewLayout, alwaysPill: true, outline: () => SegmentedBorder);
         viewLayout.Controls.Add(_logsViewButton, 0, 0);
         viewLayout.Controls.Add(_webViewToggleButton, 1, 0);
 
@@ -2289,21 +2351,23 @@ public partial class MainForm : Form
         _extensionMenuOverflowButton.AccessibleName = "More extension buttons";
         _extensionMenuOverflowButton.Click += (_, _) => ShowExtensionMenuOverflow();
 
-        _settingsButton.Text = "⚙";
+        // A round icon button. Its width is set by UpdateChromeMetrics: an extension that gives it a text label
+        // (ui.element menu.settings text ...) gets a wider, pill-shaped button instead of a clipped circle.
+        _settingsButton.Text = SettingsGlyph;
         _settingsButton.AccessibleName = "Settings";
         _settingsButton.AutoSize = false;
         _settingsButton.Dock = DockStyle.Fill;
-        _settingsButton.MinimumSize = new Size(ScaleByDpi(38), ScaleByDpi(38));
-        _settingsButton.Size = new Size(ScaleByDpi(38), ScaleByDpi(38));
+        _settingsButton.MinimumSize = new Size(ScaleByDpi(SettingsButtonSize), 0);
+        _settingsButton.Size = new Size(ScaleByDpi(SettingsButtonSize), ScaleByDpi(SettingsButtonSize));
         _settingsButton.Padding = new Padding(0);
         _settingsButton.Margin = new Padding(0, 0, ScaleByDpi(8), 0);
         _settingsButton.FlatStyle = FlatStyle.Flat;
-        _settingsButton.FlatAppearance.BorderSize = 0;
         _settingsButton.UseMnemonic = false;
         _settingsButton.Click += (_, _) => OpenSettingsWindow();
         _settingsButton.Font = _chromeIconFont;
-        ApplyCircleRegion(_settingsButton);
+        MakeRound(_settingsButton);
 
+        // A live clock (with seconds) from the computer's clock, at the right-hand end of the menu row.
         _menuClockLabel.AutoSize = true;
         _menuClockLabel.Anchor = AnchorStyles.Left;
         _menuClockLabel.TextAlign = ContentAlignment.MiddleCenter;
@@ -2316,17 +2380,29 @@ public partial class MainForm : Form
         _menuClockLabel.FontChanged += (_, _) => UpdateClockMinimumWidth();
         UpdateClock();
 
-        menuLayout.Controls.Add(viewLayout, 0, 0);
-        menuLayout.Controls.Add(_settingsButton, 1, 0);
-        menuLayout.Controls.Add(_extensionMenuButtonsPanel, 2, 0);
+        menuLayout.Controls.Add(logoLayout, 0, 0);
+        menuLayout.Controls.Add(viewLayout, 1, 0);
+        menuLayout.Controls.Add(_settingsButton, 2, 0);
+        menuLayout.Controls.Add(_extensionMenuButtonsPanel, 3, 0);
+        menuLayout.Controls.Add(_menuClockLabel, 4, 0);
 
         _menuBarPanel.Controls.Add(menuLayout);
     }
 
+    /// <summary>Starts a control hidden; ApplyUiElementState and UpdateChromeMetrics show it once it is wanted.</summary>
+    private void HideUntilRequested(Control control)
+    {
+        control.Visible = false;
+        _extensionHiddenControls.Add(control);
+    }
+
+    /// <summary>
+    /// The top of the window: the menu row and the address row on the left, the protection status and button on the
+    /// right of both, and the tab strip below them (only in Web View).
+    /// </summary>
     private void BuildChromeLayout()
     {
         _chromePanel.Dock = DockStyle.Top;
-        _chromePanel.Height = ScaleByDpi(106);
         _chromePanel.Padding = ScalePadding(8, 4, 8, 4);
 
         var layout = new TableLayoutPanel
@@ -2340,10 +2416,10 @@ public partial class MainForm : Form
         };
         _chromeLayout = layout;
         layout.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100f));
-        layout.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, ScaleByDpi(270)));
-        layout.RowStyles.Add(new RowStyle(SizeType.Absolute, ScaleByDpi(48)));
-        layout.RowStyles.Add(new RowStyle(SizeType.Absolute, ScaleByDpi(50)));
-        layout.RowStyles.Add(new RowStyle(SizeType.Absolute, ScaleByDpi(34)));
+        layout.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, ScaleByDpi(ProtectionCardWidth)));
+        layout.RowStyles.Add(new RowStyle(SizeType.Absolute, ScaleByDpi(MenuRowHeight)));
+        layout.RowStyles.Add(new RowStyle(SizeType.Absolute, ScaleByDpi(AddressRowHeight)));
+        layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 0f));
 
         _protectionCardPanel.Dock = DockStyle.Fill;
         _protectionCardPanel.Padding = ScalePadding(4, 0, 4, 0);
@@ -2375,6 +2451,7 @@ public partial class MainForm : Form
         layout.Controls.Add(_tabsHostPanel, 0, 2);
         layout.SetColumnSpan(_tabsHostPanel, 2);
         _chromePanel.Controls.Add(layout);
+        UpdateChromeHeight();
     }
 
     /// <summary>Shows the computer's current time, including seconds. Never logged: it changes every second.</summary>
@@ -2428,6 +2505,8 @@ public partial class MainForm : Form
         button.FlatAppearance.BorderSize = 1;
     }
 
+    private const string LoadingLabelText = "Loading Web View...";
+
     private void BuildWebViewLoadingOverlay()
     {
         _webViewLoadingOverlayPanel.Dock = DockStyle.Fill;
@@ -2436,8 +2515,9 @@ public partial class MainForm : Form
 
         _webViewLoadingLabel.Dock = DockStyle.Fill;
         _webViewLoadingLabel.TextAlign = ContentAlignment.MiddleCenter;
-        _webViewLoadingLabel.Font = new Font("Segoe UI", 11, FontStyle.Bold);
-        _webViewLoadingLabel.Text = "Loading Web View...";
+        _webViewLoadingLabel.Font = _loadingFont;
+        _webViewLoadingLabel.Text = LoadingLabelText;
+        _webViewLoadingLabel.UseMnemonic = false;
         _webViewLoadingLabel.Margin = ScalePadding(24, 0, 24, 0);
 
         _webViewLoadingOverlayPanel.Controls.Add(_webViewLoadingLabel);
@@ -2758,11 +2838,11 @@ public partial class MainForm : Form
     private void BuildAddressBar()
     {
         _addressBarPanel.Dock = DockStyle.Fill;
-        _addressBarPanel.Height = ScaleByDpi(50);
-        _addressBarPanel.BackColor = Color.FromArgb(34, 36, 42);
         _addressBarPanel.Padding = ScalePadding(8, 4, 8, 4);
         _addressBarPanel.Visible = false;
         _tabsHostPanel.Visible = false;
+        // The panel gets its real width when Web View is first shown, and a new one whenever the window is resized.
+        _addressBarPanel.SizeChanged += (_, _) => UpdateChromeMetrics();
 
         _addressRootLayout = new TableLayoutPanel
         {
@@ -2775,51 +2855,49 @@ public partial class MainForm : Form
         TableLayoutPanel rootLayout = _addressRootLayout;
         rootLayout.RowStyles.Add(new RowStyle(SizeType.Percent, 100f));
 
+        // Back | Forward | address box (stretches) | Go | favourite | Favorites | zoom.
+        // The widths of the fixed columns are set by UpdateChromeMetrics.
         _addressStripLayout = new TableLayoutPanel
         {
             Dock = DockStyle.Fill,
-            ColumnCount = 6,
+            ColumnCount = AddressStripColumnCount,
             RowCount = 1,
             Margin = new Padding(0),
             Padding = new Padding(0),
         };
         TableLayoutPanel stripLayout = _addressStripLayout;
         stripLayout.RowStyles.Add(new RowStyle(SizeType.Percent, 100f));
+        for (int column = 0; column < AddressStripColumnCount; column++)
+        {
+            stripLayout.ColumnStyles.Add(column == AddressStripInputColumn
+                ? new ColumnStyle(SizeType.Percent, 100f)
+                : new ColumnStyle(SizeType.Absolute, 0f));
+        }
 
-        stripLayout.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, DefaultBackButtonWidth));
-        stripLayout.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, DefaultForwardButtonWidth));
-        stripLayout.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100f));
-        stripLayout.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, ScaleByDpi(42)));
-        stripLayout.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, DefaultHistoryButtonWidth));
-        stripLayout.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, DefaultZoomControlsWidth));
-
+        // The address box: a pill holding the text box and the Refresh button.
         var addressInputLayout = new TableLayoutPanel
         {
             Dock = DockStyle.Fill,
             ColumnCount = 2,
             RowCount = 1,
             Margin = ScalePadding(4, 2, 4, 2),
-            Padding = ScalePadding(6, 0, 4, 0),
+            // The vertical padding keeps the Refresh button off the pill's outline.
+            Padding = ScalePadding(6, 2, 4, 2),
             BackColor = Color.White,
             CellBorderStyle = TableLayoutPanelCellBorderStyle.None,
         };
         _addressInputLayout = addressInputLayout;
+        addressInputLayout.RowStyles.Add(new RowStyle(SizeType.Percent, 100f));
         addressInputLayout.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100f));
-        addressInputLayout.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, ScaleByDpi(34)));
-        addressInputLayout.Paint += (_, e) =>
-        {
-            using var pen = new Pen(Color.FromArgb(97, 133, 188), Math.Max(1f, ScaleByDpi(1)));
-            using GraphicsPath path = CreateRoundedRectanglePath(
-                new RectangleF(0.5f, 0.5f, Math.Max(1, addressInputLayout.Width - 1), Math.Max(1, addressInputLayout.Height - 1)),
-                addressInputLayout.Height / 2f);
-            e.Graphics.SmoothingMode = SmoothingMode.AntiAlias;
-            e.Graphics.DrawPath(pen, path);
-        };
-        ApplyPillRegion(addressInputLayout);
+        addressInputLayout.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, ScaleByDpi(RoundIconButtonWidth)));
+        MakeRound(addressInputLayout, alwaysPill: true, outline: () => _addressOutlineOverride ?? _palette.AddressBorder);
 
-        _addressBarTextBox.Dock = DockStyle.Fill;
+        // A single-line text box keeps its own height: anchored left and right (not docked) it is centred vertically
+        // in the pill instead of sitting at its top edge.
+        _addressBarTextBox.Anchor = AnchorStyles.Left | AnchorStyles.Right;
         _addressBarTextBox.BorderStyle = BorderStyle.None;
         _addressBarTextBox.Margin = ScalePadding(3, 0, 3, 0);
+        _addressBarTextBox.AccessibleName = "Address";
         _addressBarTextBox.PlaceholderText = _settings.StartingPage;
         _addressBarTextBox.KeyDown += (_, e) =>
         {
@@ -2830,80 +2908,86 @@ public partial class MainForm : Form
             }
         };
 
+        _refreshButton.Text = RefreshGlyph;
+        _refreshButton.Dock = DockStyle.Fill;
+        _refreshButton.Margin = new Padding(0);
+        _refreshButton.Padding = new Padding(0);
+        _refreshButton.Font = _chromeRefreshFont;
+        _refreshButton.AccessibleName = "Refresh";
+        _refreshButton.UseMnemonic = false;
+        _refreshButton.Click += (_, _) => RefreshWebView();
+        MakeRound(_refreshButton);
+
+        addressInputLayout.Controls.Add(_addressBarTextBox, 0, 0);
+        addressInputLayout.Controls.Add(_refreshButton, 1, 0);
+
         _favoriteButton.Text = "✩";
         _favoriteButton.Dock = DockStyle.Fill;
         _favoriteButton.Margin = ScalePadding(2, 2, 2, 2);
-        _favoriteButton.Size = new Size(ScaleByDpi(36), ScaleByDpi(36));
+        _favoriteButton.Padding = new Padding(0);
         _favoriteButton.Font = _favoriteButtonFont;
-        _favoriteButton.FlatStyle = FlatStyle.Flat;
-        _favoriteButton.FlatAppearance.BorderSize = 0;
-        _favoriteButton.BackColor = Color.FromArgb(34, 36, 42);
-        _favoriteButton.ForeColor = Color.FromArgb(231, 245, 255);
+        _favoriteButton.UseMnemonic = false;
         _favoriteButton.Click += (_, _) => ToggleFavoriteForCurrentPage();
         _favoriteButton.TabStop = false;
-        ApplyCircleRegion(_favoriteButton);
+        MakeRound(_favoriteButton);
 
-        addressInputLayout.Controls.Add(_addressBarTextBox, 0, 0);
-        _refreshButton.Text = "⟳";
-        _refreshButton.Dock = DockStyle.Fill;
-        _refreshButton.Margin = new Padding(0);
-        _refreshButton.FlatStyle = FlatStyle.Flat;
-        _refreshButton.FlatAppearance.BorderSize = 0;
-        _refreshButton.Font = _chromeRefreshFont;
-        _refreshButton.AccessibleName = "Refresh";
-        _refreshButton.Click += (_, _) => RefreshWebView();
-        addressInputLayout.Controls.Add(_refreshButton, 1, 0);
-
-        _backButton.Text = "←";
+        _backButton.Text = BackGlyph;
         _backButton.Dock = DockStyle.Fill;
         _backButton.Enabled = false;
         ConfigureStripButton(_backButton);
         _backButton.Font = _chromeIconFont;
         _backButton.AccessibleName = "Back";
-        ApplyCircleRegion(_backButton);
         _backButton.Click += (_, _) => GoBack();
+        MakeRound(_backButton, outlined: true);
 
-        _forwardButton.Text = "→";
+        _forwardButton.Text = ForwardGlyph;
         _forwardButton.Dock = DockStyle.Fill;
         _forwardButton.Enabled = false;
         ConfigureStripButton(_forwardButton);
         _forwardButton.Font = _chromeIconFont;
         _forwardButton.AccessibleName = "Forward";
-        ApplyCircleRegion(_forwardButton);
         _forwardButton.Click += (_, _) => GoForward();
+        MakeRound(_forwardButton, outlined: true);
+
+        // The address box navigates on Enter, so the Go button is no longer part of the standard strip. It stays
+        // available to extensions (address.go), which show it by customising it or with "visible true".
+        _goButton.Text = "Go";
+        _goButton.Dock = DockStyle.Fill;
+        _goButton.AccessibleName = "Go";
+        ConfigureStripButton(_goButton);
+        _goButton.Click += (_, _) => NavigateToAddressBarUrl();
+        HideUntilRequested(_goButton);
 
         _historyButton.Text = "Favorites";
         _historyButton.Dock = DockStyle.Fill;
-        _historyButton.AccessibleName = "Favorites";
+        _historyButton.AccessibleName = "Favorites and history";
         ConfigureStripButton(_historyButton);
-        ApplyPillRegion(_historyButton);
         _historyButton.Click += (_, _) => ToggleHistoryPanel();
+        MakeRound(_historyButton, alwaysPill: true, outlined: true);
 
-        _zoomLabel.Text = "Zoom 100%";
         _zoomLabel.Dock = DockStyle.Fill;
         _zoomLabel.TextAlign = ContentAlignment.MiddleCenter;
         _zoomLabel.Margin = new Padding(0);
         _zoomLabel.Font = _zoomLabelFont;
+        _zoomLabel.UseMnemonic = false;
+        _zoomLabel.AccessibleName = "Zoom";
 
-        _zoomSlider.Minimum = 50;
-        _zoomSlider.Maximum = 200;
-        _zoomSlider.Value = 100;
-        _zoomSlider.TickFrequency = 10;
         _zoomInButton.Text = "+";
         _zoomOutButton.Text = "−";
-        ConfigureStripButton(_zoomInButton);
-        ConfigureStripButton(_zoomOutButton);
-        _zoomInButton.Dock = DockStyle.Fill;
-        _zoomOutButton.Dock = DockStyle.Fill;
+        foreach (Button zoomButton in new[] { _zoomInButton, _zoomOutButton })
+        {
+            ConfigureStripButton(zoomButton);
+            zoomButton.Dock = DockStyle.Fill;
+            zoomButton.Padding = new Padding(0);
+            MakeRound(zoomButton);
+        }
+
         _zoomInButton.AccessibleName = "Zoom in";
         _zoomOutButton.AccessibleName = "Zoom out";
-        _zoomInButton.FlatAppearance.BorderSize = 0;
-        _zoomOutButton.FlatAppearance.BorderSize = 0;
-        ApplyCircleRegion(_zoomInButton);
-        ApplyCircleRegion(_zoomOutButton);
-        _zoomInButton.Click += (_, _) => ChangeZoom(10);
-        _zoomOutButton.Click += (_, _) => ChangeZoom(-10);
+        _zoomInButton.Click += (_, _) => ChangeZoom(ZoomStepPercent);
+        _zoomOutButton.Click += (_, _) => ChangeZoom(-ZoomStepPercent);
 
+        // The zoom control: a pill holding the percentage and the two buttons.
         var zoomLayout = new TableLayoutPanel
         {
             Dock = DockStyle.Fill,
@@ -2911,32 +2995,24 @@ public partial class MainForm : Form
             RowCount = 1,
             Margin = ScalePadding(4, 2, 0, 2),
             Padding = ScalePadding(4, 0, 4, 0),
-            BackColor = Color.FromArgb(34, 36, 42),
         };
         _zoomLayout = zoomLayout;
+        zoomLayout.RowStyles.Add(new RowStyle(SizeType.Percent, 100f));
         zoomLayout.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100f));
-        zoomLayout.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, ScaleByDpi(34)));
-        zoomLayout.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, ScaleByDpi(34)));
-        zoomLayout.Paint += (_, e) =>
-        {
-            using var pen = new Pen(Color.FromArgb(92, 143, 136), Math.Max(1f, ScaleByDpi(1)));
-            using GraphicsPath path = CreateRoundedRectanglePath(
-                new RectangleF(0.5f, 0.5f, Math.Max(1, zoomLayout.Width - 1), Math.Max(1, zoomLayout.Height - 1)),
-                zoomLayout.Height / 2f);
-            e.Graphics.SmoothingMode = SmoothingMode.AntiAlias;
-            e.Graphics.DrawPath(pen, path);
-        };
-        ApplyPillRegion(zoomLayout);
+        zoomLayout.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, ScaleByDpi(RoundIconButtonWidth)));
+        zoomLayout.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, ScaleByDpi(RoundIconButtonWidth)));
+        MakeRound(zoomLayout, alwaysPill: true, outline: () => _zoomOutlineOverride ?? _palette.ButtonBorder);
         zoomLayout.Controls.Add(_zoomLabel, 0, 0);
         zoomLayout.Controls.Add(_zoomOutButton, 1, 0);
         zoomLayout.Controls.Add(_zoomInButton, 2, 0);
 
-        stripLayout.Controls.Add(_backButton, 0, 0);
-        stripLayout.Controls.Add(_forwardButton, 1, 0);
-        stripLayout.Controls.Add(addressInputLayout, 2, 0);
-        stripLayout.Controls.Add(_favoriteButton, 3, 0);
-        stripLayout.Controls.Add(_historyButton, 4, 0);
-        stripLayout.Controls.Add(zoomLayout, 5, 0);
+        stripLayout.Controls.Add(_backButton, AddressStripBackColumn, 0);
+        stripLayout.Controls.Add(_forwardButton, AddressStripForwardColumn, 0);
+        stripLayout.Controls.Add(addressInputLayout, AddressStripInputColumn, 0);
+        stripLayout.Controls.Add(_goButton, AddressStripGoColumn, 0);
+        stripLayout.Controls.Add(_favoriteButton, AddressStripFavoriteColumn, 0);
+        stripLayout.Controls.Add(_historyButton, AddressStripHistoryColumn, 0);
+        stripLayout.Controls.Add(zoomLayout, AddressStripZoomColumn, 0);
 
         _tabsLayout = new TableLayoutPanel
         {
@@ -2948,12 +3024,13 @@ public partial class MainForm : Form
         };
         TableLayoutPanel tabsLayout = _tabsLayout;
         tabsLayout.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100f));
-        tabsLayout.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 40f));
+        tabsLayout.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, ScaleByDpi(NewTabButtonWidth)));
         tabsLayout.RowStyles.Add(new RowStyle(SizeType.Percent, 100f));
 
         _tabsFlowPanel.Dock = DockStyle.Fill;
         _tabsFlowPanel.FlowDirection = FlowDirection.LeftToRight;
         _tabsFlowPanel.WrapContents = false;
+        // No scroll bar (it would cover the tabs in this low strip): UpdateTabLayout makes every tab fit instead.
         _tabsFlowPanel.AutoScroll = false;
         _tabsFlowPanel.Margin = new Padding(0);
         _tabsFlowPanel.Padding = new Padding(0);
@@ -2969,6 +3046,7 @@ public partial class MainForm : Form
         _newTabButton.MinimumSize = new Size(ScaleByDpi(36), ScaleByDpi(28));
         _newTabButton.Padding = new Padding(0);
         _newTabButton.Margin = ScalePadding(2, 0, 0, 0);
+        _newTabButton.UseMnemonic = false;
         _newTabButton.Click += async (_, _) => await CreateTabAsync(GetConfiguredStartPage(), activate: true);
 
         tabsLayout.Controls.Add(_tabsFlowPanel, 0, 0);
@@ -2978,8 +3056,8 @@ public partial class MainForm : Form
 
         _addressBarPanel.Controls.Add(rootLayout);
         _tabsHostPanel.Controls.Add(tabsLayout);
-        _zoomSlider.Visible = false;
-        UpdateAddressStripLayout();
+        UpdateChromeMetrics();
+        UpdateZoomControlsForActiveTab();
         UpdateFavoriteButtonState();
     }
 
@@ -2993,10 +3071,122 @@ public partial class MainForm : Form
         button.UseMnemonic = false;
     }
 
-    private static GraphicsPath CreateRoundedRectanglePath(RectangleF bounds, float radius)
+    // ---- Round controls -----------------------------------------------------------------------------------------
+
+    private const string SettingsGlyph = "⚙";
+    private const string BackGlyph = "←";
+    private const string ForwardGlyph = "→";
+    private const string RefreshGlyph = "⟳";
+
+    /// <summary>The widest a button may become when an extension gives it a text label.</summary>
+    private const int MaximumLabelledButtonWidth = 220;
+
+    // Outline colours an extension set with "border" on address.bar and address.zoom (null: the theme's colour).
+    private Color? _addressOutlineOverride;
+    private Color? _zoomOutlineOverride;
+    private int _settingsButtonWidth;
+
+    /// <summary>A built-in control that is clipped to a circle or a pill (MakeRound).</summary>
+    private sealed class RoundControlState
+    {
+        /// <summary>Containers and the Favorites button are pills at any size; the others are circles.</summary>
+        public bool AlwaysPill { get; init; }
+
+        /// <summary>The colour of the outline drawn along the round edge, or null for no outline.</summary>
+        public Func<Color?> Outline { get; init; } = () => null;
+
+        public Region? Region { get; set; }
+        public Size RegionSize { get; set; }
+        public bool RegionIsPill { get; set; }
+    }
+
+    /// <summary>
+    /// Makes a built-in control round: a circle (centred in the control, so it stays a circle whatever the cell's
+    /// proportions) or a pill. A round button that an extension gives a text label becomes a pill, so the label is
+    /// not clipped. The control's outline, if it has one, is drawn along the round edge: a rectangular border would
+    /// be cut off by it. An extension's ui.shape replaces all of this for as long as it is applied.
+    /// </summary>
+    /// <param name="outlined">A button whose theme border is always drawn (otherwise only a border set by an extension is).</param>
+    /// <param name="outline">The outline colour of a container, which has no border colour of its own.</param>
+    private void MakeRound(Control control, bool alwaysPill = false, bool outlined = false, Func<Color?>? outline = null)
+    {
+        Func<Color?> outlineColor = outline ?? (() =>
+            control is ButtonBase button && (outlined || _borderOverriddenControls.Contains(control))
+                ? button.FlatAppearance.BorderColor
+                : null);
+        _roundControls[control] = new RoundControlState { AlwaysPill = alwaysPill, Outline = outlineColor };
+
+        if (control is ButtonBase roundButton)
+        {
+            roundButton.FlatStyle = FlatStyle.Flat;
+            roundButton.FlatAppearance.BorderSize = 0;
+        }
+
+        control.Resize += (_, _) => UpdateRoundRegion(control);
+        control.Paint += OnRoundControlPaint;
+        UpdateRoundRegion(control);
+    }
+
+    private void UpdateRoundRegion(Control control)
+    {
+        if (!_roundControls.TryGetValue(control, out RoundControlState? state) ||
+            control.IsDisposed || control.Width <= 0 || control.Height <= 0 ||
+            (_appliedUiVisuals.TryGetValue(control, out AppliedUiVisual? applied) && applied.Shape is not null))
+        {
+            return;
+        }
+
+        bool pill = state.AlwaysPill ||
+                    (_contentOverriddenControls.Contains(control) && control.Width > control.Height * 1.25f);
+        if (state.Region is not null && ReferenceEquals(control.Region, state.Region) &&
+            state.RegionSize == control.Size && state.RegionIsPill == pill)
+        {
+            return;
+        }
+
+        using GraphicsPath path = CreateRoundPath(new RectangleF(0, 0, control.Width, control.Height), pill);
+        var region = new Region(path);
+        Region? previous = state.Region;
+        control.Region = region;
+        state.Region = region;
+        state.RegionSize = control.Size;
+        state.RegionIsPill = pill;
+        if (previous is not null && !ReferenceEquals(previous, region))
+        {
+            previous.Dispose();
+        }
+
+        control.Invalidate();
+    }
+
+    private void UpdateRoundRegions()
+    {
+        foreach (Control control in _roundControls.Keys)
+        {
+            UpdateRoundRegion(control);
+        }
+    }
+
+    /// <summary>A pill (a rectangle whose short sides are half circles) or a circle centred in the bounds.</summary>
+    private static GraphicsPath CreateRoundPath(RectangleF bounds, bool pill)
     {
         var path = new GraphicsPath();
-        float diameter = Math.Min(radius * 2f, Math.Min(bounds.Width, bounds.Height));
+        float diameter = Math.Min(bounds.Width, bounds.Height);
+        if (diameter <= 0)
+        {
+            return path;
+        }
+
+        if (!pill)
+        {
+            path.AddEllipse(
+                bounds.Left + ((bounds.Width - diameter) / 2f),
+                bounds.Top + ((bounds.Height - diameter) / 2f),
+                diameter,
+                diameter);
+            return path;
+        }
+
         path.AddArc(bounds.Left, bounds.Top, diameter, diameter, 180, 90);
         path.AddArc(bounds.Right - diameter, bounds.Top, diameter, diameter, 270, 90);
         path.AddArc(bounds.Right - diameter, bounds.Bottom - diameter, diameter, diameter, 0, 90);
@@ -3005,73 +3195,214 @@ public partial class MainForm : Form
         return path;
     }
 
-    private void ApplyCircleRegion(Control control)
+    private void OnRoundControlPaint(object? sender, PaintEventArgs e)
     {
-        control.Resize += (_, _) => SetCircleChromeRegion(control);
-        SetCircleChromeRegion(control);
-    }
-
-    private void SetCircleChromeRegion(Control control)
-    {
-        if (control.Width <= 0 || control.Height <= 0 ||
-            (_appliedUiVisuals.TryGetValue(control, out AppliedUiVisual? applied) && applied.Shape is not null))
+        if (sender is not Control control ||
+            !_roundControls.TryGetValue(control, out RoundControlState? state) ||
+            // With an extension's ui.shape applied, that shape draws its own outline.
+            state.Region is null || !ReferenceEquals(control.Region, state.Region) ||
+            control.Width <= 2 || control.Height <= 2 ||
+            state.Outline() is not Color color)
         {
             return;
         }
 
-        if (_nativeChromeRegions.TryGetValue(control, out Region? current) &&
-            ReferenceEquals(control.Region, current) &&
-            _nativeChromeRegionSizes.TryGetValue(control, out Size currentSize) &&
-            currentSize == control.Size)
+        float width = Math.Max(1f, ScaleByDpi(1));
+        float inset = width / 2f;
+        using GraphicsPath path = CreateRoundPath(
+            new RectangleF(inset, inset, control.Width - width, control.Height - width),
+            state.RegionIsPill);
+        if (path.PointCount == 0)
         {
             return;
         }
 
-        using GraphicsPath path = new();
-        path.AddEllipse(0, 0, control.Width, control.Height);
-        SetNativeChromeRegion(control, path);
+        using var pen = new Pen(color, width);
+        SmoothingMode previous = e.Graphics.SmoothingMode;
+        e.Graphics.SmoothingMode = SmoothingMode.AntiAlias;
+        e.Graphics.DrawPath(pen, path);
+        e.Graphics.SmoothingMode = previous;
     }
 
-    private void ApplyPillRegion(Control control)
+    // ---- Top bar sizes ------------------------------------------------------------------------------------------
+
+    /// <summary>The width of the content of a button whose text or graphic an extension replaced.</summary>
+    private int MeasureButtonContentWidth(ButtonBase button)
     {
-        control.Resize += (_, _) => SetPillChromeRegion(control);
-        SetPillChromeRegion(control);
+        int width = button.Padding.Horizontal + ScaleByDpi(14);
+        if (button.Text.Length > 0)
+        {
+            width += TextRenderer.MeasureText(
+                button.Text,
+                button.Font,
+                Size.Empty,
+                TextFormatFlags.SingleLine | TextFormatFlags.NoPrefix).Width;
+        }
+
+        if (button.Image is Image image)
+        {
+            width += image.Width + (button.Text.Length > 0 ? ScaleByDpi(4) : 0);
+        }
+
+        return Math.Min(width, ScaleByDpi(MaximumLabelledButtonWidth));
     }
 
-    private void SetPillChromeRegion(Control control)
+    /// <summary>
+    /// The width of the column of a top-bar control: nothing while an extension hides it, its standard width
+    /// otherwise, and more when an extension replaced its text or graphic with something wider.
+    /// </summary>
+    private int GetChromeColumnWidth(Control control, int standardWidth)
     {
-        if (control.Width <= 0 || control.Height <= 0 ||
-            (_appliedUiVisuals.TryGetValue(control, out AppliedUiVisual? applied) && applied.Shape is not null))
+        if (_extensionHiddenControls.Contains(control))
+        {
+            return 0;
+        }
+
+        int width = ScaleByDpi(standardWidth);
+        if (control is ButtonBase button && _contentOverriddenControls.Contains(control))
+        {
+            width = Math.Max(width, MeasureButtonContentWidth(button) + button.Margin.Horizontal);
+        }
+
+        return width;
+    }
+
+    private static void SetColumnWidth(TableLayoutPanel layout, int column, int width)
+    {
+        if (column >= layout.ColumnStyles.Count)
         {
             return;
         }
 
-        if (_nativeChromeRegions.TryGetValue(control, out Region? current) &&
-            ReferenceEquals(control.Region, current) &&
-            _nativeChromeRegionSizes.TryGetValue(control, out Size currentSize) &&
-            currentSize == control.Size)
+        ColumnStyle style = layout.ColumnStyles[column];
+        if (style.SizeType == SizeType.Absolute && Math.Abs(style.Width - width) > 0.01f)
+        {
+            style.Width = width;
+        }
+    }
+
+    /// <summary>Hides a container of the top bar while none of its controls is shown (and shows it again).</summary>
+    private void SetChromeContainerHidden(Control? container, bool hidden)
+    {
+        if (container is null)
         {
             return;
         }
 
-        using GraphicsPath path = CreateRoundedRectanglePath(
-            new RectangleF(0, 0, control.Width, control.Height),
-            control.Height / 2f);
-        SetNativeChromeRegion(control, path);
+        // Tracked in the same set as the controls extensions hide: Control.Visible reports false for everything in
+        // a hidden panel (the address bar in the Logs view), so it cannot be used to tell what is meant to be shown.
+        if (hidden ? _extensionHiddenControls.Add(container) : _extensionHiddenControls.Remove(container))
+        {
+            container.Visible = !hidden;
+        }
     }
 
-    private void SetNativeChromeRegion(Control control, GraphicsPath path)
+    /// <summary>The fixed columns of the address strip, by column index (the address box takes what is left).</summary>
+    private int[] MeasureAddressStripColumns(bool compact)
     {
-        if (_nativeChromeRegions.Remove(control, out Region? previous))
-        {
-            previous.Dispose();
-        }
-        _nativeChromeRegionSizes.Remove(control);
+        var widths = new int[AddressStripColumnCount];
+        widths[AddressStripBackColumn] = GetChromeColumnWidth(_backButton, compact ? CompactBackButtonWidth : DefaultBackButtonWidth);
+        widths[AddressStripForwardColumn] = GetChromeColumnWidth(_forwardButton, compact ? CompactForwardButtonWidth : DefaultForwardButtonWidth);
+        widths[AddressStripGoColumn] = GetChromeColumnWidth(_goButton, GoButtonWidth);
+        widths[AddressStripFavoriteColumn] = GetChromeColumnWidth(_favoriteButton, FavoriteButtonWidth);
+        widths[AddressStripHistoryColumn] = GetChromeColumnWidth(_historyButton, compact ? CompactHistoryButtonWidth : DefaultHistoryButtonWidth);
 
-        var region = new Region(path);
-        control.Region = region;
-        _nativeChromeRegions[control] = region;
-        _nativeChromeRegionSizes[control] = control.Size;
+        // The zoom control: its standard width leaves the percentage what remains beside the two standard buttons.
+        int zoomOut = GetChromeColumnWidth(_zoomOutButton, RoundIconButtonWidth);
+        int zoomIn = GetChromeColumnWidth(_zoomInButton, RoundIconButtonWidth);
+        bool percentageShown = !_extensionHiddenControls.Contains(_zoomLabel);
+        if (_zoomLayout is not null && (percentageShown || zoomOut + zoomIn > 0))
+        {
+            int frame = _zoomLayout.Padding.Horizontal + _zoomLayout.Margin.Horizontal;
+            int standard = ScaleByDpi(compact ? CompactZoomControlsWidth : DefaultZoomControlsWidth);
+            int percentage = percentageShown ? Math.Max(0, standard - frame - (2 * ScaleByDpi(RoundIconButtonWidth))) : 0;
+            widths[AddressStripZoomColumn] = frame + percentage + zoomOut + zoomIn;
+        }
+
+        return widths;
+    }
+
+    /// <summary>
+    /// Sizes the columns of the top bar. A control an extension hides gives up its space, one whose text or graphic
+    /// an extension replaced gets the room it needs, and when the window is narrow the buttons use their compact
+    /// widths so the address box keeps a usable width.
+    /// </summary>
+    private void UpdateChromeMetrics()
+    {
+        if (_addressStripLayout is null || _addressStripLayout.ColumnStyles.Count < AddressStripColumnCount)
+        {
+            return;
+        }
+
+        // The menu row.
+        SetChromeContainerHidden(
+            _menuLogoLayout,
+            _extensionHiddenControls.Contains(_menuLogoPictureBox) && _extensionHiddenControls.Contains(_menuLogoLabel));
+
+        if (_menuViewsLayout is not null)
+        {
+            int logsWidth = GetChromeColumnWidth(_logsViewButton, ViewButtonWidth);
+            int webWidth = GetChromeColumnWidth(_webViewToggleButton, ViewButtonWidth);
+            SetColumnWidth(_menuViewsLayout, 0, logsWidth);
+            SetColumnWidth(_menuViewsLayout, 1, webWidth);
+            SetChromeContainerHidden(_menuViewsLayout, logsWidth + webWidth == 0);
+        }
+
+        // Settings sits in an auto-sized column, which takes the width the button itself is given.
+        int settingsWidth = ScaleByDpi(SettingsButtonSize);
+        if (_contentOverriddenControls.Contains(_settingsButton))
+        {
+            settingsWidth = Math.Max(settingsWidth, MeasureButtonContentWidth(_settingsButton));
+        }
+
+        if (_settingsButtonWidth != settingsWidth)
+        {
+            _settingsButtonWidth = settingsWidth;
+            _settingsButton.MinimumSize = new Size(settingsWidth, 0);
+            _settingsButton.Size = new Size(settingsWidth, ScaleByDpi(SettingsButtonSize));
+        }
+
+        // The address row.
+        int availableWidth = Math.Max(1, _addressBarPanel.ClientSize.Width - _addressBarPanel.Padding.Horizontal);
+        int[] widths = MeasureAddressStripColumns(compact: false);
+        bool compact = availableWidth < ScaleByDpi(MinimumAddressInputWidth) + widths.Sum();
+        if (compact)
+        {
+            widths = MeasureAddressStripColumns(compact: true);
+        }
+
+        for (int column = 0; column < AddressStripColumnCount; column++)
+        {
+            SetColumnWidth(_addressStripLayout, column, widths[column]);
+        }
+
+        if (_addressInputLayout is not null)
+        {
+            SetColumnWidth(_addressInputLayout, 1, GetChromeColumnWidth(_refreshButton, RoundIconButtonWidth));
+        }
+
+        if (_zoomLayout is not null)
+        {
+            SetColumnWidth(_zoomLayout, 1, GetChromeColumnWidth(_zoomOutButton, RoundIconButtonWidth));
+            SetColumnWidth(_zoomLayout, 2, GetChromeColumnWidth(_zoomInButton, RoundIconButtonWidth));
+            SetChromeContainerHidden(_zoomLayout, widths[AddressStripZoomColumn] == 0);
+        }
+
+        // "Zoom 100%" does not fit beside the buttons of the compact zoom control.
+        if (_zoomLabelCompact != compact)
+        {
+            _zoomLabelCompact = compact;
+            UpdateZoomLabelText();
+        }
+
+        // The tab strip.
+        if (_tabsLayout is not null)
+        {
+            SetColumnWidth(_tabsLayout, 1, GetChromeColumnWidth(_newTabButton, NewTabButtonWidth));
+        }
+
+        // A button that became wider or narrower changes between a circle and a pill.
+        UpdateRoundRegions();
     }
 
     private void BuildHistoryPanel()
@@ -3086,17 +3417,20 @@ public partial class MainForm : Form
         _historyTitleLabel.Dock = DockStyle.Fill;
         _historyTitleLabel.Height = 28;
         _historyTitleLabel.TextAlign = ContentAlignment.MiddleLeft;
-        _historyTitleLabel.Font = new Font("Segoe UI", 10, FontStyle.Bold);
+        _historyTitleLabel.Font = _panelTitleFont;
+        _historyTitleLabel.UseMnemonic = false;
 
         _favoritesTitleLabel.Text = "Favourites";
         _favoritesTitleLabel.Dock = DockStyle.Fill;
         _favoritesTitleLabel.Height = 28;
         _favoritesTitleLabel.TextAlign = ContentAlignment.MiddleLeft;
-        _favoritesTitleLabel.Font = new Font("Segoe UI", 10, FontStyle.Bold);
+        _favoritesTitleLabel.Font = _panelTitleFont;
+        _favoritesTitleLabel.UseMnemonic = false;
 
         _historyClearButton.Text = "Clear History";
         _historyClearButton.Dock = DockStyle.Fill;
         _historyClearButton.Height = 32;
+        _historyClearButton.UseMnemonic = false;
         _historyClearButton.Click += (_, _) =>
         {
             _historyEntries.Clear();
@@ -3106,7 +3440,7 @@ public partial class MainForm : Form
         };
 
         _historyListBox.Dock = DockStyle.Fill;
-        _historyListBox.Font = new Font("Segoe UI", 9);
+        _historyListBox.Font = _listFont;
         _historyListBox.DoubleClick += (_, _) => NavigateFromHistorySelection();
         _historyListBox.KeyDown += (_, e) =>
         {
@@ -3118,7 +3452,7 @@ public partial class MainForm : Form
         };
 
         _favoritesListBox.Dock = DockStyle.Fill;
-        _favoritesListBox.Font = new Font("Segoe UI", 9);
+        _favoritesListBox.Font = _listFont;
         _favoritesListBox.DoubleClick += (_, _) => NavigateFromFavoritesSelection();
         _favoritesListBox.KeyDown += (_, e) =>
         {
@@ -3194,11 +3528,13 @@ public partial class MainForm : Form
 
         _findCountLabel.Dock = DockStyle.Fill;
         _findCountLabel.TextAlign = ContentAlignment.MiddleCenter;
-        _findCountLabel.Font = new Font("Segoe UI", 9, FontStyle.Regular);
+        _findCountLabel.Font = _stripButtonFont;
 
         _findCloseButton.Text = "X";
         _findCloseButton.Dock = DockStyle.Fill;
         _findCloseButton.Margin = new Padding(0);
+        _findCloseButton.UseMnemonic = false;
+        _findCloseButton.AccessibleName = "Close find";
         _findCloseButton.Click += (_, _) => HideFindPanel(clearHighlights: true);
 
         findLayout.Controls.Add(_findTextBox, 0, 0);
@@ -3251,7 +3587,7 @@ public partial class MainForm : Form
                 _webViewHostPanel.Visible = true;
                 _logBox.Visible = false;
                 _historyPanel.Visible = false;
-                _historyButton.BackColor = GetCommandButtonBackColor();
+                UpdateHistoryButtonVisual();
 
                 if (_activeTab is null && _tabs.Count > 0)
                 {
@@ -3303,7 +3639,7 @@ public partial class MainForm : Form
         HideWebViewLoadingOverlay();
         _webViewModeEnabled = false;
         _historyPanel.Visible = false;
-        _historyButton.BackColor = GetCommandButtonBackColor();
+        UpdateHistoryButtonVisual();
         HideFindPanel(clearHighlights: true);
         _addressBarPanel.Visible = false;
         _tabsHostPanel.Visible = false;
@@ -3409,18 +3745,17 @@ public partial class MainForm : Form
     {
         ThemePalette palette = _palette;
 
-        void StyleViewButton(Button button, bool selected, Color selectedBack, Color normalBack, Color selectedText, Color normalText)
+        void StyleViewButton(Button button, bool selected, Color selectedBack, Color normalBack, Color selectedText, Color normalText, Color border)
         {
-            button.BackColor = selected ? selectedBack : normalBack;
-            button.ForeColor = ResolveTextColor(selected ? selectedText : normalText);
-            button.FlatAppearance.BorderColor = Color.FromArgb(92, 143, 136);
+            // The label follows the text colour setting; its background stays readable under it.
+            Color text = ResolveTextColor(selected ? selectedText : normalText);
+            button.BackColor = ResolveSurfaceBack(selected ? selectedBack : normalBack, text);
+            button.ForeColor = text;
+            button.FlatAppearance.BorderColor = border;
         }
 
-        Color segmentedSelected = Color.FromArgb(231, 255, 245);
-        Color segmentedNormal = Color.FromArgb(172, 190, 185);
-        Color segmentedText = Color.FromArgb(34, 36, 42);
-        StyleViewButton(_logsViewButton, IsLogsViewSelected, segmentedSelected, segmentedNormal, segmentedText, segmentedText);
-        StyleViewButton(_webViewToggleButton, _webViewModeEnabled, segmentedSelected, segmentedNormal, segmentedText, segmentedText);
+        StyleViewButton(_logsViewButton, IsLogsViewSelected, SegmentedSelectedBack, SegmentedNormalBack, SegmentedText, SegmentedText, SegmentedBorder);
+        StyleViewButton(_webViewToggleButton, _webViewModeEnabled, SegmentedSelectedBack, SegmentedNormalBack, SegmentedText, SegmentedText, SegmentedBorder);
         foreach (Button button in _extensionMenuButtonsPanel.Controls.OfType<Button>())
         {
             if (button.Tag is ExtensionMenuEntry { Kind: ExtensionMenuEntryKind.Page } entry)
@@ -3431,7 +3766,8 @@ public partial class MainForm : Form
                     palette.ViewSelectedBack,
                     palette.ViewNormalBack,
                     palette.ViewSelectedText,
-                    palette.ViewNormalText);
+                    palette.ViewNormalText,
+                    palette.ButtonBorder);
             }
         }
 
@@ -3906,6 +4242,9 @@ public partial class MainForm : Form
 
         try
         {
+            Region? headerRegion = tab.HeaderPanel.Region;
+            tab.HeaderPanel.Region = null;
+            headerRegion?.Dispose();
             tab.HeaderPanel.Dispose();
         }
         catch
@@ -3923,45 +4262,97 @@ public partial class MainForm : Form
         }
     }
 
+    private static readonly Color DefaultTabCloseBorder = Color.FromArgb(195, 199, 207);
+
+    /// <summary>
+    /// Colours the tabs for the theme and the text colour setting, with the extensions' tab customisations on top:
+    /// tabs.tab styles every tab, tabs.active the selected one and tabs.close the close buttons.
+    /// </summary>
     private void UpdateTabHeaderVisuals()
     {
         ThemePalette palette = _palette;
         Color activeTextColor = ResolveTextColor(palette.TabActiveText);
         Color inactiveTextColor = ResolveTextColor(palette.TabInactiveText);
+        UiOverride? everyTab = GetUiGroupOverride(TabsTabTarget);
+        UiOverride? selectedTab = GetUiGroupOverride(TabsActiveTarget);
+        UiOverride? closeButtons = GetUiGroupOverride(TabsCloseTarget);
+
+        Font titleFont = MapFont(_tabTitleFont);
+        if (everyTab?.HasFont == true)
+        {
+            titleFont = GetOverrideFont(titleFont, everyTab.FontFamily, everyTab.FontSize, everyTab.FontStyle);
+        }
 
         foreach (BrowserTab tab in _tabs)
         {
             bool active = ReferenceEquals(tab, _activeTab);
             Color textColor = active ? activeTextColor : inactiveTextColor;
-            tab.HeaderPanel.BackColor = ResolveSurfaceBack(active ? palette.TabActiveBack : palette.TabInactiveBack, textColor);
-            tab.CloseButton.BackColor = ResolveSurfaceBack(active ? palette.TabCloseActiveBack : palette.TabCloseInactiveBack, textColor);
-            tab.CloseButton.ForeColor = textColor;
+            Color headerBack = ResolveSurfaceBack(active ? palette.TabActiveBack : palette.TabInactiveBack, textColor);
+            Color closeBack = ResolveSurfaceBack(active ? palette.TabCloseActiveBack : palette.TabCloseInactiveBack, textColor);
+
+            if (((active ? selectedTab?.Background : null) ?? everyTab?.Background) is Color customBack)
+            {
+                headerBack = customBack;
+                closeBack = customBack;
+            }
+
+            if (((active ? selectedTab?.Foreground : null) ?? everyTab?.Foreground) is Color customText)
+            {
+                textColor = customText;
+            }
+
+            tab.HeaderPanel.BackColor = headerBack;
+            tab.CloseButton.BackColor = closeButtons?.Background ?? closeBack;
+            tab.CloseButton.ForeColor = closeButtons?.Foreground ?? textColor;
+            tab.CloseButton.FlatAppearance.BorderColor = closeButtons?.Border ?? DefaultTabCloseBorder;
             tab.TitleLabel.ForeColor = textColor;
+            if (!ReferenceEquals(tab.TitleLabel.Font, titleFont))
+            {
+                tab.TitleLabel.Font = titleFont;
+            }
+
             UpdateTabHeaderRegion(tab, active);
         }
     }
 
+    /// <summary>
+    /// The selected tab has rounded top corners. The outline is only rebuilt when the tab's size changes: this runs
+    /// on every recolouring, which in Rainbow mode is twice a second.
+    /// </summary>
     private static void UpdateTabHeaderRegion(BrowserTab tab, bool active)
     {
-        Region? previous = tab.HeaderPanel.Region;
-        if (!active || tab.HeaderPanel.Width <= 0 || tab.HeaderPanel.Height <= 0)
+        Panel header = tab.HeaderPanel;
+        Size size = header.Size;
+        if (!active || size.Width <= 0 || size.Height <= 0)
         {
-            tab.HeaderPanel.Region = null;
-            previous?.Dispose();
+            if (header.Region is Region rectangular)
+            {
+                header.Region = null;
+                rectangular.Dispose();
+            }
+
+            tab.RoundedHeaderSize = Size.Empty;
             return;
         }
 
-        float radius = Math.Min(tab.HeaderPanel.Height / 2f, tab.HeaderPanel.Width / 4f);
-        var path = new GraphicsPath();
+        if (tab.RoundedHeaderSize == size && header.Region is not null)
+        {
+            return;
+        }
+
+        float radius = Math.Min(size.Height / 2f, size.Width / 4f);
+        using var path = new GraphicsPath();
         path.AddArc(0, 0, radius * 2, radius * 2, 180, 90);
-        path.AddArc(tab.HeaderPanel.Width - (radius * 2), 0, radius * 2, radius * 2, 270, 90);
-        path.AddLine(tab.HeaderPanel.Width, radius, tab.HeaderPanel.Width, tab.HeaderPanel.Height);
-        path.AddLine(tab.HeaderPanel.Width, tab.HeaderPanel.Height, 0, tab.HeaderPanel.Height);
-        path.AddLine(0, tab.HeaderPanel.Height, 0, radius);
+        path.AddArc(size.Width - (radius * 2), 0, radius * 2, radius * 2, 270, 90);
+        path.AddLine(size.Width, radius, size.Width, size.Height);
+        path.AddLine(size.Width, size.Height, 0, size.Height);
+        path.AddLine(0, size.Height, 0, radius);
         path.CloseFigure();
-        tab.HeaderPanel.Region = new Region(path);
-        path.Dispose();
+
+        Region? previous = header.Region;
+        header.Region = new Region(path);
         previous?.Dispose();
+        tab.RoundedHeaderSize = size;
     }
 
     private void UpdateTabLayout()
@@ -3971,33 +4362,66 @@ public partial class MainForm : Form
             return;
         }
 
-        int compactCloseWidthMinimum = Math.Max(ScaleByDpi(14), TextRenderer.MeasureText("X", _tabCloseFontCompact).Width + ScaleByDpi(6));
-        int regularCloseWidth = Math.Max(ScaleByDpi(22), TextRenderer.MeasureText("X", _tabCloseFontRegular).Width + ScaleByDpi(8));
+        // ui.element tabs.close text replaces the "X" of every close button.
+        string closeText = GetUiGroupOverride(TabsCloseTarget)?.Text is { Length: > 0 } customCloseText ? customCloseText : "X";
+        int maximumCloseWidth = ScaleByDpi(64);
+        int compactCloseWidthMinimum = Math.Min(maximumCloseWidth, Math.Max(ScaleByDpi(14), TextRenderer.MeasureText(closeText, _tabCloseFontCompact).Width + ScaleByDpi(6)));
+        int regularCloseWidth = Math.Min(maximumCloseWidth, Math.Max(ScaleByDpi(22), TextRenderer.MeasureText(closeText, _tabCloseFontRegular).Width + ScaleByDpi(8)));
         int minimumCompactTabWidth = compactCloseWidthMinimum + ScaleByDpi(10);
         int available = Math.Max(1, _tabsFlowPanel.ClientSize.Width);
         int rawWidth = Math.Max(1, available / _tabs.Count);
         bool compact = rawWidth < ScaleByDpi(130);
-        int targetWidth = compact
-            ? Math.Max(minimumCompactTabWidth, rawWidth)
-            : rawWidth;
+
+        // The strip has no scroll bar, so every tab must fit in it or it could not be reached at all. With more tabs
+        // than fit at the smallest normal width, the selected tab keeps a usable width (and its close button) and
+        // the others share the rest as narrow, icon-only tabs.
+        bool crowded = rawWidth < minimumCompactTabWidth;
+        int selectedWidth = rawWidth;
+        int otherWidth = rawWidth;
+        if (crowded)
+        {
+            selectedWidth = Math.Min(available, minimumCompactTabWidth);
+            otherWidth = Math.Max(1, (available - selectedWidth) / Math.Max(1, _tabs.Count - 1));
+        }
 
         for (int i = 0; i < _tabs.Count; i++)
         {
             BrowserTab tab = _tabs[i];
+            bool selected = ReferenceEquals(tab, _activeTab);
+            int targetWidth = selected ? selectedWidth : otherWidth;
             tab.HeaderPanel.Width = targetWidth;
             tab.HeaderPanel.Height = compact ? ScaleByDpi(26) : ScaleByDpi(28);
             tab.HeaderPanel.Margin = new Padding(0);
+            if (!string.Equals(tab.CloseButton.Text, closeText, StringComparison.Ordinal))
+            {
+                tab.CloseButton.Text = closeText;
+            }
 
-            if (compact)
+            if (crowded)
+            {
+                tab.HeaderPanel.Padding = ScalePadding(0, 3, 0, 2);
+                tab.TitleLabel.Visible = false;
+                tab.CloseButton.Visible = selected;
+                tab.CloseButton.Width = Math.Min(targetWidth, compactCloseWidthMinimum);
+                tab.CloseButton.Font = MapFont(_tabCloseFontCompact);
+                tab.CloseButton.FlatAppearance.BorderSize = 0;
+                int iconWidth = Math.Clamp(targetWidth - (selected ? tab.CloseButton.Width : 0), 1, ScaleByDpi(14));
+                tab.FaviconBox.Visible = true;
+                tab.FaviconBox.Width = iconWidth;
+                tab.FaviconBox.Height = iconWidth;
+            }
+            else if (compact)
             {
                 int closeWidth = Math.Clamp(targetWidth / 2, compactCloseWidthMinimum, compactCloseWidthMinimum + 4);
                 int iconWidth = Math.Clamp(targetWidth - closeWidth - ScaleByDpi(2), ScaleByDpi(8), ScaleByDpi(14));
 
                 tab.HeaderPanel.Padding = ScalePadding(0, 3, 0, 2);
                 tab.TitleLabel.Visible = true;
+                tab.CloseButton.Visible = true;
                 tab.CloseButton.Width = closeWidth;
                 tab.CloseButton.Font = MapFont(_tabCloseFontCompact);
                 tab.CloseButton.FlatAppearance.BorderSize = 0;
+                tab.FaviconBox.Visible = true;
                 tab.FaviconBox.Width = iconWidth;
                 tab.FaviconBox.Height = iconWidth;
             }
@@ -4005,9 +4429,11 @@ public partial class MainForm : Form
             {
                 tab.HeaderPanel.Padding = ScalePadding(4, 4, 4, 3);
                 tab.TitleLabel.Visible = true;
+                tab.CloseButton.Visible = true;
                 tab.CloseButton.Width = regularCloseWidth;
                 tab.CloseButton.Font = MapFont(_tabCloseFontRegular);
                 tab.CloseButton.FlatAppearance.BorderSize = 1;
+                tab.FaviconBox.Visible = true;
                 tab.FaviconBox.Width = ScaleByDpi(16);
                 tab.FaviconBox.Height = ScaleByDpi(16);
             }
@@ -4363,7 +4789,7 @@ public partial class MainForm : Form
         if (_historyPanel.Visible)
         {
             _historyPanel.Visible = false;
-            _historyButton.BackColor = GetCommandButtonBackColor();
+            RefreshHistoryButtonVisual();
             Log("Web history panel closed.");
             return;
         }
@@ -4377,8 +4803,15 @@ public partial class MainForm : Form
             _findPanel.BringToFront();
         }
 
-        _historyButton.BackColor = GetHistoryButtonActiveBackColor();
+        RefreshHistoryButtonVisual();
         Log("Web history panel opened.");
+    }
+
+    /// <summary>Recolours the Favorites button after the panel opened or closed, keeping extension customisations.</summary>
+    private void RefreshHistoryButtonVisual()
+    {
+        UpdateHistoryButtonVisual();
+        ApplyUiElementState();
     }
 
     private void NavigateFromHistorySelection()
@@ -4395,7 +4828,7 @@ public partial class MainForm : Form
 
         NavigateToHistoryUrl(selectedUrl);
         _historyPanel.Visible = false;
-        _historyButton.BackColor = GetCommandButtonBackColor();
+        RefreshHistoryButtonVisual();
     }
 
     private void NavigateFromFavoritesSelection()
@@ -4412,7 +4845,7 @@ public partial class MainForm : Form
 
         NavigateToHistoryUrl(selectedUrl);
         _historyPanel.Visible = false;
-        _historyButton.BackColor = GetCommandButtonBackColor();
+        RefreshHistoryButtonVisual();
     }
 
     private void NavigateToHistoryUrl(string url)
@@ -4432,37 +4865,46 @@ public partial class MainForm : Form
         NavigateTabToUrl(_activeTab, normalizedUrl, "History navigation");
     }
 
+    /// <summary>Applies the zoom shown by the zoom control to the active tab.</summary>
     private void ApplyZoom()
     {
-        _zoomLabel.Text = $"Zoom {_zoomSlider.Value}%";
+        UpdateZoomLabelText();
         bool canChangeZoom = _webViewModeEnabled && _activeTab is not null;
-        _zoomOutButton.Enabled = canChangeZoom && _zoomSlider.Value > _zoomSlider.Minimum;
-        _zoomInButton.Enabled = canChangeZoom && _zoomSlider.Value < _zoomSlider.Maximum;
+        _zoomOutButton.Enabled = canChangeZoom && _zoomPercent > MinimumZoomPercent;
+        _zoomInButton.Enabled = canChangeZoom && _zoomPercent < MaximumZoomPercent;
         if (!_webViewInitialized || _activeTab?.WebView.CoreWebView2 is null)
         {
             return;
         }
 
-        double zoom = _zoomSlider.Value / 100.0;
-        _activeTab.ZoomPercent = _zoomSlider.Value;
-        _activeTab.WebView.ZoomFactor = zoom;
+        _activeTab.ZoomPercent = _zoomPercent;
+        _activeTab.WebView.ZoomFactor = _zoomPercent / 100.0;
 
         // Multiple quick button presses are coalesced into one zoom log entry.
-        _pendingZoomLog = (_activeTab.Id, _zoomSlider.Value);
+        _pendingZoomLog = (_activeTab.Id, _zoomPercent);
         _zoomLogTimer.Stop();
         _zoomLogTimer.Start();
     }
 
     private void ChangeZoom(int step)
     {
-        int nextValue = Math.Clamp(_zoomSlider.Value + step, _zoomSlider.Minimum, _zoomSlider.Maximum);
-        if (_zoomSlider.Value == nextValue)
+        int nextValue = Math.Clamp(_zoomPercent + step, MinimumZoomPercent, MaximumZoomPercent);
+        if (_zoomPercent == nextValue)
         {
             return;
         }
 
-        _zoomSlider.Value = nextValue;
+        _zoomPercent = nextValue;
         ApplyZoom();
+    }
+
+    private void UpdateZoomLabelText()
+    {
+        string text = string.Create(CultureInfo.InvariantCulture, $"{(_zoomLabelCompact ? string.Empty : "Zoom ")}{_zoomPercent}%");
+        if (!string.Equals(_zoomLabel.Text, text, StringComparison.Ordinal))
+        {
+            _zoomLabel.Text = text;
+        }
     }
 
     private void OnZoomLogTimerTick(object? sender, EventArgs e)
@@ -4484,18 +4926,22 @@ public partial class MainForm : Form
 
     private void RefreshHistoryPanelItems()
     {
-        _historyTitleLabel.Text = GetHistoryTitleText();
         _historyListBox.Items.Clear();
         if (_historyEntries.Count == 0)
         {
             _historyListBox.Items.Add(GetNoHistoryMessage());
-            return;
+        }
+        else
+        {
+            for (int i = _historyEntries.Count - 1; i >= 0; i--)
+            {
+                _historyListBox.Items.Add(_historyEntries[i].Url);
+            }
         }
 
-        for (int i = _historyEntries.Count - 1; i >= 0; i--)
-        {
-            _historyListBox.Items.Add(_historyEntries[i].Url);
-        }
+        // The heading depends on the history setting; an extension's own heading (history.title) stays on top of it.
+        _historyTitleLabel.Text = GetHistoryTitleText();
+        ApplyUiElementState();
     }
 
     private void RefreshFavoritesPanelItems()
@@ -5320,12 +5766,8 @@ public partial class MainForm : Form
 
     private void UpdateFavoriteButtonState()
     {
-        Color idleForeColor = IsDarkTheme()
-            ? Color.FromArgb(231, 245, 255)
-            : ResolveTextColor(_palette.FavoriteIdleText);
-        Color idleBackColor = IsDarkTheme()
-            ? Color.FromArgb(34, 36, 42)
-            : ResolveSurfaceBack(_palette.FavoriteIdleBack, idleForeColor);
+        Color idleForeColor = ResolveTextColor(_palette.ChromeText);
+        Color idleBackColor = ResolveSurfaceBack(_palette.ChromeBack, idleForeColor);
 
         bool enabled = _webViewModeEnabled && _activeTab is not null;
         _favoriteButton.Enabled = enabled;
@@ -5826,17 +6268,59 @@ public partial class MainForm : Form
             _statusLabel.Text = "Protection Disabled - This window is visible to capture software.";
         }
 
-        if (IsDarkTheme())
+        // The status is the most important message in the window, so its colour is chosen for the background it is
+        // actually shown on: green when protected and red when not, in whichever version reads better there.
+        Color background = GetProtectionCardBackColor();
+        Color light = _protectionEnabled ? ProtectionOnLightText : ProtectionOffLightText;
+        Color dark = _protectionEnabled ? ProtectionOnDarkText : ProtectionOffDarkText;
+        Color text = ContrastRatio(light, background) >= ContrastRatio(dark, background) ? light : dark;
+        if (ContrastRatio(text, background) >= MinimumProtectionStatusContrast)
         {
             _statusLabel.BackColor = Color.Transparent;
-            _statusLabel.ForeColor = _protectionEnabled
-                ? Color.FromArgb(130, 220, 160)
-                : Color.FromArgb(255, 160, 122);
+            _statusLabel.ForeColor = text;
             return;
         }
 
-        _statusLabel.BackColor = Color.Transparent;
-        _statusLabel.ForeColor = _protectionEnabled ? Color.DarkGreen : Color.FromArgb(255, 160, 122);
+        // On a background where neither is clear (a mid-tone custom theme, say), the status is shown as a band in
+        // its colour with white text instead, so it stays both readable and colour-coded on every theme.
+        _statusLabel.BackColor = _protectionEnabled ? ProtectionOnBand : ProtectionOffBand;
+        _statusLabel.ForeColor = Color.White;
+    }
+
+    private const double MinimumProtectionStatusContrast = 4.5;
+    private static readonly Color ProtectionOnLightText = Color.FromArgb(130, 220, 160);
+    private static readonly Color ProtectionOnDarkText = Color.FromArgb(0, 100, 0);
+    private static readonly Color ProtectionOffLightText = Color.FromArgb(255, 160, 122);
+    private static readonly Color ProtectionOffDarkText = Color.FromArgb(170, 30, 30);
+    private static readonly Color ProtectionOnBand = Color.FromArgb(58, 123, 85);
+    private static readonly Color ProtectionOffBand = Color.FromArgb(133, 76, 73);
+
+    /// <summary>The colour behind the protection status: the card's own, or the gradient's colour at the card.</summary>
+    private Color GetProtectionCardBackColor()
+    {
+        if (_palette.Gradient is not ThemeGradient gradient)
+        {
+            return _protectionCardPanel.BackColor;
+        }
+
+        // The card is at the top right of the window, where the gradient is close to one of its ends.
+        Size window = ClientSize;
+        if (window.Width <= 0 || window.Height <= 0 || !IsHandleCreated || !_protectionCardPanel.IsHandleCreated)
+        {
+            return Blend(gradient.Start, gradient.End, gradient.Direction == ThemeGradientDirection.Vertical ? 0.1 : 0.9);
+        }
+
+        Point center = PointToClient(_protectionCardPanel.PointToScreen(
+            new Point(_protectionCardPanel.Width / 2, _protectionCardPanel.Height / 2)));
+        double horizontal = Math.Clamp(center.X / (double)window.Width, 0, 1);
+        double vertical = Math.Clamp(center.Y / (double)window.Height, 0, 1);
+        double position = gradient.Direction switch
+        {
+            ThemeGradientDirection.Vertical => vertical,
+            ThemeGradientDirection.Diagonal => (horizontal + vertical) / 2,
+            _ => horizontal,
+        };
+        return Blend(gradient.Start, gradient.End, position);
     }
 
     private static string FormatProtectionCountdown(TimeSpan remaining)
@@ -5860,17 +6344,10 @@ public partial class MainForm : Form
     private void UpdateZoomControlsForActiveTab()
     {
         bool enabled = _webViewModeEnabled && _activeTab is not null;
-        _zoomSlider.Enabled = enabled;
-
-        int zoomPercent = enabled ? Math.Clamp(_activeTab!.ZoomPercent, _zoomSlider.Minimum, _zoomSlider.Maximum) : 100;
-        if (_zoomSlider.Value != zoomPercent)
-        {
-            _zoomSlider.Value = zoomPercent;
-        }
-
-        _zoomLabel.Text = $"Zoom {zoomPercent}%";
-        _zoomOutButton.Enabled = enabled && zoomPercent > _zoomSlider.Minimum;
-        _zoomInButton.Enabled = enabled && zoomPercent < _zoomSlider.Maximum;
+        _zoomPercent = enabled ? Math.Clamp(_activeTab!.ZoomPercent, MinimumZoomPercent, MaximumZoomPercent) : 100;
+        UpdateZoomLabelText();
+        _zoomOutButton.Enabled = enabled && _zoomPercent > MinimumZoomPercent;
+        _zoomInButton.Enabled = enabled && _zoomPercent < MaximumZoomPercent;
     }
 
     private void UpdateResponsiveLayout()
@@ -5878,7 +6355,7 @@ public partial class MainForm : Form
         int preferredHistoryWidth = ClientSize.Width / 3;
         _historyPanel.Width = Math.Clamp(preferredHistoryWidth, ScaleByDpi(260), ScaleByDpi(420));
 
-        UpdateAddressStripLayout();
+        UpdateChromeMetrics();
         UpdateChromeHeight();
         if (_findPanel.Visible)
         {
@@ -5888,36 +6365,24 @@ public partial class MainForm : Form
         PositionExtensionLauncherPanel();
     }
 
-    private void UpdateAddressStripLayout()
-    {
-        if (_addressStripLayout is null || _addressStripLayout.ColumnStyles.Count < 6)
-        {
-            return;
-        }
-
-        int availableWidth = Math.Max(1, _addressBarPanel.ClientSize.Width - _addressBarPanel.Padding.Horizontal);
-        int compactThreshold = ScaleByDpi(MinimumAddressInputWidth + DefaultBackButtonWidth +
-                                          DefaultForwardButtonWidth + 42 + DefaultHistoryButtonWidth +
-                                          DefaultZoomControlsWidth);
-
-        bool compact = availableWidth < compactThreshold;
-
-        _addressStripLayout.ColumnStyles[0].Width = ScaleByDpi(compact ? CompactBackButtonWidth : DefaultBackButtonWidth);
-        _addressStripLayout.ColumnStyles[1].Width = ScaleByDpi(compact ? CompactForwardButtonWidth : DefaultForwardButtonWidth);
-        _addressStripLayout.ColumnStyles[3].Width = ScaleByDpi(42);
-        _addressStripLayout.ColumnStyles[4].Width = ScaleByDpi(compact ? CompactHistoryButtonWidth : DefaultHistoryButtonWidth);
-        _addressStripLayout.ColumnStyles[5].Width = ScaleByDpi(compact ? CompactZoomControlsWidth : DefaultZoomControlsWidth);
-    }
-
+    /// <summary>The top bar is one row taller in Web View, where the tab strip is shown below the address row.</summary>
     private void UpdateChromeHeight()
     {
-        bool expanded = _webViewModeEnabled;
+        int tabRowHeight = _webViewModeEnabled ? ScaleByDpi(TabRowHeight) : 0;
         if (_chromeLayout is not null && _chromeLayout.RowStyles.Count >= 3)
         {
-            _chromeLayout.RowStyles[2].Height = ScaleByDpi(expanded ? 34 : 0);
+            RowStyle tabRow = _chromeLayout.RowStyles[2];
+            if (Math.Abs(tabRow.Height - tabRowHeight) > 0.01f)
+            {
+                tabRow.Height = tabRowHeight;
+            }
         }
 
-        _chromePanel.Height = ScaleByDpi(expanded ? 140 : 106);
+        int height = ScaleByDpi(MenuRowHeight) + ScaleByDpi(AddressRowHeight) + tabRowHeight + _chromePanel.Padding.Vertical;
+        if (_chromePanel.Height != height)
+        {
+            _chromePanel.Height = height;
+        }
     }
 
     private string GetHistoryTitleText()

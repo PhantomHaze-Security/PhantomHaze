@@ -82,8 +82,27 @@ public partial class MainForm
         public Color LogBack { get; init; }
         public Color LogText { get; init; }
         public Color OverlayBack { get; init; }
-        public Color FavoriteIdleBack { get; init; }
-        public Color FavoriteIdleText { get; init; }
+
+        // The browser-style controls of the top bar. Every theme defines them, so no colour is hard-coded for one
+        // theme and then shown on another (a dark zoom control with dark text in the Light theme, for example).
+
+        /// <summary>The flat round buttons (Settings, favourite, zoom, Favorites) and the zoom control.</summary>
+        public Color ChromeBack { get; init; }
+        public Color ChromeText { get; init; }
+
+        /// <summary>The Back and Forward buttons and their outline.</summary>
+        public Color NavigationBack { get; init; }
+        public Color NavigationText { get; init; }
+
+        /// <summary>The address box (with its Refresh button) and its outline.</summary>
+        public Color AddressBack { get; init; }
+        public Color AddressText { get; init; }
+        public Color AddressBorder { get; init; }
+
+        /// <summary>The strip behind the tabs, and the new tab button on it.</summary>
+        public Color TabStripBack { get; init; }
+        public Color TabStripText { get; init; }
+
         public Color ExtensionWindowBack { get; init; }
         public Color FallbackBack { get; init; }
         public Color FallbackText { get; init; }
@@ -127,8 +146,15 @@ public partial class MainForm
         LogBack = Color.White,
         LogText = Color.Black,
         OverlayBack = Color.FromArgb(246, 249, 253),
-        FavoriteIdleBack = SystemColors.Control,
-        FavoriteIdleText = SystemColors.ControlText,
+        ChromeBack = SystemColors.Control,
+        ChromeText = SystemColors.ControlText,
+        NavigationBack = SystemColors.Control,
+        NavigationText = Color.FromArgb(20, 21, 22),
+        AddressBack = Color.White,
+        AddressText = Color.FromArgb(34, 36, 42),
+        AddressBorder = Color.FromArgb(97, 133, 188),
+        TabStripBack = Color.FromArgb(224, 228, 235),
+        TabStripText = Color.FromArgb(35, 35, 35),
         ExtensionWindowBack = Color.White,
         FallbackBack = Color.White,
         FallbackText = Color.Black,
@@ -168,8 +194,15 @@ public partial class MainForm
         LogBack = Color.FromArgb(33, 35, 41),
         LogText = Color.FromArgb(210, 225, 240),
         OverlayBack = Color.FromArgb(33, 35, 41),
-        FavoriteIdleBack = Color.FromArgb(67, 76, 90),
-        FavoriteIdleText = Color.FromArgb(225, 233, 244),
+        ChromeBack = Color.FromArgb(34, 36, 42),
+        ChromeText = Color.FromArgb(231, 245, 255),
+        NavigationBack = Color.FromArgb(231, 245, 255),
+        NavigationText = Color.FromArgb(20, 21, 22),
+        AddressBack = Color.White,
+        AddressText = Color.FromArgb(34, 36, 42),
+        AddressBorder = Color.FromArgb(97, 133, 188),
+        TabStripBack = Color.FromArgb(52, 60, 72),
+        TabStripText = Color.FromArgb(231, 245, 255),
         ExtensionWindowBack = Color.FromArgb(38, 44, 52),
         FallbackBack = Color.FromArgb(31, 36, 43),
         FallbackText = Color.FromArgb(228, 236, 247),
@@ -278,8 +311,15 @@ public partial class MainForm
             LogBack = dark ? Blend(baseColor, Color.Black, 0.35) : Blend(baseColor, Color.White, 0.93),
             LogText = dark ? Color.FromArgb(222, 231, 243) : Color.Black,
             OverlayBack = baseColor,
-            FavoriteIdleBack = Shade(0.20),
-            FavoriteIdleText = text,
+            ChromeBack = Shade(0.06),
+            ChromeText = text,
+            NavigationBack = dark ? Blend(baseColor, Color.White, 0.88) : Shade(0.20),
+            NavigationText = Color.FromArgb(20, 21, 22),
+            AddressBack = Color.White,
+            AddressText = Color.FromArgb(34, 36, 42),
+            AddressBorder = Shade(0.42),
+            TabStripBack = dark ? Shade(0.10) : Shade(0.14),
+            TabStripText = normalText,
             ExtensionWindowBack = Shade(0.06),
             FallbackBack = Shade(0.06),
             FallbackText = text,
@@ -371,9 +411,24 @@ public partial class MainForm
         return IsDarkColor(text) ? Color.FromArgb(246, 248, 251) : Color.FromArgb(43, 47, 54);
     }
 
-    private Color GetCommandButtonBackColor() => ResolveSurfaceBack(_palette.ButtonBack, ResolveTextColor(_palette.ButtonText));
+    /// <summary>
+    /// <paramref name="preferred"/> when it can be read on <paramref name="background"/>, otherwise black or white.
+    /// Used where a colour carries meaning or belongs to a fixed design and must stay legible on any theme.
+    /// </summary>
+    private static Color EnsureReadable(Color preferred, Color background, double minimumContrast = 3.0)
+    {
+        return ContrastRatio(preferred, background) >= minimumContrast ? preferred : GetContrastingTextColor(background);
+    }
 
-    private Color GetHistoryButtonActiveBackColor() => ResolveSurfaceBack(_palette.HistoryButtonActive, ResolveTextColor(_palette.ButtonText));
+    // The Log / Web switch keeps its own colours on every theme (text colour settings still apply to its labels).
+    private static readonly Color SegmentedSelectedBack = Color.FromArgb(231, 255, 245);
+    private static readonly Color SegmentedNormalBack = Color.FromArgb(172, 190, 185);
+    private static readonly Color SegmentedText = Color.FromArgb(34, 36, 42);
+    private static readonly Color SegmentedBorder = Color.FromArgb(92, 143, 136);
+
+    // The protection button never follows the theme or the text colour setting: it must always be readable.
+    private static readonly Color ProtectionButtonBack = Color.FromArgb(240, 240, 240);
+    private static readonly Color ProtectionButtonText = Color.FromArgb(34, 36, 42);
 
     private void ApplyTheme()
     {
@@ -386,7 +441,7 @@ public partial class MainForm
         _chromePanel.BackColor = palette.MenuBack;
         _protectionCardPanel.BackColor = palette.MenuBack;
         _addressBarPanel.BackColor = palette.PanelBack;
-        _tabsHostPanel.BackColor = IsDarkTheme() ? Color.FromArgb(52, 60, 72) : palette.MenuBack;
+        _tabsHostPanel.BackColor = palette.TabStripBack;
         _contentHostPanel.BackColor = palette.AppBack;
         _webViewHostPanel.BackColor = palette.AppBack;
         _extensionPageHostPanel.BackColor = palette.AppBack;
@@ -401,20 +456,13 @@ public partial class MainForm
         }
 
         _favoriteButton.FlatAppearance.BorderColor = palette.ButtonBorder;
-        _webViewToggleButton.FlatAppearance.BorderColor = palette.ButtonBorder;
-        _logsViewButton.FlatAppearance.BorderColor = palette.ButtonBorder;
+        _backButton.FlatAppearance.BorderColor = palette.NavigationText;
+        _forwardButton.FlatAppearance.BorderColor = palette.NavigationText;
 
+        // The layout panels inside each surface have no colour of their own: with a gradient they are transparent,
+        // otherwise they show their surface's colour. That is also what lets ui.element recolour a whole surface
+        // (menu.bar, address.panel, tabs.bar) by changing the colour of the surface alone.
         ApplyGradientTransparency(palette.Gradient is not null);
-        if (palette.Gradient is null)
-        {
-            _menuLayout!.BackColor = palette.MenuBack;
-            _extensionMenuButtonsPanel.BackColor = palette.MenuBack;
-            _addressRootLayout!.BackColor = palette.PanelBack;
-            _addressStripLayout!.BackColor = palette.PanelBack;
-            _tabsLayout!.BackColor = _tabsHostPanel.BackColor;
-            _tabsFlowPanel.BackColor = _tabsHostPanel.BackColor;
-        }
-
         _zoomLabel.BackColor = Color.Transparent;
         UpdateProtectionStatusVisual();
         ApplyThemeToUpdateBanner();
@@ -437,12 +485,12 @@ public partial class MainForm
         Color buttonText = ResolveTextColor(palette.ButtonText);
         Color buttonBack = ResolveSurfaceBack(palette.ButtonBack, buttonText);
 
-        foreach (Control label in new Control[] { _menuLogoLabel, _menuLogoPictureBox, _menuClockLabel, _webViewLoadingLabel, _historyTitleLabel, _favoritesTitleLabel, _zoomLabel, _findCountLabel })
+        foreach (Control label in new Control[] { _menuLogoLabel, _menuLogoPictureBox, _menuClockLabel, _webViewLoadingLabel, _historyTitleLabel, _favoritesTitleLabel, _findCountLabel })
         {
             label.ForeColor = text;
         }
 
-        foreach (Control input in new Control[] { _addressBarTextBox, _historyListBox, _favoritesListBox, _findTextBox })
+        foreach (Control input in new Control[] { _historyListBox, _favoritesListBox, _findTextBox })
         {
             input.BackColor = inputBack;
             input.ForeColor = inputText;
@@ -457,44 +505,61 @@ public partial class MainForm
             button.ForeColor = buttonText;
         }
 
-        _historyButton.BackColor = _historyPanel.Visible ? GetHistoryButtonActiveBackColor() : buttonBack;
-        Color chromeBack = IsDarkTheme() ? Color.FromArgb(34, 36, 42) : buttonBack;
-        Color navigationBack = IsDarkTheme() ? Color.FromArgb(231, 245, 255) : buttonBack;
-        Color chromeText = IsDarkTheme() ? Color.FromArgb(231, 245, 255) : buttonText;
+        // The browser-style controls take their colours from the theme like everything else, and the text colour
+        // setting (including Rainbow) applies to them too.
+        Color chromeText = ResolveTextColor(palette.ChromeText);
+        Color chromeBack = ResolveSurfaceBack(palette.ChromeBack, chromeText);
+        foreach (Button button in new[] { _settingsButton, _zoomInButton, _zoomOutButton })
+        {
+            button.BackColor = chromeBack;
+            button.ForeColor = chromeText;
+        }
+
+        _zoomLabel.ForeColor = chromeText;
+        if (_zoomLayout is not null)
+        {
+            _zoomLayout.BackColor = chromeBack;
+        }
+
+        Color navigationText = ResolveTextColor(EnsureReadable(palette.NavigationText, palette.NavigationBack));
+        Color navigationBack = ResolveSurfaceBack(palette.NavigationBack, navigationText);
         foreach (Button button in new[] { _backButton, _forwardButton })
         {
             button.BackColor = navigationBack;
-            button.ForeColor = Color.FromArgb(20, 21, 22);
-            button.FlatAppearance.BorderColor = Color.FromArgb(20, 21, 22);
+            button.ForeColor = navigationText;
         }
 
-        _favoriteButton.BackColor = chromeBack;
-        _favoriteButton.ForeColor = chromeText;
-        _zoomInButton.BackColor = chromeBack;
-        _zoomOutButton.BackColor = chromeBack;
-        _zoomInButton.ForeColor = chromeText;
-        _zoomOutButton.ForeColor = chromeText;
-        _refreshButton.BackColor = Color.White;
-        _refreshButton.ForeColor = Color.FromArgb(34, 36, 42);
-        _historyButton.BackColor = _historyPanel.Visible
-            ? GetHistoryButtonActiveBackColor()
-            : (IsDarkTheme() ? Color.FromArgb(34, 36, 42) : buttonBack);
-        _historyButton.ForeColor = IsDarkTheme() ? chromeText : buttonText;
-        _historyButton.FlatAppearance.BorderColor = IsDarkTheme() ? Color.FromArgb(92, 143, 136) : palette.ButtonBorder;
-        _zoomLabel.ForeColor = IsDarkTheme() ? chromeText : text;
-        _addressBarTextBox.BackColor = Color.White;
-        _addressBarTextBox.ForeColor = Color.FromArgb(34, 36, 42);
-        _newTabButton.BackColor = Color.FromArgb(52, 60, 72);
-        _newTabButton.ForeColor = Color.FromArgb(231, 245, 255);
-        _settingsButton.BackColor = IsDarkTheme() ? Color.FromArgb(34, 36, 42) : buttonBack;
-        _settingsButton.ForeColor = IsDarkTheme() ? chromeText : buttonText;
-        _toggleButton.BackColor = Color.FromArgb(240, 240, 240);
-        _toggleButton.ForeColor = Color.FromArgb(34, 36, 42);
+        Color addressText = ResolveTextColor(palette.AddressText);
+        Color addressBack = ResolveSurfaceBack(palette.AddressBack, addressText);
+        _addressBarTextBox.BackColor = addressBack;
+        _addressBarTextBox.ForeColor = addressText;
+        _refreshButton.BackColor = addressBack;
+        _refreshButton.ForeColor = addressText;
+        if (_addressInputLayout is not null)
+        {
+            _addressInputLayout.BackColor = addressBack;
+        }
 
+        Color tabStripText = ResolveTextColor(palette.TabStripText);
+        _newTabButton.BackColor = ResolveSurfaceBack(palette.TabStripBack, tabStripText);
+        _newTabButton.ForeColor = tabStripText;
+
+        _toggleButton.BackColor = ProtectionButtonBack;
+        _toggleButton.ForeColor = ProtectionButtonText;
+
+        UpdateHistoryButtonVisual();
         UpdateTabHeaderVisuals();
         UpdateFavoriteButtonState();
         ApplyThemeToDynamicExtensionControls();
         UpdateWebViewToggleVisual();
+    }
+
+    /// <summary>The Favorites button is highlighted while the history and favourites panel is open.</summary>
+    private void UpdateHistoryButtonVisual()
+    {
+        Color text = ResolveTextColor(_palette.ChromeText);
+        _historyButton.ForeColor = text;
+        _historyButton.BackColor = ResolveSurfaceBack(_historyPanel.Visible ? _palette.HistoryButtonActive : _palette.ChromeBack, text);
     }
 
     private void ApplyGradientTransparency(bool gradient)
@@ -528,16 +593,6 @@ public partial class MainForm
             {
                 // This control cannot be transparent; it keeps its solid colour.
             }
-        }
-
-        // TrackBar cannot be transparent.
-        if (gradient)
-        {
-            _zoomSlider.BackColor = _palette.PanelBack;
-        }
-        else
-        {
-            _zoomSlider.ResetBackColor();
         }
     }
 
@@ -1384,19 +1439,18 @@ public partial class MainForm
                  {
                      _tabCloseFontRegular, _tabCloseFontCompact, _menuButtonFontRegular, _menuButtonFontBold, _menuTitleFont,
                      _tabTitleFont, _stripButtonFont, _chromeIconFont, _chromeRefreshFont, _favoriteButtonFont,
-                     _zoomLabelFont, _newTabButtonFont, _logFont,
+                     _zoomLabelFont, _newTabButtonFont, _panelTitleFont, _listFont, _loadingFont, _logFont,
                  })
         {
             font.Dispose();
         }
 
-        foreach (Region region in _nativeChromeRegions.Values)
+        foreach (RoundControlState state in _roundControls.Values)
         {
-            region.Dispose();
+            state.Region?.Dispose();
         }
 
-        _nativeChromeRegions.Clear();
-        _nativeChromeRegionSizes.Clear();
+        _roundControls.Clear();
 
         foreach (Font font in _googleFontCache.Values.Concat(_systemFontCache.Values))
         {

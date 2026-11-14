@@ -56,7 +56,7 @@ Includes timed disable options with a live countdown banner so you always know w
 * **Web View Modification Hooks:** Extensions can inject JS/CSS and block matching web requests.
 * **App Surface Customization:** Extensions can add settings fields, menu bar buttons and dropdown menus, plus override start page/search engine while enabled.
 * **Extension Pages:** Extensions can add their own page, shown in the main window just like Logs and Web View.
-* **UI Customization:** Extensions can restyle PhantomHaze's own controls and replace them with SVG graphics or shapes (the protection banner is off-limits, so an extension can never fake your protection status).
+* **UI Customization:** Extensions can restyle the whole PhantomHaze window - the top bar, the address row, the tab strip and tabs, and the log, history, find and loading panels - and replace controls with SVG graphics or shapes. The protection status and button and the update banner are off-limits, so an extension can never fake your protection status or hide an update.
 
 Extension language reference: [`PHEXT_GUIDE.md`](./PHEXT_GUIDE.md)
 

@@ -7,7 +7,9 @@ namespace PhantomHaze;
 
 // What extensions add to and change in the PhantomHaze window: top-bar buttons and dropdowns (app.button,
 // menu.button, menu.dropdown), pages shown like Logs and Web View (app.page), and changes to built-in controls
-// (ui.element, ui.svg, ui.shape).
+// (ui.element, ui.svg, ui.shape). The built-in elements cover the whole window - the top bar, the address row, the
+// tab strip and tabs, and the log, history, find and loading panels - except the protection status and button and
+// the update banner, which extensions must never be able to change (see PhantomUiTargets).
 public partial class MainForm
 {
     private enum ExtensionMenuEntryKind
@@ -64,6 +66,21 @@ public partial class MainForm
 
         public Func<Font>? DefaultFont { get; init; }
         public Func<Image?>? DefaultImage { get; init; }
+
+        /// <summary>The hover label of a control that normally shows only an icon (null: none).</summary>
+        public string? DefaultTooltip { get; init; }
+
+        /// <summary>
+        /// The font for a text label an extension gives a control whose normal text is an icon: its own font is a
+        /// large symbol font, which is wrong for words.
+        /// </summary>
+        public Func<Font>? LabelFont { get; init; }
+
+        /// <summary>
+        /// Not part of the standard window (the logo, the name, the Go button): only shown while an extension shows
+        /// it with "visible true" or customises it in any other way.
+        /// </summary>
+        public bool Optional { get; init; }
     }
 
     /// <summary>The combined customisations of one control (later extensions win, property by property).</summary>
@@ -110,8 +127,32 @@ public partial class MainForm
     private readonly Dictionary<string, Button> _extensionElementButtons = new(StringComparer.OrdinalIgnoreCase);
     private readonly Dictionary<Control, AppliedUiVisual> _appliedUiVisuals = new();
     private readonly HashSet<Control> _surfacesWithBackgroundOverride = new();
+
+    // Controls that are currently hidden: by an extension (visible false), because they are optional and no
+    // extension asks for them, or - for the containers of the top bar - because nothing in them is shown.
     private readonly HashSet<Control> _extensionHiddenControls = new();
+
+    // Controls whose text, font or graphic an extension replaced (they may need more room than the standard design).
+    private readonly HashSet<Control> _contentOverriddenControls = new();
+
+    // Controls an extension gave a border colour, and the border sizes of the buttons that had no border before.
+    private readonly HashSet<Control> _borderOverriddenControls = new();
+    private readonly Dictionary<ButtonBase, int> _borderSizesBeforeOverride = new();
+
+    // ui.element targets that style a group of controls rather than one: the tabs.
+    private const string TabsTabTarget = "tabs.tab";
+    private const string TabsActiveTarget = "tabs.active";
+    private const string TabsCloseTarget = "tabs.close";
+    private static readonly HashSet<string> UiGroupTargets = new(StringComparer.OrdinalIgnoreCase) { TabsTabTarget, TabsActiveTarget, TabsCloseTarget };
+    private Dictionary<string, UiOverride> _uiGroupOverrides = new(StringComparer.OrdinalIgnoreCase);
+
     private bool _applyingUiElementState;
+
+    /// <summary>The combined customisations of a group target (tabs.tab, tabs.active, tabs.close), if any.</summary>
+    private UiOverride? GetUiGroupOverride(string target)
+    {
+        return _uiGroupOverrides.TryGetValue(target, out UiOverride? customization) ? customization : null;
+    }
 
     private static string GetElementKey(string extensionId, string elementId) => $"{extensionId}\u001F{elementId}";
 
@@ -661,7 +702,15 @@ public partial class MainForm
 
     private void BuildUiTargetBindings()
     {
-        void Bind(string name, Control control, Func<string>? text = null, Func<Font>? font = null, Func<Image?>? image = null)
+        void Bind(
+            string name,
+            Control control,
+            Func<string>? text = null,
+            Func<Font>? font = null,
+            Func<Image?>? image = null,
+            string? tooltip = null,
+            Func<Font>? labelFont = null,
+            bool optional = false)
         {
             PhantomUiCapabilities capabilities = PhantomUiTargets.TryGetBuiltIn(name, out PhantomUiTargetInfo info)
                 ? info.Capabilities
@@ -671,6 +720,9 @@ public partial class MainForm
                 DefaultText = text,
                 DefaultFont = font,
                 DefaultImage = image,
+                DefaultTooltip = tooltip,
+                LabelFont = labelFont,
+                Optional = optional,
             };
 
             if (font is not null)
@@ -682,24 +734,51 @@ public partial class MainForm
         _favoriteButton.AccessibleName = "Favourite";
         _newTabButton.AccessibleName = "New tab";
 
+        // The font of a word an extension puts on an icon-only button.
+        Font LabelFont() => MapFont(_stripButtonFont);
+
+        // The top bar. Icon buttons keep their symbol font whatever the app font is: a downloaded font rarely has
+        // these symbols.
         Bind("menu.bar", _menuBarPanel);
-        Bind("menu.logo", _menuLogoPictureBox, image: () => _defaultLogoImage);
-        Bind("menu.title", _menuLogoLabel, text: () => "PhantomHaze", font: () => MapFont(_menuTitleFont));
+        Bind("menu.logo", _menuLogoPictureBox, image: () => _defaultLogoImage, optional: true);
+        Bind("menu.title", _menuLogoLabel, text: () => "PhantomHaze", font: () => MapFont(_menuTitleFont), optional: true);
         Bind("menu.logs", _logsViewButton, text: () => "Log", font: () => MapFont(IsLogsViewSelected ? _menuButtonFontBold : _menuButtonFontRegular));
         Bind("menu.webview", _webViewToggleButton, text: () => "Web", font: () => MapFont(_webViewModeEnabled ? _menuButtonFontBold : _menuButtonFontRegular));
         Bind("menu.clock", _menuClockLabel, font: () => MapFont(_menuButtonFontRegular));
-        // These two inherit the window's font; MapFont(Font) is that same font unless an app font is in use.
-        Bind("menu.settings", _settingsButton, text: () => "⚙", font: () => MapFont(_chromeIconFont));
+        Bind("menu.settings", _settingsButton, text: () => SettingsGlyph, font: () => _chromeIconFont, tooltip: "Settings", labelFont: LabelFont);
+
+        // The address row. The address box and the find box inherit the window's font; MapFont(Font) is that same
+        // font unless an app font is in use.
+        Bind("address.panel", _addressBarPanel);
         Bind("address.bar", _addressBarTextBox, font: () => MapFont(Font));
-        Bind("address.favorite", _favoriteButton, font: () => MapFont(_favoriteButtonFont));
-        Bind("address.back", _backButton, text: () => "←", font: () => MapFont(_chromeIconFont));
-        Bind("address.go", _goButton, text: () => "Go", font: () => MapFont(_stripButtonFont));
-        Bind("address.refresh", _refreshButton, text: () => "⟳", font: () => MapFont(_chromeRefreshFont));
-        Bind("address.history", _historyButton, text: () => "Favorites", font: () => MapFont(_stripButtonFont));
+        Bind("address.favorite", _favoriteButton, font: () => MapFont(_favoriteButtonFont), tooltip: "Add or remove this page as a favourite");
+        Bind("address.back", _backButton, text: () => BackGlyph, font: () => _chromeIconFont, tooltip: "Back", labelFont: LabelFont);
+        Bind("address.forward", _forwardButton, text: () => ForwardGlyph, font: () => _chromeIconFont, tooltip: "Forward", labelFont: LabelFont);
+        Bind("address.go", _goButton, text: () => "Go", font: () => MapFont(_stripButtonFont), optional: true);
+        Bind("address.refresh", _refreshButton, text: () => RefreshGlyph, font: () => _chromeRefreshFont, tooltip: "Refresh", labelFont: LabelFont);
+        Bind("address.history", _historyButton, text: () => "Favorites", font: () => MapFont(_stripButtonFont), tooltip: "Favourites and history");
         Bind("address.zoom", _zoomLabel, font: () => MapFont(_zoomLabelFont));
-        Bind("tabs.new", _newTabButton, text: () => "+", font: () => MapFont(_newTabButtonFont));
+        Bind("address.zoomin", _zoomInButton, text: () => "+", font: () => MapFont(_stripButtonFont), tooltip: "Zoom in");
+        Bind("address.zoomout", _zoomOutButton, text: () => "−", font: () => MapFont(_stripButtonFont), tooltip: "Zoom out");
+
+        // The tab strip. The tabs themselves (tabs.tab, tabs.active, tabs.close) are styled in UpdateTabHeaderVisuals.
+        Bind("tabs.bar", _tabsHostPanel);
+        Bind("tabs.new", _newTabButton, text: () => "+", font: () => MapFont(_newTabButtonFont), tooltip: "New tab");
+
+        // The content area.
         Bind("log.panel", _logBox, font: () => MapFont(_logFont));
         Bind("history.panel", _historyPanel);
+        Bind("history.title", _historyTitleLabel, text: GetHistoryTitleText, font: () => MapFont(_panelTitleFont));
+        Bind("history.list", _historyListBox, font: () => MapFont(_listFont));
+        Bind("history.clear", _historyClearButton, text: () => "Clear History", font: () => MapFont(Font));
+        Bind("favorites.title", _favoritesTitleLabel, text: () => "Favourites", font: () => MapFont(_panelTitleFont));
+        Bind("favorites.list", _favoritesListBox, font: () => MapFont(_listFont));
+        Bind("find.panel", _findPanel);
+        Bind("find.box", _findTextBox, font: () => MapFont(Font));
+        Bind("find.count", _findCountLabel, font: () => MapFont(_stripButtonFont));
+        Bind("find.close", _findCloseButton, text: () => "X", font: () => MapFont(Font));
+        Bind("loading.panel", _webViewLoadingOverlayPanel);
+        Bind("loading.label", _webViewLoadingLabel, text: () => LoadingLabelText, font: () => MapFont(_loadingFont));
     }
 
     /// <summary>
@@ -718,9 +797,18 @@ public partial class MainForm
         _applyingUiElementState = true;
         try
         {
-            Dictionary<Control, UiOverride> overrides = CollectUiOverrides();
+            Dictionary<Control, UiOverride> overrides = CollectUiOverrides(out Dictionary<string, UiOverride> groupOverrides);
             var previousBackgroundOverrides = new HashSet<Control>(_surfacesWithBackgroundOverride);
+            var previousBorderOverrides = new HashSet<Control>(_borderOverriddenControls);
             _surfacesWithBackgroundOverride.Clear();
+            _borderOverriddenControls.Clear();
+            _contentOverriddenControls.Clear();
+
+            // The Refresh button sits inside the address box and shares its colours. They are set before the
+            // elements are processed, so the button's own customisations (and the colour of its SVG) land on top.
+            overrides.TryGetValue(_addressBarTextBox, out UiOverride? addressBox);
+            _refreshButton.BackColor = addressBox?.Background ?? _addressBarTextBox.BackColor;
+            _refreshButton.ForeColor = addressBox?.Foreground ?? _addressBarTextBox.ForeColor;
 
             foreach (UiTargetBinding binding in _uiTargetBindings.Values)
             {
@@ -737,11 +825,22 @@ public partial class MainForm
                 }
             }
 
-            foreach (Control control in new Control[] { _settingsButton, _backButton, _forwardButton, _favoriteButton, _zoomInButton, _zoomOutButton })
+            ApplyCompositeElementColors(overrides);
+            RestoreBorderSizesWithoutOverride();
+
+            // What extensions hide, show or relabel changes the columns of the top bar, and whether a round
+            // button is a circle or a pill. It also restores the round outline after a ui.shape was removed.
+            UpdateChromeMetrics();
+
+            // The outline of a round control is drawn by PhantomHaze: repaint where one appeared or disappeared.
+            previousBorderOverrides.SymmetricExceptWith(_borderOverriddenControls);
+            foreach (Control control in previousBorderOverrides)
             {
-                SetCircleChromeRegion(control);
+                if (!control.IsDisposed)
+                {
+                    control.Invalidate();
+                }
             }
-            SetPillChromeRegion(_historyButton);
 
             // Gradient surfaces repaint when a solid background override starts or stops covering them.
             if (!previousBackgroundOverrides.SetEquals(_surfacesWithBackgroundOverride))
@@ -750,6 +849,14 @@ public partial class MainForm
                 {
                     surface.Invalidate(true);
                 }
+            }
+
+            // The tabs are restyled when extensions customise them, and once more when they stop doing so.
+            bool tabsWereCustomized = _uiGroupOverrides.Count > 0;
+            _uiGroupOverrides = groupOverrides;
+            if (tabsWereCustomized || groupOverrides.Count > 0)
+            {
+                UpdateTabLayout();
             }
         }
         finally
@@ -761,9 +868,74 @@ public partial class MainForm
         UpdateExtensionMenuOverflow();
     }
 
-    private Dictionary<Control, UiOverride> CollectUiOverrides()
+    /// <summary>
+    /// Colours that belong to more than one control: the frame of the top bar follows menu.bar, the pill and the
+    /// outline of the address box follow address.bar, and those of the zoom control follow address.zoom. The
+    /// protection status and button keep the theme's colours whatever an extension sets.
+    /// </summary>
+    private void ApplyCompositeElementColors(Dictionary<Control, UiOverride> overrides)
+    {
+        overrides.TryGetValue(_menuBarPanel, out UiOverride? menuBar);
+        _chromePanel.BackColor = menuBar?.Background ?? _palette.MenuBack;
+        if (menuBar?.Background is not null)
+        {
+            _surfacesWithBackgroundOverride.Add(_chromePanel);
+        }
+
+        // The address box: the pill around the text box has the text box's colour, and its outline is the border.
+        overrides.TryGetValue(_addressBarTextBox, out UiOverride? addressBox);
+        if (_addressInputLayout is not null)
+        {
+            _addressInputLayout.BackColor = _addressBarTextBox.BackColor;
+            if (_addressOutlineOverride != addressBox?.Border)
+            {
+                _addressOutlineOverride = addressBox?.Border;
+                _addressInputLayout.Invalidate();
+            }
+        }
+
+        // The zoom control: the percentage stays transparent on the pill, which takes its background.
+        overrides.TryGetValue(_zoomLabel, out UiOverride? zoom);
+        _zoomLabel.BackColor = Color.Transparent;
+        if (_zoomLayout is not null)
+        {
+            if (zoom?.Background is Color zoomBack)
+            {
+                _zoomLayout.BackColor = zoomBack;
+            }
+
+            if (_zoomOutlineOverride != zoom?.Border)
+            {
+                _zoomOutlineOverride = zoom?.Border;
+                _zoomLayout.Invalidate();
+            }
+        }
+    }
+
+    /// <summary>Buttons that have no border of their own got one for an extension's border colour; it goes with the colour.</summary>
+    private void RestoreBorderSizesWithoutOverride()
+    {
+        foreach ((ButtonBase button, int borderSize) in _borderSizesBeforeOverride.ToArray())
+        {
+            if (_borderOverriddenControls.Contains(button))
+            {
+                continue;
+            }
+
+            _borderSizesBeforeOverride.Remove(button);
+            if (!button.IsDisposed && !(_appliedUiVisuals.TryGetValue(button, out AppliedUiVisual? applied) && applied.Shape is not null))
+            {
+                button.FlatAppearance.BorderSize = borderSize;
+            }
+        }
+    }
+
+    /// <param name="groupOverrides">The customisations of the targets that style several controls (the tabs), by target name.</param>
+    private Dictionary<Control, UiOverride> CollectUiOverrides(out Dictionary<string, UiOverride> groupOverrides)
     {
         var overrides = new Dictionary<Control, UiOverride>();
+        var groups = new Dictionary<string, UiOverride>(StringComparer.OrdinalIgnoreCase);
+        groupOverrides = groups;
         foreach (LoadedExtension extension in GetEnabledExtensions())
         {
             PhantomExtensionDefinition definition = extension.Definition;
@@ -774,9 +946,29 @@ public partial class MainForm
 
             UiOverride? For(string target)
             {
-                Control? control = _uiTargetBindings.TryGetValue(target, out UiTargetBinding? binding)
-                    ? binding.Control
-                    : (_extensionElementButtons.TryGetValue(GetElementKey(definition.Id, target), out Button? own) ? own : null);
+                // The same rule as the parser: a name means the built-in element, unless it is one of the newer
+                // names and this extension has a control of its own with that id.
+                bool hasOwnControl = _extensionElementButtons.TryGetValue(GetElementKey(definition.Id, target), out Button? own);
+                Control? control;
+                if (!PhantomUiTargets.ResolvesToBuiltIn(target, hasOwnControl, out _))
+                {
+                    control = own;
+                }
+                else if (UiGroupTargets.Contains(target))
+                {
+                    if (!groups.TryGetValue(target, out UiOverride? group))
+                    {
+                        group = new UiOverride();
+                        groups[target] = group;
+                    }
+
+                    return group;
+                }
+                else
+                {
+                    control = _uiTargetBindings.TryGetValue(target, out UiTargetBinding? binding) ? binding.Control : null;
+                }
+
                 if (control is null || control.IsDisposed)
                 {
                     return null;
@@ -872,11 +1064,14 @@ public partial class MainForm
             control.Text = string.Empty;
         }
 
-        // Only elements that may be hidden are touched, and only when an extension hides or stops hiding them:
+        // Only elements that may be hidden are touched, and only when they are hidden or shown again:
         // Control.Visible reports false for every control in a hidden panel (the address bar in the Logs view).
         if ((binding.Capabilities & PhantomUiCapabilities.Visible) != 0)
         {
-            bool visible = customization?.Visible ?? true;
+            // An optional element is shown once an extension does anything with it, unless that is hiding it.
+            bool visible = binding.Optional
+                ? customization is not null && (customization.Visible ?? true)
+                : customization?.Visible ?? true;
             if (!visible && _extensionHiddenControls.Add(control))
             {
                 control.Visible = false;
@@ -887,18 +1082,23 @@ public partial class MainForm
             }
         }
 
-        // A control that shows only an icon is still labelled when hovered.
+        // A control that shows only an icon is labelled when hovered. An extension's own tooltip replaces that
+        // label (an empty one removes it).
         string? tooltip = customization?.Tooltip;
-        if (tooltip is null && customization?.Svg is not null && customization.Text is null)
+        if (tooltip is null && customization?.Text is null)
         {
-            tooltip = binding.DefaultText?.Invoke() ?? control.AccessibleName;
+            tooltip = binding.DefaultTooltip ??
+                      (customization?.Svg is not null ? binding.DefaultText?.Invoke() ?? control.AccessibleName : null);
         }
 
         SetExtensionToolTip(control, tooltip);
 
         if (binding.DefaultFont is not null)
         {
-            Font baseFont = binding.DefaultFont();
+            // A word on a button that normally shows a symbol is written in the normal text font.
+            Font baseFont = customization?.Text is not null && binding.LabelFont is not null
+                ? binding.LabelFont()
+                : binding.DefaultFont();
             Font font = customization?.HasFont == true
                 ? GetOverrideFont(baseFont, customization.FontFamily, customization.FontSize, customization.FontStyle)
                 : baseFont;
@@ -910,6 +1110,11 @@ public partial class MainForm
 
         ApplyColorOverrides(control, customization);
         ApplyGraphicOverrides(control, customization, binding.DefaultImage);
+
+        if (customization is not null && (customization.Text is not null || customization.HasFont || customization.Svg is not null))
+        {
+            _contentOverriddenControls.Add(control);
+        }
     }
 
     private void ApplyExtensionElementState(Button button, ExtensionMenuEntry entry, UiOverride? customization)
@@ -966,7 +1171,13 @@ public partial class MainForm
 
         if (customization.Background is Color background)
         {
-            control.BackColor = background;
+            // The zoom percentage is transparent on the zoom control, which takes the colour instead
+            // (ApplyCompositeElementColors).
+            if (!ReferenceEquals(control, _zoomLabel))
+            {
+                control.BackColor = background;
+            }
+
             if (control is ThemedPanel)
             {
                 _surfacesWithBackgroundOverride.Add(control);
@@ -986,6 +1197,15 @@ public partial class MainForm
         if (customization.Border is Color border && control is ButtonBase button)
         {
             button.FlatAppearance.BorderColor = border;
+            _borderOverriddenControls.Add(button);
+
+            // Round controls draw the colour along their outline (OnRoundControlPaint) and shaped ones along their
+            // shape; any other button needs a border for the colour to show.
+            if (customization.Shape is null && !_roundControls.ContainsKey(button) && button.FlatAppearance.BorderSize == 0)
+            {
+                _borderSizesBeforeOverride.TryAdd(button, 0);
+                button.FlatAppearance.BorderSize = 1;
+            }
         }
     }
 
