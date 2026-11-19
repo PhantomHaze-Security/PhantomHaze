@@ -439,6 +439,10 @@ public partial class MainForm : Form
     private bool _compactAddressStrip;
     // Whether the active tab's page is in the favourites (the star is filled).
     private bool _activePageIsFavorite;
+    // The first click into the address selects all of it (like other browsers), once the mouse button is released.
+    private bool _selectAddressOnMouseUp;
+    // An UpdateAddressTextLayout call is already queued (it runs after the layout has settled).
+    private bool _addressTextLayoutQueued;
 
     private CoreWebView2Environment? _webEnvironment;
     private BrowserTab? _activeTab;
@@ -645,7 +649,7 @@ public partial class MainForm : Form
         _favoriteButton.Margin = ScalePadding(8, 2, 6, 2);
         _addressPill.Margin = ScalePadding(0, 2, 0, 2);
         _addressPill.Padding = ScalePadding(12, 0, 3, 0);
-        _addressBarTextBox.Margin = ScalePadding(0, 0, 6, 0);
+        _addressBarTextBox.Margin = ScalePadding(3, 0, 3, 0);
         _protocolBadgeLabel.Margin = ScalePadding(0, 0, 4, 0);
         _protocolBadgeLabel.Padding = ScalePadding(6, 1, 6, 1);
         int innerButton = ScaleByDpi(AddressRowButtonSize - 6);
@@ -660,7 +664,7 @@ public partial class MainForm : Form
         _zoomGroupPanel.Padding = new Padding(ScaleByDpi(1));
         _zoomGroupPanel.Margin = ScalePadding(0, 2, 0, 2);
         _zoomLabel.MinimumSize = new Size(0, roundButton - ScaleByDpi(2));
-        _zoomLabel.Padding = ScalePadding(10, 0, 6, 0);
+        _zoomLabel.Padding = ScalePadding(10, 0, 10, 0);
         foreach (PillButton zoomButton in new[] { _zoomInButton, _zoomOutButton })
         {
             var zoomButtonSize = new Size(roundButton - ScaleByDpi(2), roundButton - ScaleByDpi(2));
@@ -675,7 +679,7 @@ public partial class MainForm : Form
         _compactProtectionPanel.Margin = ScalePadding(10, 0, 0, 0);
         _compactProtectionPanel.CornerRadius = ScaleByDpi(10);
         _compactToggleButton.CornerRadius = ScaleByDpi(9);
-        _compactStatusLabel.Padding = ScalePadding(4, 1, 4, 0);
+        _compactStatusLabel.Padding = ScalePadding(4, 0, 4, 0);
 
         // Full-width protection banner (Log view and extension pages).
         _statusLabel.Height = ScaleByDpi(32);
@@ -2514,6 +2518,8 @@ public partial class MainForm : Form
         _compactProtectionPanel.Padding = new Padding(1);
         _compactProtectionPanel.CornerRadius = ScaleByDpi(10);
         _compactProtectionPanel.HeaderFraction = 0.54f;
+        // The coloured top half ends exactly where the status label ends, so its text is centred in the colour.
+        _compactProtectionPanel.HeaderControl = _compactStatusLabel;
         _compactProtectionPanel.AccessibleName = "Capture protection";
 
         var layout = new TableLayoutPanel
@@ -3053,6 +3059,7 @@ public partial class MainForm : Form
             BackColor = Color.Transparent,
         };
         _addressInputLayout = addressInputLayout;
+        addressInputLayout.SizeChanged += (_, _) => QueueAddressTextLayout();
         addressInputLayout.RowStyles.Add(new RowStyle(SizeType.Percent, 100f));
         addressInputLayout.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100f));
         addressInputLayout.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
@@ -3061,9 +3068,36 @@ public partial class MainForm : Form
 
         _addressBarTextBox.BorderStyle = BorderStyle.None;
         _addressBarTextBox.Anchor = AnchorStyles.Left | AnchorStyles.Right;
-        _addressBarTextBox.Margin = ScalePadding(0, 0, 6, 0);
+        _addressBarTextBox.Margin = ScalePadding(3, 0, 3, 0);
         _addressBarTextBox.PlaceholderText = _settings.StartingPage;
         _addressBarTextBox.AccessibleName = "Address";
+        // Centred while you are not typing (see UpdateAddressTextLayout); the first click selects the whole address.
+        _addressBarTextBox.TextChanged += (_, _) => QueueAddressTextLayout();
+        _addressBarTextBox.FontChanged += (_, _) => QueueAddressTextLayout();
+        _addressBarTextBox.GotFocus += (_, _) =>
+        {
+            _selectAddressOnMouseUp = MouseButtons != MouseButtons.None;
+            if (!_selectAddressOnMouseUp)
+            {
+                _addressBarTextBox.SelectAll();
+            }
+
+            UpdateAddressTextLayout();
+        };
+        _addressBarTextBox.LostFocus += (_, _) =>
+        {
+            _selectAddressOnMouseUp = false;
+            UpdateAddressTextLayout();
+        };
+        _addressBarTextBox.MouseUp += (_, _) =>
+        {
+            if (_selectAddressOnMouseUp && _addressBarTextBox.SelectionLength == 0)
+            {
+                _addressBarTextBox.SelectAll();
+            }
+
+            _selectAddressOnMouseUp = false;
+        };
         _addressBarTextBox.KeyDown += (_, e) =>
         {
             if (e.KeyCode == Keys.Enter)
@@ -3084,6 +3118,7 @@ public partial class MainForm : Form
         _protocolBadgeLabel.Visible = false;
         _protocolBadgeLabel.Margin = ScalePadding(0, 0, 4, 0);
         _protocolBadgeLabel.Padding = ScalePadding(6, 1, 6, 1);
+        _protocolBadgeLabel.VisibleChanged += (_, _) => QueueAddressTextLayout();
 
         _refreshButton.Text = string.Empty;
         _refreshButton.AutoSize = true;
@@ -6126,9 +6161,63 @@ public partial class MainForm : Form
         PositionExtensionLauncherPanel();
     }
 
+    /// <summary>Runs UpdateAddressTextLayout once the current layout pass is over (column widths are final then).</summary>
+    private void QueueAddressTextLayout()
+    {
+        if (_addressTextLayoutQueued || IsDisposed || !IsHandleCreated)
+        {
+            return;
+        }
+
+        _addressTextLayoutQueued = true;
+        BeginInvoke(new Action(() =>
+        {
+            _addressTextLayoutQueued = false;
+            UpdateAddressTextLayout();
+        }));
+    }
+
+    /// <summary>
+    /// Centres the address while you are not typing in it, and left-aligns it while you type. A text box's own alignment
+    /// cannot change without recreating it (which would drop the caret), so the box itself is sized to its text and
+    /// centred in its column; while it has focus - or when the address is too long to fit - it fills the column.
+    /// </summary>
+    private void UpdateAddressTextLayout()
+    {
+        if (_addressInputLayout is null || _addressBarTextBox.IsDisposed)
+        {
+            return;
+        }
+
+        int[] columns = _addressInputLayout.GetColumnWidths();
+        int available = columns.Length > 0 ? columns[0] - _addressBarTextBox.Margin.Horizontal : 0;
+        string shown = _addressBarTextBox.Text.Length > 0 ? _addressBarTextBox.Text : _addressBarTextBox.PlaceholderText ?? string.Empty;
+        int textWidth = TextRenderer.MeasureText(shown, _addressBarTextBox.Font, Size.Empty, TextFormatFlags.SingleLine | TextFormatFlags.NoPadding).Width +
+                        ScaleByDpi(6);
+        bool centre = !_addressBarTextBox.Focused && available > 0 && textWidth < available;
+        AnchorStyles anchor = centre ? AnchorStyles.None : AnchorStyles.Left | AnchorStyles.Right;
+        if (_addressBarTextBox.Anchor != anchor)
+        {
+            _addressBarTextBox.Anchor = anchor;
+        }
+
+        if (centre && _addressBarTextBox.Width != textWidth)
+        {
+            _addressBarTextBox.Width = textWidth;
+        }
+
+        if (!_addressBarTextBox.Focused && _addressBarTextBox.SelectionStart != 0)
+        {
+            // A long address that was scrolled while typing shows from its start again.
+            _addressBarTextBox.SelectionStart = 0;
+            _addressBarTextBox.SelectionLength = 0;
+        }
+    }
+
     /// <summary>On a narrow address row the zoom label shows just the percentage, leaving more room for the address.</summary>
     private void UpdateAddressStripLayout()
     {
+        QueueAddressTextLayout();
         int width = _addressBarPanel.ClientSize.Width;
         bool compact = width > 0 && width < ScaleByDpi(CompactAddressStripWidth);
         if (compact != _compactAddressStrip)

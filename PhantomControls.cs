@@ -347,18 +347,24 @@ internal sealed class PillButton : Button
         graphics.DrawImage(image, bounds, 0, 0, image.Width, image.Height, GraphicsUnit.Pixel, attributes);
     }
 
-    /// <summary>Paints what is behind the button (its parent's background) so the area outside the shape blends in.</summary>
+    /// <summary>
+    /// Paints what is behind the button (its parent's background, through any see-through parents) so the area outside
+    /// the shape blends in. This is how WinForms itself paints a transparent control (Control.PaintTransparentBackground
+    /// for parents other than TabPage). ButtonRenderer.DrawParentBackground must not be used: it relies on the theme API
+    /// (WM_ERASEBKGND / WM_PRINTCLIENT), which WinForms panels do not answer, so the button showed leftover pixels from
+    /// the shared double buffer - squares of another control's colour and fragments of other text.
+    /// </summary>
     private void PaintParentBackground(PaintEventArgs e)
     {
+        // Safety net first: the nearest solid colour behind the button, so nothing stale can ever show through.
+        using (var fallback = new SolidBrush(GetNearestOpaqueBackColor()))
+        {
+            e.Graphics.FillRectangle(fallback, ClientRectangle);
+        }
+
         Control? parent = Parent;
         if (parent is null)
         {
-            return;
-        }
-
-        if (Application.RenderWithVisualStyles && IsHandleCreated && parent.IsHandleCreated)
-        {
-            ButtonRenderer.DrawParentBackground(e.Graphics, ClientRectangle, this);
             return;
         }
 
@@ -376,12 +382,27 @@ internal sealed class PillButton : Button
             e.Graphics.Restore(state);
         }
     }
+
+    private Color GetNearestOpaqueBackColor()
+    {
+        for (Control? control = Parent; control is not null; control = control.Parent)
+        {
+            Color color = control.BackColor;
+            if (color.A == 255)
+            {
+                return color;
+            }
+        }
+
+        return SystemColors.Control;
+    }
 }
 
 /// <summary>
 /// A panel with a rounded fill and outline; outside the shape it shows its parent's background. Its own BackColor
 /// stays transparent - FillColor is the colour inside the shape. With a header colour, the top part of the shape
-/// (HeaderFraction of the height) is filled with it instead (the compact protection card).
+/// (down to the bottom of HeaderControl, or HeaderFraction of the height) is filled with it instead (the compact
+/// protection card).
 /// </summary>
 internal class RoundedPanel : Panel
 {
@@ -425,6 +446,14 @@ internal class RoundedPanel : Panel
         set => SetAndInvalidate(ref _headerFillColor, value);
     }
 
+    /// <summary>
+    /// A control inside the panel whose bottom edge ends the header colour, so the colour matches that control (and
+    /// text centred in it is centred in the coloured area). Without one, HeaderFraction is used.
+    /// </summary>
+    [Browsable(false)]
+    [DesignerSerializationVisibility(DesignerSerializationVisibility.Hidden)]
+    public Control? HeaderControl { get; set; }
+
     [Browsable(false)]
     [DesignerSerializationVisibility(DesignerSerializationVisibility.Hidden)]
     public float HeaderFraction
@@ -461,6 +490,28 @@ internal class RoundedPanel : Panel
         }
     }
 
+    /// <summary>The height of the header colour: down to HeaderControl's bottom edge, or HeaderFraction of the height.</summary>
+    private float GetHeaderHeight()
+    {
+        if (HeaderControl is { IsDisposed: false } header && header.Visible)
+        {
+            int bottom = header.Bottom;
+            for (Control? parent = header.Parent; parent is not null && !ReferenceEquals(parent, this); parent = parent.Parent)
+            {
+                bottom += parent.Top;
+                if (parent.Parent is null)
+                {
+                    // Not inside this panel after all.
+                    return Height * _headerFraction;
+                }
+            }
+
+            return Math.Clamp(bottom, 0, Height);
+        }
+
+        return Height * _headerFraction;
+    }
+
     private void SetAndInvalidate(ref Color field, Color value)
     {
         if (field != value)
@@ -495,14 +546,15 @@ internal class RoundedPanel : Panel
                 graphics.FillPath(brush, path);
             }
 
-            if (!_headerFillColor.IsEmpty && _headerFillColor.A > 0 && _headerFraction > 0)
+            float headerHeight = GetHeaderHeight();
+            if (!_headerFillColor.IsEmpty && _headerFillColor.A > 0 && headerHeight > 0)
             {
                 Region previousClip = graphics.Clip;
                 try
                 {
                     graphics.SetClip(path, CombineMode.Intersect);
                     using var headerBrush = new SolidBrush(_headerFillColor);
-                    graphics.FillRectangle(headerBrush, new RectangleF(0, 0, Width, Height * _headerFraction));
+                    graphics.FillRectangle(headerBrush, new RectangleF(0, 0, Width, headerHeight));
                 }
                 finally
                 {
@@ -515,9 +567,9 @@ internal class RoundedPanel : Panel
             {
                 using var pen = new Pen(_borderColor, 1f);
                 graphics.DrawPath(pen, path);
-                if (!_headerFillColor.IsEmpty && _headerFraction is > 0 and < 1)
+                if (!_headerFillColor.IsEmpty && headerHeight > 0 && headerHeight < Height)
                 {
-                    float y = (float)Math.Round(Height * _headerFraction) - 0.5f;
+                    float y = (float)Math.Round(headerHeight) - 0.5f;
                     graphics.SmoothingMode = SmoothingMode.None;
                     graphics.DrawLine(pen, 1f, y, Width - 2f, y);
                 }
