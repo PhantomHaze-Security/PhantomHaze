@@ -301,6 +301,10 @@ public partial class MainForm : Form
 
         // Redirects OpenHTML followed in a row for this tab (see FetchOpenHtmlDocumentAsync); stops redirect loops.
         public int OpenHtmlRedirectCount { get; set; }
+
+        // The page address announced by the last NavigationStarting, until its document request arrives. OpenHTML
+        // fetches only that request, so frames inside the page are loaded by the tab itself.
+        public string? PendingPageUrl { get; set; }
     }
 
     // The top bar: the menu row (logo, Log | Web | extension pages, Settings, extension buttons, clock), the address
@@ -4670,6 +4674,7 @@ public partial class MainForm : Form
         tab.CurrentUrl = e.Uri;
         tab.IsNavigationPending = true;
         tab.NavigationSequence++;
+        tab.PendingPageUrl = e.Uri;
         if (_webViewModeEnabled && ReferenceEquals(_activeTab, tab))
         {
             _addressBarTextBox.Text = e.Uri;

@@ -17,8 +17,117 @@ internal static class OpenHtmlDocuments
                mediaType.Equals("application/xhtml+xml", StringComparison.OrdinalIgnoreCase);
     }
 
-    /// <summary>A cookie to store, or (Cookie is null) the name of a cookie the header deletes.</summary>
-    public sealed record CookieChange(string Name, Cookie? Cookie, CoreWebView2CookieSameSiteKind? SameSite);
+    /// <summary>
+    /// A cookie to store, or (Cookie is null) a cookie the header deletes: the one with that name, domain and path
+    /// (a domain starting with "." is a domain cookie, otherwise a cookie for that exact host).
+    /// </summary>
+    public sealed record CookieChange(string Name, Cookie? Cookie, CoreWebView2CookieSameSiteKind? SameSite, string Domain, string Path);
+
+    // Response headers handed on to the tab with an OpenHTML page or file. They protect the user (who may frame the page,
+    // what it may load, how it is sniffed) or say how to show it (a download's file name). Cookies were applied
+    // separately; encoding and length headers describe the network transfer, not the decoded body the tab gets.
+    private static readonly string[] PassedOnResponseHeaders =
+    [
+        "Content-Security-Policy",
+        "X-Frame-Options",
+        "X-Content-Type-Options",
+        "Referrer-Policy",
+        "Permissions-Policy",
+        "Cross-Origin-Opener-Policy",
+        "Cross-Origin-Resource-Policy",
+        "Content-Disposition",
+        "Content-Language",
+        "Refresh",
+    ];
+
+    /// <summary>The response headers for the tab: the content type, the passed-on headers and no caching.</summary>
+    public static string BuildResponseHeaders(string contentType, IEnumerable<KeyValuePair<string, IEnumerable<string>>> siteHeaders)
+    {
+        var lines = new List<string> { $"Content-Type: {RemoveLineBreaks(contentType)}", "Cache-Control: no-store" };
+        foreach ((string name, IEnumerable<string> values) in siteHeaders)
+        {
+            string? allowed = PassedOnResponseHeaders.FirstOrDefault(header => header.Equals(name, StringComparison.OrdinalIgnoreCase));
+            if (allowed is null)
+            {
+                continue;
+            }
+
+            foreach (string value in values)
+            {
+                string cleaned = RemoveLineBreaks(value);
+                if (cleaned.Length > 0)
+                {
+                    lines.Add($"{allowed}: {cleaned}");
+                }
+            }
+        }
+
+        return string.Join("\r\n", lines);
+    }
+
+    private static string RemoveLineBreaks(string value) => value.Replace("\r", string.Empty, StringComparison.Ordinal).Replace("\n", string.Empty, StringComparison.Ordinal).Trim();
+
+    /// <summary>The address without its #fragment (requests never carry one; navigations can).</summary>
+    public static string WithoutFragment(string url)
+    {
+        int hash = url.IndexOf('#');
+        return hash < 0 ? url : url[..hash];
+    }
+
+    /// <summary>
+    /// Whether another site led to this page (a link or redirect from it), in which case browsers do not send
+    /// SameSite=Strict cookies. The Sec-Fetch-Site header says so when present; otherwise the Referer is compared. No
+    /// Referer means the address was typed or opened from a bookmark: same-site.
+    /// </summary>
+    public static bool IsCrossSiteNavigation(string? secFetchSite, string? referer, Uri target)
+    {
+        if (!string.IsNullOrWhiteSpace(secFetchSite))
+        {
+            return secFetchSite.Trim().Equals("cross-site", StringComparison.OrdinalIgnoreCase);
+        }
+
+        if (string.IsNullOrWhiteSpace(referer) || !Uri.TryCreate(referer, UriKind.Absolute, out Uri? from))
+        {
+            return false;
+        }
+
+        return !IsSameSite(from.Host, target.Host);
+    }
+
+    /// <summary>
+    /// Whether two hosts belong to the same site (registrable domain), approximated without the public suffix list:
+    /// the last two labels, or three for two-letter country domains with a short second level (example.co.uk).
+    /// </summary>
+    public static bool IsSameSite(string firstHost, string secondHost)
+    {
+        static string Site(string host)
+        {
+            host = host.Trim().TrimEnd('.').ToLowerInvariant();
+            if (Uri.CheckHostName(host) is UriHostNameType.IPv4 or UriHostNameType.IPv6)
+            {
+                return host;
+            }
+
+            string[] labels = host.Split('.');
+            if (labels.Length <= 2)
+            {
+                return host;
+            }
+
+            int count = labels[^1].Length == 2 && labels[^2].Length <= 3 ? 3 : 2;
+            return string.Join('.', labels[^count..]);
+        }
+
+        return string.Equals(Site(firstHost), Site(secondHost), StringComparison.Ordinal);
+    }
+
+    /// <summary>The path a cookie gets without a Path attribute (RFC 6265: the request path up to its last "/").</summary>
+    public static string GetDefaultCookiePath(Uri uri)
+    {
+        string path = uri.AbsolutePath;
+        int lastSlash = path.LastIndexOf('/');
+        return string.IsNullOrEmpty(path) || path[0] != '/' || lastSlash <= 0 ? "/" : path[..lastSlash];
+    }
 
     /// <summary>Parses one Set-Cookie header with System.Net's cookie rules, plus the SameSite attribute it ignores.</summary>
     public static List<CookieChange> ParseSetCookieHeader(Uri uri, string header)
@@ -34,6 +143,8 @@ internal static class OpenHtmlDocuments
 
         CoreWebView2CookieSameSiteKind? sameSite = null;
         bool explicitDomain = false;
+        string? domainAttribute = null;
+        string? pathAttribute = null;
         foreach (string attribute in header.Split(';').Skip(1))
         {
             string[] parts = attribute.Split('=', 2);
@@ -56,6 +167,11 @@ internal static class OpenHtmlDocuments
             else if (attributeName.Equals("Domain", StringComparison.OrdinalIgnoreCase) && parts[1].Trim().Length > 0)
             {
                 explicitDomain = true;
+                domainAttribute = parts[1].Trim();
+            }
+            else if (attributeName.Equals("Path", StringComparison.OrdinalIgnoreCase) && parts[1].Trim().StartsWith('/'))
+            {
+                pathAttribute = parts[1].Trim();
             }
         }
 
@@ -72,8 +188,9 @@ internal static class OpenHtmlDocuments
         List<Cookie> cookies = container.GetAllCookies().Where(cookie => !cookie.Expired).ToList();
         if (cookies.Count == 0)
         {
-            // An expiry date in the past (or Max-Age=0): the site deletes the cookie.
-            changes.Add(new CookieChange(name, null, null));
+            // An expiry date in the past (or Max-Age=0): the site deletes the cookie with that name, domain and path.
+            string domain = domainAttribute is null ? uri.Host : "." + domainAttribute.TrimStart('.');
+            changes.Add(new CookieChange(name, null, null, domain, pathAttribute ?? GetDefaultCookiePath(uri)));
             return changes;
         }
 
@@ -86,7 +203,7 @@ internal static class OpenHtmlDocuments
                 cookie.Domain = "." + cookie.Domain;
             }
 
-            changes.Add(new CookieChange(cookie.Name, cookie, sameSite));
+            changes.Add(new CookieChange(cookie.Name, cookie, sameSite, cookie.Domain, cookie.Path));
         }
 
         return changes;

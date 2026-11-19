@@ -18,7 +18,8 @@ public partial class MainForm
     private readonly SavedCookieStore _savedCookies = new();
     private readonly string _savedCookiesFilePath = InitializeAppDataFilePath("cookies.dat");
 
-    // Set once the final cookie snapshot was taken while closing (the close is paused once for it).
+    // The close is paused once for a final cookie snapshot: these track that pause.
+    private bool _closeCookieCaptureInProgress;
     private bool _closeCookieCaptureDone;
 
     /// <summary>Reads cookies.dat at startup. With the setting off, a file left from earlier is deleted.</summary>
@@ -93,10 +94,17 @@ public partial class MainForm
 
     private static SavedCookie ToSavedCookie(CoreWebView2Cookie cookie)
     {
+        // WebView2 reports the expiry in UTC (seconds since 1970 UTC); a local time is converted, never just relabelled.
         DateTimeOffset? expires = null;
-        if (!cookie.IsSession && cookie.Expires != DateTime.MinValue)
+        DateTime rawExpires = cookie.Expires;
+        if (!cookie.IsSession && rawExpires != DateTime.MinValue)
         {
-            DateTime utc = cookie.Expires.Kind == DateTimeKind.Utc ? cookie.Expires : DateTime.SpecifyKind(cookie.Expires, DateTimeKind.Utc);
+            DateTime utc = rawExpires.Kind switch
+            {
+                DateTimeKind.Local => rawExpires.ToUniversalTime(),
+                DateTimeKind.Utc => rawExpires,
+                _ => DateTime.SpecifyKind(rawExpires, DateTimeKind.Utc),
+            };
             expires = utc == DateTime.MaxValue ? DateTimeOffset.MaxValue : new DateTimeOffset(utc);
         }
 
@@ -275,6 +283,13 @@ public partial class MainForm
     /// </summary>
     private async void OnMainFormClosing(object? sender, FormClosingEventArgs e)
     {
+        if (_closeCookieCaptureInProgress && e.CloseReason is not (CloseReason.WindowsShutDown or CloseReason.TaskManagerClosing))
+        {
+            // Closing again while the snapshot runs: the window closes as soon as it is done.
+            e.Cancel = true;
+            return;
+        }
+
         bool takeSnapshot = !_closeCookieCaptureDone &&
                             _settings.PersistCookiesAcrossSessions &&
                             _tabs.Any(tab => tab.WebView.CoreWebView2 is not null) &&
@@ -285,7 +300,7 @@ public partial class MainForm
             return;
         }
 
-        _closeCookieCaptureDone = true;
+        _closeCookieCaptureInProgress = true;
         e.Cancel = true;
         try
         {
@@ -295,6 +310,11 @@ public partial class MainForm
         {
             // The window is closing either way; a failed snapshot must never stop it (the last saved one is kept).
             Log($"The last cookie snapshot before closing could not be taken: {ex.Message}");
+        }
+        finally
+        {
+            _closeCookieCaptureInProgress = false;
+            _closeCookieCaptureDone = true;
         }
 
         if (!IsDisposed && IsHandleCreated)

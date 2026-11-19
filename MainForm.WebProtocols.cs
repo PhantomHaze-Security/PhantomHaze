@@ -38,8 +38,10 @@ public partial class MainForm
             Badge: "OpenHTML"),
     ];
 
-    private const int OpenHtmlMaximumDocumentBytes = 10 * 1024 * 1024;
+    // Pages and files OpenHTML fetches are held in memory; larger files are left to the tab.
+    private const int OpenHtmlMaximumBodyBytes = 25 * 1024 * 1024;
     private const int OpenHtmlMaximumRedirects = 20;
+    private static readonly TimeSpan OpenHtmlTimeout = TimeSpan.FromSeconds(30);
 
     // Redirects are not followed here: each hop is handed back to the tab, which requests it again, so web.block
     // rules apply to every address. Cookies come from (and go back to) the tab's own cookie store.
@@ -52,7 +54,8 @@ public partial class MainForm
         PooledConnectionLifetime = TimeSpan.FromMinutes(5),
     })
     {
-        Timeout = TimeSpan.FromSeconds(30),
+        // Each fetch has its own limit for the whole download (OpenHtmlTimeout).
+        Timeout = Timeout.InfiniteTimeSpan,
     };
 
     private static WebViewProtocolInfo GetWebViewProtocolInfo(WebViewProtocol protocol)
@@ -73,14 +76,15 @@ public partial class MainForm
     }
 
     /// <summary>
-    /// Settings were saved with another protocol: every open tab switches to it and reloads, so what is on screen
-    /// matches the setting straight away.
+    /// Settings were saved with another protocol: every open tab switches to it for its next page, and the tab on
+    /// screen reloads so it matches the setting straight away. Other tabs are not reloaded, so a form being filled in
+    /// or a page that was the answer to a form is not lost or sent again.
     /// </summary>
     private void ApplyWebViewProtocolToOpenTabs()
     {
         UpdateProtocolBadge();
         bool scriptEnabled = IsScriptEnabledFor(_settings.WebViewProtocol);
-        int reloaded = 0;
+        bool reloaded = false;
         foreach (BrowserTab tab in _tabs)
         {
             try
@@ -89,8 +93,11 @@ public partial class MainForm
                 {
                     core.Settings.IsScriptEnabled = scriptEnabled;
                     tab.OpenHtmlRedirectCount = 0;
-                    core.Reload();
-                    reloaded++;
+                    if (_webViewModeEnabled && ReferenceEquals(tab, _activeTab))
+                    {
+                        core.Reload();
+                        reloaded = true;
+                    }
                 }
             }
             catch (Exception ex) when (ex is InvalidOperationException or ObjectDisposedException or COMException)
@@ -100,20 +107,23 @@ public partial class MainForm
         }
 
         Log($"Web View protocol set to {GetWebViewProtocolInfo(_settings.WebViewProtocol).Name}" +
-            (reloaded > 0 ? $"; {reloaded} open tab(s) reloaded." : "."));
+            (reloaded ? "; the current tab was reloaded and other tabs use it from their next page." : "; open tabs use it from their next page."));
     }
 
     /// <summary>
-    /// Called for every request a tab makes (after web.block rules). Under OpenHTML, page documents are fetched by
-    /// PhantomHaze and handed to the tab; everything else, and every request under WebView2, is left to the tab.
+    /// Called for every request a tab makes (after web.block rules). Under OpenHTML, the tab's page documents are
+    /// fetched by PhantomHaze and handed to the tab. Frames inside a page, everything else, and every request under
+    /// WebView2 are left to the tab (frames keep the browser's own cookie rules, such as SameSite).
     /// </summary>
     private void TryServeDocumentWithProtocol(CoreWebView2 core, BrowserTab tab, CoreWebView2WebResourceRequestedEventArgs e)
     {
-        if (_settings.WebViewProtocol != WebViewProtocol.OpenHtml || !IsOpenHtmlDocumentRequest(e))
+        if (_settings.WebViewProtocol != WebViewProtocol.OpenHtml || !IsOpenHtmlDocumentRequest(e) || !IsPendingPageRequest(tab, e.Request.Uri))
         {
             return;
         }
 
+        // Answered once: a frame of the page that happens to load the same address is left to the tab.
+        tab.PendingPageUrl = null;
         CoreWebView2Deferral deferral = e.GetDeferral();
         _ = ServeOpenHtmlDocumentAsync(core, tab, e, deferral);
     }
@@ -131,6 +141,16 @@ public partial class MainForm
                (uri.Scheme == Uri.UriSchemeHttp || uri.Scheme == Uri.UriSchemeHttps);
     }
 
+    /// <summary>
+    /// Whether a document request is the tab's own page (the navigation NavigationStarting just announced) rather than
+    /// a frame inside it. The request address has no #fragment, so it is compared without one.
+    /// </summary>
+    private static bool IsPendingPageRequest(BrowserTab tab, string requestUrl)
+    {
+        return tab.PendingPageUrl is string pending &&
+               string.Equals(OpenHtmlDocuments.WithoutFragment(pending), OpenHtmlDocuments.WithoutFragment(requestUrl), StringComparison.Ordinal);
+    }
+
     private async Task ServeOpenHtmlDocumentAsync(
         CoreWebView2 core,
         BrowserTab tab,
@@ -146,13 +166,14 @@ public partial class MainForm
                 e.Response = response;
             }
         }
-        catch (Exception ex) when (ex is HttpRequestException or TaskCanceledException or IOException or InvalidOperationException
+        catch (Exception ex) when (ex is HttpRequestException or OperationCanceledException or IOException or InvalidOperationException
                                        or OpenHtmlException or UriFormatException)
         {
             try
             {
-                Log($"Tab {tab.Id} OpenHTML could not load {TrimForLog(url, 220)}: {ex.Message}");
-                e.Response = CreateOpenHtmlMessageResponse(core, 502, "Bad Gateway", "OpenHTML could not load this page", url, ex.Message);
+                string problem = ex is OperationCanceledException ? $"The site did not answer within {OpenHtmlTimeout.TotalSeconds:0} seconds." : ex.Message;
+                Log($"Tab {tab.Id} OpenHTML could not load {TrimForLog(url, 220)}: {problem}");
+                e.Response = CreateOpenHtmlMessageResponse(core, 502, "Bad Gateway", "OpenHTML could not load this page", url, problem);
             }
             catch (Exception responseError) when (responseError is InvalidOperationException or ObjectDisposedException or COMException)
             {
@@ -176,32 +197,38 @@ public partial class MainForm
         }
     }
 
-    /// <returns>The response for the tab, or null to let the tab load the address itself (files that are not HTML).</returns>
+    /// <returns>The response for the tab, or null to let the tab load the address itself.</returns>
     private async Task<CoreWebView2WebResourceResponse?> FetchOpenHtmlDocumentAsync(
         CoreWebView2 core,
         BrowserTab tab,
         CoreWebView2WebResourceRequest original,
         string url)
     {
+        // One limit for the whole fetch: connecting, the headers and the body (HttpClient.Timeout stops at the headers).
+        using var timeout = new CancellationTokenSource(OpenHtmlTimeout);
         var requestUri = new Uri(url);
         using var request = new HttpRequestMessage(HttpMethod.Get, requestUri);
         request.Headers.TryAddWithoutValidation("User-Agent", core.Settings.UserAgent);
         request.Headers.TryAddWithoutValidation("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8");
+        string? referer = GetRequestHeader(original, "Referer");
         foreach (string header in new[] { "Accept-Language", "Referer" })
         {
-            if (original.Headers.Contains(header))
+            if (GetRequestHeader(original, header) is string value)
             {
-                request.Headers.TryAddWithoutValidation(header, original.Headers.GetHeader(header));
+                request.Headers.TryAddWithoutValidation(header, value);
             }
         }
 
-        string? cookieHeader = BuildCookieHeader(await core.CookieManager.GetCookiesAsync(url));
+        // Like the browser: SameSite=Strict cookies are not sent when another site links to this page.
+        bool crossSite = OpenHtmlDocuments.IsCrossSiteNavigation(GetRequestHeader(original, "Sec-Fetch-Site"), referer, requestUri);
+        List<CoreWebView2Cookie> cookies = await core.CookieManager.GetCookiesAsync(url);
+        string? cookieHeader = BuildCookieHeader(cookies.Where(cookie => !crossSite || cookie.SameSite != CoreWebView2CookieSameSiteKind.Strict));
         if (cookieHeader is not null)
         {
             request.Headers.TryAddWithoutValidation("Cookie", cookieHeader);
         }
 
-        using HttpResponseMessage response = await _openHtmlHttpClient.SendAsync(request, HttpCompletionOption.ResponseHeadersRead);
+        using HttpResponseMessage response = await _openHtmlHttpClient.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, timeout.Token);
         if (!_tabs.Contains(tab))
         {
             return null;
@@ -227,45 +254,75 @@ public partial class MainForm
                 throw new OpenHtmlException($"The site redirected more than {OpenHtmlMaximumRedirects} times in a row.");
             }
 
-            // The tab goes to the new address itself, so web.block rules and this protocol apply to it again.
+            // The tab goes to the new address itself, so web.block rules and this protocol apply to it again. A
+            // zero-second meta refresh replaces this page in the tab's history, so Back skips it.
             Log($"Tab {tab.Id} OpenHTML: {TrimForLog(url, 200)} redirects to {TrimForLog(target.AbsoluteUri, 200)}");
             return CreateOpenHtmlRedirectResponse(core, target);
         }
 
         tab.OpenHtmlRedirectCount = 0;
         string? mediaType = response.Content.Headers.ContentType?.MediaType;
-        if (!OpenHtmlDocuments.IsHtmlMediaType(mediaType))
+        bool isPage = OpenHtmlDocuments.IsHtmlMediaType(mediaType);
+
+        // Files that are not pages (PDFs, images, downloads) are handed over from this same response, so a link that
+        // works only once is not used up by a second request. A file too large to hold in memory is the exception.
+        byte[]? body = await ReadOpenHtmlBodyAsync(response.Content, timeout.Token);
+        if (body is null)
         {
-            // PDFs, images, downloads and other files: the tab loads them itself.
+            if (isPage)
+            {
+                throw new OpenHtmlException($"The page is larger than {OpenHtmlMaximumBodyBytes / (1024 * 1024)} MB.");
+            }
+
+            Log($"Tab {tab.Id} OpenHTML: {TrimForLog(url, 220)} is a file larger than {OpenHtmlMaximumBodyBytes / (1024 * 1024)} MB; the tab downloads it itself.");
             return null;
         }
 
-        byte[] body = await ReadOpenHtmlBodyAsync(response.Content);
-        string contentType = response.Content.Headers.ContentType?.ToString() ?? "text/html";
-        Log($"Tab {tab.Id} OpenHTML: fetched {TrimForLog(url, 220)} ({status}, {FormatOpenHtmlSize(body.Length)})");
+        string headers = OpenHtmlDocuments.BuildResponseHeaders(
+            response.Content.Headers.ContentType?.ToString() ?? (isPage ? "text/html" : "application/octet-stream"),
+            EnumerateResponseHeaders(response));
+        Log($"Tab {tab.Id} OpenHTML: fetched {TrimForLog(url, 220)} ({status}, {FormatOpenHtmlSize(body.Length)}{(isPage ? string.Empty : ", " + (mediaType ?? "file"))})");
         return core.Environment.CreateWebResourceResponse(
             new MemoryStream(body),
             status,
             OpenHtmlDocuments.SanitizeReasonPhrase(response.ReasonPhrase, status),
-            $"Content-Type: {contentType}\r\nCache-Control: no-store");
+            headers);
     }
 
-    private static async Task<byte[]> ReadOpenHtmlBodyAsync(HttpContent content)
+    private static string? GetRequestHeader(CoreWebView2WebResourceRequest request, string name)
     {
-        if (content.Headers.ContentLength is long declared && declared > OpenHtmlMaximumDocumentBytes)
+        try
         {
-            throw new OpenHtmlException($"The page is larger than {OpenHtmlMaximumDocumentBytes / (1024 * 1024)} MB.");
+            return request.Headers.Contains(name) ? request.Headers.GetHeader(name) : null;
+        }
+        catch (Exception ex) when (ex is ArgumentException or COMException)
+        {
+            return null;
+        }
+    }
+
+    private static IEnumerable<KeyValuePair<string, IEnumerable<string>>> EnumerateResponseHeaders(HttpResponseMessage response)
+    {
+        return response.Headers.Concat(response.Content.Headers);
+    }
+
+    /// <returns>The body, or null when it is larger than OpenHtmlMaximumBodyBytes.</returns>
+    private static async Task<byte[]?> ReadOpenHtmlBodyAsync(HttpContent content, CancellationToken cancellationToken)
+    {
+        if (content.Headers.ContentLength is long declared && declared > OpenHtmlMaximumBodyBytes)
+        {
+            return null;
         }
 
-        await using Stream stream = await content.ReadAsStreamAsync();
+        await using Stream stream = await content.ReadAsStreamAsync(cancellationToken);
         using var buffer = new MemoryStream();
         byte[] chunk = new byte[81920];
         int read;
-        while ((read = await stream.ReadAsync(chunk)) > 0)
+        while ((read = await stream.ReadAsync(chunk, cancellationToken)) > 0)
         {
-            if (buffer.Length + read > OpenHtmlMaximumDocumentBytes)
+            if (buffer.Length + read > OpenHtmlMaximumBodyBytes)
             {
-                throw new OpenHtmlException($"The page is larger than {OpenHtmlMaximumDocumentBytes / (1024 * 1024)} MB.");
+                return null;
             }
 
             buffer.Write(chunk, 0, read);
@@ -275,7 +332,7 @@ public partial class MainForm
     }
 
     /// <summary>The Cookie header for the tab's cookies that apply to the address (null when there are none).</summary>
-    internal static string? BuildCookieHeader(IEnumerable<CoreWebView2Cookie> cookies)
+    private static string? BuildCookieHeader(IEnumerable<CoreWebView2Cookie> cookies)
     {
         string header = string.Join("; ", cookies.Select(cookie => $"{cookie.Name}={cookie.Value}"));
         return header.Length == 0 ? null : header;
@@ -311,8 +368,8 @@ public partial class MainForm
                     }
                     else
                     {
-                        // An expired cookie deletes the cookie of that name.
-                        core.CookieManager.DeleteCookies(change.Name, uri.AbsoluteUri);
+                        // An expired cookie deletes the cookie with that name, domain and path.
+                        core.CookieManager.DeleteCookiesWithDomainAndPath(change.Name, change.Domain, change.Path);
                     }
 
                     changed++;
