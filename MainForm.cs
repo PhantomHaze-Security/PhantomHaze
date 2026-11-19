@@ -42,6 +42,15 @@ public partial class MainForm : Form
         public bool ExtensionsEnabled { get; set; } = true;
         public List<InstalledExtensionEntry> Extensions { get; set; } = new();
 
+        /// <summary>How pages are loaded in Web View (Settings -> General); see MainForm.WebProtocols.cs.</summary>
+        public WebViewProtocol WebViewProtocol { get; set; } = WebViewProtocol.WebView2;
+
+        /// <summary>Keep Web View cookies after PhantomHaze closes (off by default; see MainForm.Cookies.cs).</summary>
+        public bool PersistCookiesAcrossSessions { get; set; }
+
+        /// <summary>How many days a saved cookie is kept (-1: until the site's own expiry date).</summary>
+        public int CookieRetentionDays { get; set; } = DefaultCookieRetentionDays;
+
         // Appearance (stored as #RRGGBB so settings.json and .phstg exports stay readable).
         public string CustomThemeColor { get; set; } = DefaultCustomThemeColor;
         public string GradientStartColor { get; set; } = DefaultGradientStartColor;
@@ -65,6 +74,9 @@ public partial class MainForm : Form
                 StartingPage = StartingPage,
                 ExtensionsEnabled = ExtensionsEnabled,
                 Extensions = Extensions.Select(entry => entry.Clone()).ToList(),
+                WebViewProtocol = WebViewProtocol,
+                PersistCookiesAcrossSessions = PersistCookiesAcrossSessions,
+                CookieRetentionDays = CookieRetentionDays,
                 CustomThemeColor = CustomThemeColor,
                 GradientStartColor = GradientStartColor,
                 GradientEndColor = GradientEndColor,
@@ -255,10 +267,10 @@ public partial class MainForm : Form
         public BrowserTab(
             int id,
             WebView2 webView,
-            Panel headerPanel,
+            TabHeaderPanel headerPanel,
             PictureBox faviconBox,
             Label titleLabel,
-            Button closeButton)
+            PillButton closeButton)
         {
             Id = id;
             WebView = webView;
@@ -273,10 +285,10 @@ public partial class MainForm : Form
 
         public int Id { get; }
         public WebView2 WebView { get; }
-        public Panel HeaderPanel { get; }
+        public TabHeaderPanel HeaderPanel { get; }
         public PictureBox FaviconBox { get; }
         public Label TitleLabel { get; }
-        public Button CloseButton { get; }
+        public PillButton CloseButton { get; }
         public string CurrentUrl { get; set; }
         public string Title { get; set; }
         public Image? OwnedFaviconImage { get; set; }
@@ -286,12 +298,19 @@ public partial class MainForm : Form
         // Incremented on every NavigationStarting so async work started for one document can detect that the
         // tab has moved on before touching the new document.
         public int NavigationSequence { get; set; }
+
+        // Redirects OpenHTML followed in a row for this tab (see FetchOpenHtmlDocumentAsync); stops redirect loops.
+        public int OpenHtmlRedirectCount { get; set; }
     }
 
+    // The top bar: the menu row (logo, Log | Web | extension pages, Settings, extension buttons, clock), the address
+    // row (Web View only) and, in Web View, the compact protection card on the right of both rows.
     private readonly ThemedPanel _menuBarPanel = new();
     private readonly PictureBox _menuLogoPictureBox = new();
     private readonly Label _menuLogoLabel = new();
-    private readonly Button _logsViewButton = new();
+    // Log | Web | extension pages (app.page), drawn as one segmented control.
+    private readonly SegmentedPanel _viewSwitcherPanel = new();
+    private readonly PillButton _logsViewButton = new();
     private readonly FlowLayoutPanel _extensionMenuButtonsPanel = new();
     private readonly Label _menuClockLabel = new();
     // Ticks once per second, aligned to the system clock. The clock is never written to the log.
@@ -306,22 +325,34 @@ public partial class MainForm : Form
     private readonly ToolTip _updateBannerToolTip = new();
     // Cancelled when the window closes, so a slow update check never touches a closed window.
     private readonly CancellationTokenSource _updateCheckCancellation = new();
+    // The full-width protection banner and button, shown in the Log view and on extension pages.
     private readonly Button _toggleButton = new();
-    private readonly Button _webViewToggleButton = new();
-    private readonly Button _settingsButton = new();
+    // The compact protection card at the right of the top bar, shown in Web View instead of the banner above.
+    private readonly RoundedPanel _compactProtectionPanel = new();
+    private readonly Label _compactStatusLabel = new();
+    private readonly PillButton _compactToggleButton = new();
+    private readonly PillButton _webViewToggleButton = new();
+    private readonly PillButton _settingsButton = new();
     private readonly ContextMenuStrip _disableProtectionMenu = new();
     private readonly System.Windows.Forms.Timer _protectionRestoreTimer = new();
+    // Tooltips of the built-in controls that extensions cannot change (the protection card, zoom buttons).
+    private readonly ToolTip _chromeToolTip = new();
     private readonly ThemedPanel _addressBarPanel = new();
+    private readonly RoundedPanel _addressPill = new();
     private readonly TextBox _addressBarTextBox = new();
-    private readonly Button _favoriteButton = new();
-    private readonly Button _backButton = new();
-    private readonly Button _goButton = new();
-    private readonly Button _refreshButton = new();
-    private readonly Button _historyButton = new();
-    private readonly Label _zoomLabel = new();
-    private readonly TrackBar _zoomSlider = new();
+    private readonly Label _protocolBadgeLabel = new();
+    private readonly PillButton _favoriteButton = new();
+    private readonly PillButton _backButton = new();
+    private readonly PillButton _forwardButton = new();
+    private readonly PillButton _refreshButton = new();
+    private readonly PillButton _historyButton = new();
+    private readonly SegmentedPanel _zoomGroupPanel = new();
+    private readonly PillButton _zoomLabel = new();
+    private readonly PillButton _zoomOutButton = new();
+    private readonly PillButton _zoomInButton = new();
+    private readonly ThemedPanel _tabStripPanel = new();
     private readonly FlowLayoutPanel _tabsFlowPanel = new();
-    private readonly Button _newTabButton = new();
+    private readonly PillButton _newTabButton = new();
     private readonly ThemedPanel _contentHostPanel = new();
     private readonly FlowLayoutPanel _extensionLauncherPanel = new();
     private readonly ThemedPanel _webViewHostPanel = new();
@@ -342,18 +373,21 @@ public partial class MainForm : Form
     private readonly TextBox _logBox = new();
     // Redirects are followed manually so every hop can be checked against extension web.block rules.
     private readonly HttpClient _faviconHttpClient = new(new HttpClientHandler { AllowAutoRedirect = false });
-    private readonly Font _tabCloseFontRegular = new("Segoe UI", 8, FontStyle.Bold);
-    private readonly Font _tabCloseFontCompact = new("Segoe UI", 6.5f, FontStyle.Bold);
-    private readonly Font _menuButtonFontRegular = new("Segoe UI", 10, FontStyle.Regular);
-    private readonly Font _menuButtonFontBold = new("Segoe UI", 10, FontStyle.Bold);
+    private readonly Font _tabCloseFontRegular = new("Segoe UI", 9.5f, FontStyle.Regular);
+    private readonly Font _tabCloseFontCompact = new("Segoe UI", 8f, FontStyle.Regular);
+    private readonly Font _menuButtonFontRegular = new("Segoe UI", 9, FontStyle.Regular);
+    private readonly Font _menuButtonFontBold = new("Segoe UI", 9, FontStyle.Bold);
     // Shared fonts: these used to be created per control (one per tab opened, several per Settings window opened)
     // and were never disposed, leaking a GDI font handle each time.
     private readonly Font _menuTitleFont = new("Segoe UI", 10, FontStyle.Bold);
     private readonly Font _tabTitleFont = new("Segoe UI", 8.5f, FontStyle.Regular);
     private readonly Font _stripButtonFont = new("Segoe UI", 9, FontStyle.Regular);
-    private readonly Font _favoriteButtonFont = new("Segoe UI", 11, FontStyle.Bold);
-    private readonly Font _zoomLabelFont = new("Segoe UI", 9, FontStyle.Regular);
-    private readonly Font _newTabButtonFont = new("Segoe UI", 12, FontStyle.Bold);
+    private readonly Font _favoriteButtonFont = new("Segoe UI", 9, FontStyle.Regular);
+    private readonly Font _zoomLabelFont = new("Segoe UI", 8.5f, FontStyle.Regular);
+    private readonly Font _newTabButtonFont = new("Segoe UI", 9, FontStyle.Regular);
+    private readonly Font _statusLabelFont = new("Segoe UI", 9.5f, FontStyle.Bold);
+    private readonly Font _compactProtectionFont = new("Segoe UI", 7.5f, FontStyle.Regular);
+    private readonly Font _protocolBadgeFont = new("Segoe UI", 7f, FontStyle.Bold);
     private readonly Font _logFont = new("Consolas", 9);
     private readonly string _logDirectory;
     private readonly string _fontCacheDirectory;
@@ -385,7 +419,7 @@ public partial class MainForm : Form
     private CoreWebView2? _workerRequestFilterCore;
     private bool _workerRequestFilterUnavailable;
     private AppSettings _settings = new();
-    private TableLayoutPanel? _addressRootLayout;
+    private TableLayoutPanel? _headerLayout;
     private TableLayoutPanel? _addressStripLayout;
     private TableLayoutPanel? _addressInputLayout;
     private TableLayoutPanel? _tabsLayout;
@@ -394,6 +428,10 @@ public partial class MainForm : Form
     private TableLayoutPanel? _menuLayout;
     private TableLayoutPanel? _menuLogoLayout;
     private Image? _defaultLogoImage;
+    // Set when the address row is too narrow for "Zoom 100%": the zoom label then shows just the percentage.
+    private bool _compactAddressStrip;
+    // Whether the active tab's page is in the favourites (the star is filled).
+    private bool _activePageIsFavorite;
 
     private CoreWebView2Environment? _webEnvironment;
     private BrowserTab? _activeTab;
@@ -401,7 +439,8 @@ public partial class MainForm : Form
     private bool _webViewInitialized;
     private bool _webViewModeEnabled;
     private bool _webViewModeSwitchInProgress;
-    private bool _sessionDataCleared;
+    // Clears the web session and restores saved cookies once, for the first tab (see PrepareWebSessionAsync).
+    private Task? _webSessionPreparation;
     private bool _updatingExtensionMenuOverflow;
     private int _nextTabId = 1;
     private int _findRequestVersion;
@@ -423,20 +462,19 @@ public partial class MainForm : Form
 
     private const string DefaultHomeUrl = "https://www.google.com";
     private const string FindShortcutMessage = "__PH_FIND__";
-    private const int DefaultBackButtonWidth = 64;
-    private const int DefaultGoButtonWidth = 56;
-    private const int DefaultRefreshButtonWidth = 80;
-    private const int DefaultHistoryButtonWidth = 80;
-    private const int DefaultZoomLabelWidth = 96;
-    private const int DefaultZoomSliderWidth = 185;
-    private const int CompactBackButtonWidth = 56;
-    private const int CompactGoButtonWidth = 48;
-    private const int CompactRefreshButtonWidth = 70;
-    private const int CompactHistoryButtonWidth = 70;
-    private const int CompactZoomSliderWidth = 135;
-    private const int MinimumAddressInputWidth = 180;
+    // Logical (96 DPI) sizes of the top bar.
+    private const int MenuRowControlHeight = 28;
+    private const int AddressRowHeight = 34;
+    private const int AddressRowButtonSize = 30;
+    private const int CompactProtectionWidth = 150;
+    private const int TabStripHeight = 34;
+    // Below this address row width the zoom label drops the word "Zoom".
+    private const int CompactAddressStripWidth = 640;
+    // The zoom steps of the + and - buttons (the label resets to 100%).
+    private static readonly int[] ZoomSteps = [50, 67, 75, 80, 90, 100, 110, 125, 150, 175, 200];
     private static readonly Image DefaultTabIcon = SystemIcons.Application.ToBitmap();
     private static readonly int[] ValidHistoryRetentionDays = new[] { 1, 7, 14, 30, 80, -1 };
+    private const int DefaultCookieRetentionDays = 30;
     private const string ExtensionStagingFileSuffix = ".phext-staging";
     private const string ExtensionBackupFileSuffix = ".phext-backup";
     private static readonly HashSet<string> WindowsReservedFileNames = new(StringComparer.OrdinalIgnoreCase)
@@ -487,9 +525,11 @@ public partial class MainForm : Form
         CleanupStaleExtensionTransactionFiles();
         LoadInstalledExtensions();
         RefreshExtensionSurface();
+        UpdateProtocolBadge();
         _addressBarTextBox.PlaceholderText = NormalizeStartPage(GetEffectiveStartPage());
         LoadFavorites();
         LoadHistory();
+        LoadSavedCookies();
 
         Load += (_, _) =>
         {
@@ -513,7 +553,8 @@ public partial class MainForm : Form
             _ = ApplyCustomFontAsync();
         };
 
-        FormClosing += (_, _) => CleanupWebSession();
+        // Takes a last snapshot of the cookies first when they are saved across sessions (MainForm.Cookies.cs).
+        FormClosing += OnMainFormClosing;
         Resize += (_, _) =>
         {
             UpdateTabLayout();
@@ -552,14 +593,85 @@ public partial class MainForm : Form
     {
         MinimumSize = new Size(ScaleByDpi(860), ScaleByDpi(560));
 
-        _menuBarPanel.MinimumSize = new Size(0, ScaleByDpi(52));
-        _menuBarPanel.Padding = ScalePadding(12, 8, 12, 8);
-        int menuLogoSize = ScaleByDpi(24);
+        // Top bar: menu row, address row (Web View) and the compact protection card.
+        _menuBarPanel.MinimumSize = new Size(0, ScaleByDpi(44));
+        _menuBarPanel.Padding = ScalePadding(10, 7, 10, 7);
+        int menuLogoSize = ScaleByDpi(22);
         _menuLogoPictureBox.Size = new Size(menuLogoSize, menuLogoSize);
-        _menuLogoPictureBox.Margin = ScalePadding(0, 2, 8, 2);
-        _menuLogoLabel.Margin = ScalePadding(0, 0, 10, 0);
-        _statusLabel.Height = ScaleByDpi(34);
-        _toggleButton.Height = ScaleByDpi(36);
+        _menuLogoPictureBox.Margin = ScalePadding(0, 3, 6, 3);
+        _menuLogoLabel.Margin = ScalePadding(0, 0, 12, 0);
+
+        int menuControlHeight = ScaleByDpi(MenuRowControlHeight);
+        _viewSwitcherPanel.Padding = new Padding(ScaleByDpi(1));
+        _viewSwitcherPanel.Margin = ScalePadding(0, 0, 8, 0);
+        foreach (PillButton segment in new[] { _logsViewButton, _webViewToggleButton })
+        {
+            ConfigureSegmentMetrics(segment);
+        }
+
+        foreach (PillButton segment in _viewSwitcherPanel.Controls.OfType<PillButton>())
+        {
+            ConfigureSegmentMetrics(segment);
+        }
+
+        _settingsButton.MinimumSize = new Size(menuControlHeight, menuControlHeight);
+        _settingsButton.Padding = new Padding(0);
+        _settingsButton.Margin = ScalePadding(0, 0, 8, 0);
+        _menuClockLabel.Margin = ScalePadding(8, 0, 2, 0);
+        UpdateClockMinimumWidth();
+
+        _addressBarPanel.Height = ScaleByDpi(AddressRowHeight);
+        _addressBarPanel.Margin = ScalePadding(0, 6, 0, 0);
+        _addressBarPanel.Padding = new Padding(0);
+
+        int roundButton = ScaleByDpi(AddressRowButtonSize);
+        foreach (PillButton button in new[] { _backButton, _forwardButton, _favoriteButton })
+        {
+            button.MinimumSize = new Size(roundButton, roundButton);
+            button.Padding = new Padding(0);
+        }
+
+        _backButton.Margin = ScalePadding(0, 2, 4, 2);
+        _forwardButton.Margin = ScalePadding(0, 2, 8, 2);
+        _favoriteButton.Margin = ScalePadding(8, 2, 6, 2);
+        _addressPill.Margin = ScalePadding(0, 2, 0, 2);
+        _addressPill.Padding = ScalePadding(12, 0, 3, 0);
+        _addressBarTextBox.Margin = ScalePadding(0, 0, 6, 0);
+        _protocolBadgeLabel.Margin = ScalePadding(0, 0, 4, 0);
+        _protocolBadgeLabel.Padding = ScalePadding(6, 1, 6, 1);
+        int innerButton = ScaleByDpi(AddressRowButtonSize - 6);
+        _refreshButton.MinimumSize = new Size(innerButton, innerButton);
+        _refreshButton.Padding = new Padding(0);
+        _refreshButton.Margin = new Padding(0);
+
+        _historyButton.MinimumSize = new Size(ScaleByDpi(70), roundButton);
+        _historyButton.Padding = ScalePadding(12, 0, 12, 0);
+        _historyButton.Margin = ScalePadding(0, 2, 6, 2);
+
+        _zoomGroupPanel.Padding = new Padding(ScaleByDpi(1));
+        _zoomGroupPanel.Margin = ScalePadding(0, 2, 0, 2);
+        _zoomLabel.MinimumSize = new Size(0, roundButton - ScaleByDpi(2));
+        _zoomLabel.Padding = ScalePadding(10, 0, 6, 0);
+        foreach (PillButton zoomButton in new[] { _zoomInButton, _zoomOutButton })
+        {
+            var zoomButtonSize = new Size(roundButton - ScaleByDpi(2), roundButton - ScaleByDpi(2));
+            zoomButton.MinimumSize = zoomButtonSize;
+            zoomButton.Size = zoomButtonSize;
+            zoomButton.Padding = new Padding(0);
+            zoomButton.Margin = new Padding(0);
+        }
+
+        _compactProtectionPanel.Width = ScaleByDpi(CompactProtectionWidth);
+        _compactProtectionPanel.Height = ScaleByDpi(48);
+        _compactProtectionPanel.Margin = ScalePadding(10, 0, 0, 0);
+        _compactProtectionPanel.CornerRadius = ScaleByDpi(10);
+        _compactToggleButton.CornerRadius = ScaleByDpi(9);
+        _compactStatusLabel.Padding = ScalePadding(4, 1, 4, 0);
+
+        // Full-width protection banner (Log view and extension pages).
+        _statusLabel.Height = ScaleByDpi(32);
+        _toggleButton.Height = ScaleByDpi(32);
+
         _updateBannerPanel.Height = ScaleByDpi(36);
         _updateBannerPanel.Padding = ScalePadding(12, 3, 6, 3);
         _updateBannerTitleLabel.Margin = ScalePadding(0, 0, 4, 0);
@@ -567,40 +679,19 @@ public partial class MainForm : Form
         _updateBannerUpdateButton.Padding = ScalePadding(10, 0, 10, 0);
         _updateBannerUpdateButton.Margin = ScalePadding(8, 0, 6, 0);
         _updateBannerSnoozeButton.Size = new Size(ScaleByDpi(30), ScaleByDpi(26));
-        _logsViewButton.MinimumSize = new Size(ScaleByDpi(90), 0);
-        _webViewToggleButton.MinimumSize = new Size(ScaleByDpi(90), 0);
-        _settingsButton.MinimumSize = new Size(ScaleByDpi(95), 0);
-        Padding menuButtonPadding = ScalePadding(12, 4, 12, 4);
-        _logsViewButton.Padding = menuButtonPadding;
-        _webViewToggleButton.Padding = menuButtonPadding;
-        _settingsButton.Padding = menuButtonPadding;
-        _logsViewButton.Margin = ScalePadding(0, 0, 6, 0);
-        _webViewToggleButton.Margin = ScalePadding(0, 0, 6, 0);
-        _settingsButton.Margin = new Padding(0);
-        _menuClockLabel.Margin = ScalePadding(6, 0, 10, 0);
-        UpdateClockMinimumWidth();
 
-        _addressBarPanel.Height = ScaleByDpi(104);
-        _addressBarPanel.Padding = ScalePadding(8, 8, 8, 6);
-
-        if (_addressRootLayout is not null && _addressRootLayout.RowStyles.Count > 0)
+        // Tab strip (Web View).
+        _tabStripPanel.Height = ScaleByDpi(TabStripHeight);
+        _tabStripPanel.Padding = ScalePadding(8, 5, 8, 0);
+        if (_tabsLayout?.ColumnStyles.Count > 1)
         {
-            _addressRootLayout.RowStyles[0].Height = ScaleByDpi(38);
+            _tabsLayout.ColumnStyles[1].Width = ScaleByDpi(36);
         }
 
-        if (_addressStripLayout is not null && _addressStripLayout.RowStyles.Count > 0)
-        {
-            _addressStripLayout.RowStyles[0].Height = ScaleByDpi(36);
-        }
-
-        if (_tabsLayout is not null)
-        {
-            _tabsLayout.Margin = ScalePadding(0, 4, 0, 0);
-            if (_tabsLayout.ColumnStyles.Count > 1)
-            {
-                _tabsLayout.ColumnStyles[1].Width = ScaleByDpi(40);
-            }
-        }
+        int newTabSize = ScaleByDpi(26);
+        _newTabButton.MinimumSize = new Size(newTabSize, newTabSize);
+        _newTabButton.Size = new Size(newTabSize, newTabSize);
+        _newTabButton.Margin = ScalePadding(4, 1, 0, 2);
 
         if (_historyLayout is not null && _historyLayout.RowStyles.Count >= 5)
         {
@@ -627,18 +718,15 @@ public partial class MainForm : Form
         _findTextBox.Margin = ScalePadding(0, 0, 6, 0);
         _webViewLoadingLabel.Margin = ScalePadding(24, 0, 24, 0);
 
-        Padding stripButtonMargin = ScalePadding(3, 2, 3, 2);
-        _backButton.Margin = stripButtonMargin;
-        _goButton.Margin = stripButtonMargin;
-        _refreshButton.Margin = stripButtonMargin;
-        _historyButton.Margin = stripButtonMargin;
-
-        _favoriteButton.Margin = ScalePadding(3, 2, 0, 2);
-        _zoomSlider.Margin = ScalePadding(3, 4, 3, 2);
-        _newTabButton.MinimumSize = new Size(ScaleByDpi(36), ScaleByDpi(28));
-        _newTabButton.Margin = ScalePadding(2, 0, 0, 0);
-
         UpdateAddressStripLayout();
+    }
+
+    /// <summary>The size of one segment of the Log | Web | extension pages switcher.</summary>
+    private void ConfigureSegmentMetrics(PillButton segment)
+    {
+        segment.MinimumSize = new Size(ScaleByDpi(52), ScaleByDpi(MenuRowControlHeight) - ScaleByDpi(2));
+        segment.Padding = ScalePadding(12, 0, 12, 0);
+        segment.Margin = new Padding(0);
     }
 
     private void TrySetWindowIcon()
@@ -897,6 +985,17 @@ public partial class MainForm : Form
         if (!ValidHistoryRetentionDays.Contains(settings.HistoryRetentionDays))
         {
             settings.HistoryRetentionDays = 1;
+        }
+
+        if (!Enum.IsDefined(settings.WebViewProtocol))
+        {
+            settings.WebViewProtocol = WebViewProtocol.WebView2;
+        }
+
+        // Saved cookies use the same choice of durations as saved history.
+        if (!ValidHistoryRetentionDays.Contains(settings.CookieRetentionDays))
+        {
+            settings.CookieRetentionDays = DefaultCookieRetentionDays;
         }
 
         if (!Enum.IsDefined(settings.GradientDirection))
@@ -1438,12 +1537,13 @@ public partial class MainForm : Form
     }
 
     /// <summary>
-    /// Shows as many extension menu buttons as fit in the space left of Settings and moves the rest into the
-    /// overflow (») menu, so extension buttons can never push the built-in controls out of view.
+    /// Shows as many extension pages (segments after Log | Web) and extension buttons as fit in the menu row and moves
+    /// the rest into the overflow (») menu, so extensions can never push the built-in controls out of view. Pages come
+    /// first, then buttons, in the order the extensions declare them; once one item overflows, every later one does too.
     /// </summary>
     private void UpdateExtensionMenuOverflow()
     {
-        if (_updatingExtensionMenuOverflow || _extensionMenuButtonsPanel.IsDisposed)
+        if (_updatingExtensionMenuOverflow || _extensionMenuButtonsPanel.IsDisposed || _menuLayout is null)
         {
             return;
         }
@@ -1451,48 +1551,81 @@ public partial class MainForm : Form
         _updatingExtensionMenuOverflow = true;
         try
         {
+            List<Button> pages = _viewSwitcherPanel.Controls
+                .OfType<Button>()
+                .Where(button => button.Tag is ExtensionMenuEntry)
+                .ToList();
             List<Button> buttons = _extensionMenuButtonsPanel.Controls
                 .OfType<Button>()
                 .Where(button => !ReferenceEquals(button, _extensionMenuOverflowButton))
                 .ToList();
+            List<Button> items = pages.Concat(buttons).ToList();
 
             _overflowedExtensionMenuButtons.Clear();
-            int available = _extensionMenuButtonsPanel.ClientSize.Width - _extensionMenuButtonsPanel.Padding.Horizontal;
-            int required = buttons.Sum(GetMenuButtonFootprint);
-            if (buttons.Count == 0 || available <= 0 || required <= available)
+            int available = GetExtensionMenuSpace();
+            int required = items.Sum(GetMenuButtonFootprint);
+            if (items.Count == 0 || available <= 0 || required <= available)
             {
-                foreach (Button button in buttons)
+                foreach (Button item in items)
                 {
-                    button.Visible = true;
+                    item.Visible = true;
                 }
 
                 _extensionMenuOverflowButton.Visible = false;
-                return;
             }
-
-            int budget = available - GetMenuButtonFootprint(_extensionMenuOverflowButton);
-            int used = 0;
-            foreach (Button button in buttons)
+            else
             {
-                int footprint = GetMenuButtonFootprint(button);
-                bool fits = _overflowedExtensionMenuButtons.Count == 0 && used + footprint <= budget;
-                button.Visible = fits;
-                if (fits)
+                int budget = available - GetMenuButtonFootprint(_extensionMenuOverflowButton);
+                int used = 0;
+                foreach (Button item in items)
                 {
-                    used += footprint;
+                    int footprint = GetMenuButtonFootprint(item);
+                    bool fits = _overflowedExtensionMenuButtons.Count == 0 && used + footprint <= budget;
+                    item.Visible = fits;
+                    if (fits)
+                    {
+                        used += footprint;
+                    }
+                    else
+                    {
+                        _overflowedExtensionMenuButtons.Add(item);
+                    }
                 }
-                else
-                {
-                    _overflowedExtensionMenuButtons.Add(button);
-                }
-            }
 
-            _extensionMenuOverflowButton.Visible = true;
+                _extensionMenuOverflowButton.Visible = true;
+            }
         }
         finally
         {
             _updatingExtensionMenuOverflow = false;
         }
+
+        _viewSwitcherPanel.UpdateSegmentCorners();
+    }
+
+    /// <summary>
+    /// The width of the menu row left for extension pages and buttons: everything except the logo and name, Log, Web,
+    /// Settings and the clock. Computed from the controls' preferred sizes, so it does not depend on which extension
+    /// items are currently shown. 0 before the window is laid out.
+    /// </summary>
+    private int GetExtensionMenuSpace()
+    {
+        if (_menuLayout is null || _menuLogoLayout is null || _menuLayout.ClientSize.Width <= 0)
+        {
+            return 0;
+        }
+
+        int Footprint(Control control) => IsMenuElementShown(control)
+            ? Math.Max(control.GetPreferredSize(Size.Empty).Width, control.MinimumSize.Width) + control.Margin.Horizontal
+            : 0;
+
+        int used = _menuLogoLayout.GetPreferredSize(Size.Empty).Width + _menuLogoLayout.Margin.Horizontal;
+        used += _viewSwitcherPanel.Padding.Horizontal + _viewSwitcherPanel.Margin.Horizontal;
+        used += Footprint(_logsViewButton) + Footprint(_webViewToggleButton);
+        used += Footprint(_settingsButton);
+        used += Footprint(_menuClockLabel);
+        used += _extensionMenuButtonsPanel.Margin.Horizontal + _extensionMenuButtonsPanel.Padding.Horizontal;
+        return Math.Max(0, _menuLayout.ClientSize.Width - _menuLayout.Padding.Horizontal - used);
     }
 
     private static int GetMenuButtonFootprint(Button button)
@@ -1557,13 +1690,9 @@ public partial class MainForm : Form
 
         foreach (Button button in _extensionMenuButtonsPanel.Controls.OfType<Button>())
         {
-            // Page buttons are view switchers and are coloured with Logs and Web View (UpdateWebViewToggleVisual).
-            if (button.Tag is not ExtensionMenuEntry { Kind: ExtensionMenuEntryKind.Page })
-            {
-                button.BackColor = buttonBackColor;
-                button.ForeColor = buttonTextColor;
-            }
-
+            // Page segments live in the view switcher and are coloured with Log and Web (UpdateWebViewToggleVisual).
+            button.BackColor = buttonBackColor;
+            button.ForeColor = buttonTextColor;
             button.FlatAppearance.BorderColor = buttonBorderColor;
             button.FlatAppearance.BorderSize = 1;
         }
@@ -2114,19 +2243,26 @@ public partial class MainForm : Form
         ProtectPopupMenuFromCapture(_extensionDropdownMenu);
         ProtectPopupMenuFromCapture(_updateBannerSnoozeMenu);
 
+        // The full-width protection banner and button (Log view and extension pages). In Web View the compact card
+        // in the top bar (BuildCompactProtectionCard) shows the same state instead.
         _statusLabel.Dock = DockStyle.Top;
-        _statusLabel.Height = 34;
-        _statusLabel.BorderStyle = BorderStyle.FixedSingle;
+        _statusLabel.Height = ScaleByDpi(32);
+        _statusLabel.BorderStyle = BorderStyle.None;
         _statusLabel.TextAlign = ContentAlignment.MiddleCenter;
-        _statusLabel.Font = new Font("Segoe UI", 10, FontStyle.Bold);
+        _statusLabel.Font = _statusLabelFont;
+        _statusLabel.UseMnemonic = false;
+        // The long text is shortened with "..." on narrow windows; the tooltip always has all of it.
+        _statusLabel.AutoEllipsis = true;
 
         _toggleButton.Dock = DockStyle.Top;
-        _toggleButton.Height = 36;
+        _toggleButton.Height = ScaleByDpi(32);
         _toggleButton.FlatStyle = FlatStyle.Flat;
         _toggleButton.FlatAppearance.BorderColor = Color.FromArgb(158, 177, 201);
         _toggleButton.FlatAppearance.BorderSize = 1;
+        _toggleButton.Font = _stripButtonFont;
         _toggleButton.Text = "Enable Protection";
-        _toggleButton.Click += (_, _) => OnProtectionButtonClick();
+        _toggleButton.UseMnemonic = false;
+        _toggleButton.Click += (_, _) => OnProtectionButtonClick(_toggleButton);
 
         BuildAddressBar();
         BuildHistoryPanel();
@@ -2160,11 +2296,11 @@ public partial class MainForm : Form
             PositionExtensionLauncherPanel();
         };
 
+        // Docked controls stack from the last one added: top bar, update banner, protection banner, tab strip.
         Controls.Add(_contentHostPanel);
-        Controls.Add(_addressBarPanel);
+        Controls.Add(_tabStripPanel);
         Controls.Add(_toggleButton);
         Controls.Add(_statusLabel);
-        // Docked after the status label, so the update banner sits directly above the protection banner.
         Controls.Add(_updateBannerPanel);
         Controls.Add(_menuBarPanel);
 
@@ -2177,28 +2313,50 @@ public partial class MainForm : Form
         // Taken before any custom font is applied, so the default fonts can always be restored.
         RegisterOriginalFonts(this);
         ApplyDpiAwareMetrics();
+        ApplyViewChrome();
         ApplyTheme();
         UpdateWebViewToggleVisual();
         UpdateResponsiveLayout();
         PositionExtensionLauncherPanel();
     }
 
+    /// <summary>
+    /// The top bar. Its first row is the menu: logo and name | Log | Web | extension pages | Settings | extension
+    /// buttons (stretching, extra ones go into the » menu) | clock. The second row is the address row (Web View only),
+    /// and in Web View the compact protection card sits at the right of both rows.
+    /// </summary>
     private void BuildMenuBar()
     {
         _menuBarPanel.Dock = DockStyle.Top;
         _menuBarPanel.AutoSize = true;
         _menuBarPanel.AutoSizeMode = AutoSizeMode.GrowAndShrink;
-        _menuBarPanel.MinimumSize = new Size(0, ScaleByDpi(52));
-        _menuBarPanel.Padding = ScalePadding(12, 8, 12, 8);
+        _menuBarPanel.MinimumSize = new Size(0, ScaleByDpi(44));
+        _menuBarPanel.Padding = ScalePadding(10, 7, 10, 7);
 
-        // Extension buttons live in the stretching column (where the spacer used to be), so however many buttons
-        // extensions add, the built-in controls - Settings in particular - always keep their space. Buttons that
-        // do not fit are moved into an overflow (») menu by UpdateExtensionMenuOverflow.
-        // Columns: logo | Logs | Web View | extension pages and buttons (stretches) | clock | Settings.
+        var headerLayout = new TableLayoutPanel
+        {
+            Dock = DockStyle.Fill,
+            ColumnCount = 2,
+            RowCount = 2,
+            Margin = new Padding(0),
+            Padding = new Padding(0),
+            AutoSize = true,
+            AutoSizeMode = AutoSizeMode.GrowAndShrink,
+        };
+        _headerLayout = headerLayout;
+        headerLayout.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100f));
+        headerLayout.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
+        headerLayout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+        headerLayout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+
+        // Extension buttons live in the stretching column, so however many buttons extensions add, the built-in
+        // controls - Settings in particular - always keep their space. Buttons and pages that do not fit are moved
+        // into an overflow (») menu by UpdateExtensionMenuOverflow.
+        // Columns: logo and name | Log | Web | pages | Settings | extension buttons (stretches) | clock.
         var menuLayout = new TableLayoutPanel
         {
             Dock = DockStyle.Fill,
-            ColumnCount = 6,
+            ColumnCount = 5,
             RowCount = 1,
             Margin = new Padding(0),
             Padding = new Padding(0),
@@ -2212,7 +2370,7 @@ public partial class MainForm : Form
         menuLayout.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
         menuLayout.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100f));
         menuLayout.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
-        menuLayout.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
+        menuLayout.SizeChanged += (_, _) => UpdateExtensionMenuOverflow();
 
         var logoLayout = new TableLayoutPanel
         {
@@ -2230,8 +2388,9 @@ public partial class MainForm : Form
         logoLayout.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
 
         _menuLogoPictureBox.SizeMode = PictureBoxSizeMode.Zoom;
-        _menuLogoPictureBox.Size = new Size(ScaleByDpi(24), ScaleByDpi(24));
-        _menuLogoPictureBox.Margin = ScalePadding(0, 3, 8, 3);
+        _menuLogoPictureBox.Size = new Size(ScaleByDpi(22), ScaleByDpi(22));
+        _menuLogoPictureBox.Margin = ScalePadding(0, 3, 6, 3);
+        _menuLogoPictureBox.Anchor = AnchorStyles.Left;
         _defaultLogoImage = Icon?.ToBitmap() ?? DefaultTabIcon;
         _menuLogoPictureBox.Image = _defaultLogoImage;
 
@@ -2241,17 +2400,29 @@ public partial class MainForm : Form
         _menuLogoLabel.Dock = DockStyle.Fill;
         _menuLogoLabel.Font = _menuTitleFont;
         _menuLogoLabel.TextAlign = ContentAlignment.MiddleLeft;
-        _menuLogoLabel.Margin = ScalePadding(0, 0, 10, 0);
+        _menuLogoLabel.Margin = ScalePadding(0, 0, 12, 0);
         _menuLogoLabel.UseMnemonic = false;
 
         logoLayout.Controls.Add(_menuLogoPictureBox, 0, 0);
         logoLayout.Controls.Add(_menuLogoLabel, 1, 0);
 
-        ConfigureMenuButton(_logsViewButton, "Logs");
+        // Log | Web (and the pages extensions add, see RebuildExtensionMenuButtons) as one segmented control.
+        _viewSwitcherPanel.Anchor = AnchorStyles.Left;
+        _viewSwitcherPanel.Padding = new Padding(ScaleByDpi(1));
+        _viewSwitcherPanel.Margin = ScalePadding(0, 0, 8, 0);
+        _viewSwitcherPanel.AccessibleName = "Views";
+        _viewSwitcherPanel.IsSegmentShown = IsMenuElementShown;
+
+        ConfigureViewSegment(_logsViewButton, "Log");
+        _logsViewButton.AccessibleName = "Log";
         _logsViewButton.Click += async (_, _) => await SetWebViewModeAsync(enableWebView: false);
 
-        ConfigureMenuButton(_webViewToggleButton, "Web View");
+        ConfigureViewSegment(_webViewToggleButton, "Web");
+        _webViewToggleButton.AccessibleName = "Web View";
         _webViewToggleButton.Click += async (_, _) => await SetWebViewModeAsync(enableWebView: true);
+
+        _viewSwitcherPanel.Controls.Add(_logsViewButton);
+        _viewSwitcherPanel.Controls.Add(_webViewToggleButton);
 
         _extensionMenuButtonsPanel.AutoSize = true;
         _extensionMenuButtonsPanel.AutoSizeMode = AutoSizeMode.GrowAndShrink;
@@ -2260,34 +2431,32 @@ public partial class MainForm : Form
         _extensionMenuButtonsPanel.Margin = new Padding(0);
         _extensionMenuButtonsPanel.Padding = new Padding(0);
         _extensionMenuButtonsPanel.FlowDirection = FlowDirection.LeftToRight;
-        _extensionMenuButtonsPanel.SizeChanged += (_, _) => UpdateExtensionMenuOverflow();
 
         ConfigureMenuButton(_extensionMenuOverflowButton, "»");
-        _extensionMenuOverflowButton.MinimumSize = new Size(ScaleByDpi(40), 0);
+        _extensionMenuOverflowButton.MinimumSize = new Size(ScaleByDpi(36), ScaleByDpi(MenuRowControlHeight));
         _extensionMenuOverflowButton.UseMnemonic = false;
         _extensionMenuOverflowButton.Visible = false;
         _extensionMenuOverflowButton.AccessibleName = "More extension buttons";
         _extensionMenuOverflowButton.Click += (_, _) => ShowExtensionMenuOverflow();
 
-        _settingsButton.Text = "Settings";
+        // A round gear button; its icon and tooltip come from the "menu.settings" binding (BuildUiTargetBindings).
+        _settingsButton.Text = string.Empty;
         _settingsButton.AutoSize = true;
         _settingsButton.AutoSizeMode = AutoSizeMode.GrowAndShrink;
-        _settingsButton.Dock = DockStyle.None;
         _settingsButton.Anchor = AnchorStyles.Left;
-        _settingsButton.MinimumSize = new Size(ScaleByDpi(95), 0);
-        _settingsButton.Padding = ScalePadding(12, 4, 12, 4);
-        _settingsButton.Margin = new Padding(0);
-        _settingsButton.FlatStyle = FlatStyle.Flat;
+        _settingsButton.MinimumSize = new Size(ScaleByDpi(MenuRowControlHeight), ScaleByDpi(MenuRowControlHeight));
+        _settingsButton.Padding = new Padding(0);
+        _settingsButton.Margin = ScalePadding(0, 0, 8, 0);
         _settingsButton.FlatAppearance.BorderSize = 1;
-        _settingsButton.UseMnemonic = false;
+        _settingsButton.AccessibleName = "Settings";
         _settingsButton.Click += (_, _) => OpenSettingsWindow();
 
-        // A live clock (with seconds) from the computer's clock, to the left of Settings.
+        // A live clock (with seconds) from the computer's clock, at the right of the menu row.
         _menuClockLabel.AutoSize = true;
-        _menuClockLabel.Anchor = AnchorStyles.Left;
-        _menuClockLabel.TextAlign = ContentAlignment.MiddleCenter;
+        _menuClockLabel.Anchor = AnchorStyles.Right;
+        _menuClockLabel.TextAlign = ContentAlignment.MiddleRight;
         _menuClockLabel.Font = _menuButtonFontRegular;
-        _menuClockLabel.Margin = ScalePadding(6, 0, 10, 0);
+        _menuClockLabel.Margin = ScalePadding(8, 0, 2, 0);
         _menuClockLabel.UseMnemonic = false;
         _menuClockLabel.AccessibleName = "Clock";
         _menuClockLabel.AccessibleRole = AccessibleRole.StaticText;
@@ -2296,13 +2465,100 @@ public partial class MainForm : Form
         UpdateClock();
 
         menuLayout.Controls.Add(logoLayout, 0, 0);
-        menuLayout.Controls.Add(_logsViewButton, 1, 0);
-        menuLayout.Controls.Add(_webViewToggleButton, 2, 0);
+        menuLayout.Controls.Add(_viewSwitcherPanel, 1, 0);
+        menuLayout.Controls.Add(_settingsButton, 2, 0);
         menuLayout.Controls.Add(_extensionMenuButtonsPanel, 3, 0);
         menuLayout.Controls.Add(_menuClockLabel, 4, 0);
-        menuLayout.Controls.Add(_settingsButton, 5, 0);
 
-        _menuBarPanel.Controls.Add(menuLayout);
+        BuildCompactProtectionCard();
+
+        // The address row is configured by BuildAddressBar.
+        _addressBarPanel.Dock = DockStyle.Fill;
+        headerLayout.Controls.Add(menuLayout, 0, 0);
+        headerLayout.Controls.Add(_addressBarPanel, 0, 1);
+        headerLayout.Controls.Add(_compactProtectionPanel, 1, 0);
+        headerLayout.SetRowSpan(_compactProtectionPanel, 2);
+
+        _menuBarPanel.Controls.Add(headerLayout);
+    }
+
+    /// <summary>
+    /// The protection card shown at the right of the top bar in Web View: the status on top (green or salmon, with
+    /// the countdown of a timed disable) and the enable / disable button below. Like the full-width banner, it is not
+    /// an element extensions can change.
+    /// </summary>
+    private void BuildCompactProtectionCard()
+    {
+        _compactProtectionPanel.Dock = DockStyle.Fill;
+        _compactProtectionPanel.Width = ScaleByDpi(CompactProtectionWidth);
+        // It spans both rows and fills their height; a small preferred height keeps it from making the rows taller.
+        _compactProtectionPanel.Height = ScaleByDpi(48);
+        _compactProtectionPanel.Margin = ScalePadding(10, 0, 0, 0);
+        _compactProtectionPanel.Padding = new Padding(1);
+        _compactProtectionPanel.CornerRadius = ScaleByDpi(10);
+        _compactProtectionPanel.HeaderFraction = 0.54f;
+        _compactProtectionPanel.AccessibleName = "Capture protection";
+
+        var layout = new TableLayoutPanel
+        {
+            Dock = DockStyle.Fill,
+            ColumnCount = 1,
+            RowCount = 2,
+            Margin = new Padding(0),
+            Padding = new Padding(0),
+            BackColor = Color.Transparent,
+        };
+        layout.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100f));
+        layout.RowStyles.Add(new RowStyle(SizeType.Percent, 54f));
+        layout.RowStyles.Add(new RowStyle(SizeType.Percent, 46f));
+
+        _compactStatusLabel.Dock = DockStyle.Fill;
+        _compactStatusLabel.TextAlign = ContentAlignment.MiddleCenter;
+        _compactStatusLabel.BackColor = Color.Transparent;
+        _compactStatusLabel.Font = _compactProtectionFont;
+        _compactStatusLabel.Margin = new Padding(0);
+        _compactStatusLabel.UseMnemonic = false;
+        _compactStatusLabel.AutoEllipsis = true;
+
+        _compactToggleButton.Dock = DockStyle.Fill;
+        _compactToggleButton.Font = _compactProtectionFont;
+        _compactToggleButton.Text = "Enable Protection";
+        _compactToggleButton.BackColor = Color.Transparent;
+        _compactToggleButton.Margin = new Padding(0);
+        _compactToggleButton.Padding = new Padding(0);
+        // Its hover highlight follows the card's rounded bottom corners.
+        _compactToggleButton.CornerRadius = ScaleByDpi(9);
+        _compactToggleButton.Corners = RoundedCorners.BottomLeft | RoundedCorners.BottomRight;
+        _compactToggleButton.Click += (_, _) => OnProtectionButtonClick(_compactToggleButton);
+
+        layout.Controls.Add(_compactStatusLabel, 0, 0);
+        layout.Controls.Add(_compactToggleButton, 0, 1);
+        _compactProtectionPanel.Controls.Add(layout);
+    }
+
+    /// <summary>
+    /// Shows the controls that belong to the current view. In Web View: the address row, the tab strip and the compact
+    /// protection card. In the Log view and on extension pages: the full-width protection banner.
+    /// </summary>
+    private void ApplyViewChrome()
+    {
+        bool web = _webViewModeEnabled;
+        SuspendLayout();
+        try
+        {
+            _addressBarPanel.Visible = web;
+            _tabStripPanel.Visible = web;
+            _compactProtectionPanel.Visible = web;
+            _statusLabel.Visible = !web;
+            _toggleButton.Visible = !web;
+        }
+        finally
+        {
+            ResumeLayout(true);
+        }
+
+        UpdateProtectionStatusVisual();
+        UpdateExtensionMenuOverflow();
     }
 
     /// <summary>Shows the computer's current time, including seconds. Never logged: it changes every second.</summary>
@@ -2342,6 +2598,7 @@ public partial class MainForm : Form
         }
     }
 
+    /// <summary>An extension button or dropdown in the menu row: a pill with an outline.</summary>
     private void ConfigureMenuButton(Button button, string text)
     {
         button.Text = text;
@@ -2349,11 +2606,51 @@ public partial class MainForm : Form
         button.AutoSizeMode = AutoSizeMode.GrowAndShrink;
         button.Dock = DockStyle.None;
         button.Anchor = AnchorStyles.Left;
-        button.MinimumSize = new Size(ScaleByDpi(90), 0);
-        button.Padding = ScalePadding(12, 4, 12, 4);
+        button.MinimumSize = new Size(ScaleByDpi(56), ScaleByDpi(MenuRowControlHeight));
+        button.Padding = ScalePadding(12, 0, 12, 0);
         button.Margin = ScalePadding(0, 0, 6, 0);
         button.FlatStyle = FlatStyle.Flat;
         button.FlatAppearance.BorderSize = 1;
+        button.Font = _menuButtonFontRegular;
+    }
+
+    /// <summary>One segment of the Log | Web | extension pages switcher.</summary>
+    private void ConfigureViewSegment(PillButton segment, string text)
+    {
+        segment.Text = text;
+        segment.AutoSize = true;
+        segment.AutoSizeMode = AutoSizeMode.GrowAndShrink;
+        segment.Dock = DockStyle.None;
+        segment.Anchor = AnchorStyles.Left;
+        segment.FlatAppearance.BorderSize = 0;
+        segment.Font = _menuButtonFontRegular;
+        ConfigureSegmentMetrics(segment);
+    }
+
+    /// <summary>A round icon button of the address row (Back, Forward, the star).</summary>
+    private void ConfigureRoundButton(PillButton button, string accessibleName)
+    {
+        button.Text = string.Empty;
+        button.AutoSize = true;
+        button.AutoSizeMode = AutoSizeMode.GrowAndShrink;
+        button.Anchor = AnchorStyles.Left;
+        int size = ScaleByDpi(AddressRowButtonSize);
+        button.MinimumSize = new Size(size, size);
+        button.Padding = new Padding(0);
+        button.FlatAppearance.BorderSize = 1;
+        button.Font = _stripButtonFont;
+        button.AccessibleName = accessibleName;
+        button.TabStop = false;
+    }
+
+    /// <summary>
+    /// Whether a menu row element is meant to be shown. Control.Visible cannot tell: it is false for every control until
+    /// the window is shown. Elements are hidden by an extension (ui.element ... visible false) or by the » overflow.
+    /// </summary>
+    private bool IsMenuElementShown(Control control)
+    {
+        return !_extensionHiddenControls.Contains(control) &&
+               !(control is Button button && _overflowedExtensionMenuButtons.Contains(button));
     }
 
     private void BuildWebViewLoadingOverlay()
@@ -2683,64 +2980,72 @@ public partial class MainForm : Form
         return value.LocalDateTime.ToString("yyyy-MM-dd HH:mm", CultureInfo.InvariantCulture);
     }
 
+    /// <summary>
+    /// The address row of the top bar (Web View only): Back | Forward | the address box (with the protocol badge and
+    /// Refresh inside it) | favourite star | Favorites | the zoom group. Also builds the tab strip below the top bar.
+    /// </summary>
     private void BuildAddressBar()
     {
-        _addressBarPanel.Dock = DockStyle.Top;
-        _addressBarPanel.Height = ScaleByDpi(104);
-        _addressBarPanel.BackColor = Color.FromArgb(243, 247, 252);
-        _addressBarPanel.Padding = ScalePadding(8, 8, 8, 6);
+        _addressBarPanel.Height = ScaleByDpi(AddressRowHeight);
+        _addressBarPanel.Margin = ScalePadding(0, 6, 0, 0);
+        _addressBarPanel.Padding = new Padding(0);
         _addressBarPanel.Visible = false;
-        _addressBarPanel.SizeChanged += (_, _) =>
-        {
-            UpdateTabLayout();
-            UpdateAddressStripLayout();
-        };
-
-        _addressRootLayout = new TableLayoutPanel
-        {
-            Dock = DockStyle.Fill,
-            ColumnCount = 1,
-            RowCount = 2,
-            Margin = new Padding(0),
-            Padding = new Padding(0),
-        };
-        TableLayoutPanel rootLayout = _addressRootLayout;
-        rootLayout.RowStyles.Add(new RowStyle(SizeType.Absolute, 38f));
-        rootLayout.RowStyles.Add(new RowStyle(SizeType.Percent, 100f));
+        _addressBarPanel.SizeChanged += (_, _) => UpdateAddressStripLayout();
 
         _addressStripLayout = new TableLayoutPanel
         {
             Dock = DockStyle.Fill,
-            ColumnCount = 7,
+            ColumnCount = 6,
             RowCount = 1,
             Margin = new Padding(0),
             Padding = new Padding(0),
         };
         TableLayoutPanel stripLayout = _addressStripLayout;
-        stripLayout.RowStyles.Add(new RowStyle(SizeType.Absolute, 36f));
-
+        stripLayout.RowStyles.Add(new RowStyle(SizeType.Percent, 100f));
+        stripLayout.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
+        stripLayout.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
         stripLayout.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100f));
-        stripLayout.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, DefaultBackButtonWidth));
-        stripLayout.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, DefaultGoButtonWidth));
-        stripLayout.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, DefaultRefreshButtonWidth));
-        stripLayout.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, DefaultHistoryButtonWidth));
-        stripLayout.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, DefaultZoomLabelWidth));
-        stripLayout.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, DefaultZoomSliderWidth));
+        stripLayout.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
+        stripLayout.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
+        stripLayout.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
+
+        // Icons and tooltips of the round buttons come from their bindings (BuildUiTargetBindings).
+        ConfigureRoundButton(_backButton, "Back");
+        _backButton.Enabled = false;
+        _backButton.Click += (_, _) => GoBack();
+
+        ConfigureRoundButton(_forwardButton, "Forward");
+        _forwardButton.Enabled = false;
+        _forwardButton.Click += (_, _) => GoForward();
+
+        // The address box: a rounded pill holding the borderless text box, the protocol badge and Refresh.
+        _addressPill.Dock = DockStyle.Fill;
+        _addressPill.Padding = ScalePadding(12, 0, 3, 0);
+        _addressPill.Margin = ScalePadding(0, 2, 0, 2);
+        _addressPill.Cursor = Cursors.IBeam;
+        _addressPill.Click += (_, _) => _addressBarTextBox.Focus();
 
         var addressInputLayout = new TableLayoutPanel
         {
             Dock = DockStyle.Fill,
-            ColumnCount = 2,
+            ColumnCount = 3,
             RowCount = 1,
             Margin = new Padding(0),
             Padding = new Padding(0),
+            BackColor = Color.Transparent,
         };
         _addressInputLayout = addressInputLayout;
+        addressInputLayout.RowStyles.Add(new RowStyle(SizeType.Percent, 100f));
         addressInputLayout.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100f));
-        addressInputLayout.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, ScaleByDpi(32)));
+        addressInputLayout.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
+        addressInputLayout.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
+        addressInputLayout.Click += (_, _) => _addressBarTextBox.Focus();
 
-        _addressBarTextBox.Dock = DockStyle.Fill;
+        _addressBarTextBox.BorderStyle = BorderStyle.None;
+        _addressBarTextBox.Anchor = AnchorStyles.Left | AnchorStyles.Right;
+        _addressBarTextBox.Margin = ScalePadding(0, 0, 6, 0);
         _addressBarTextBox.PlaceholderText = _settings.StartingPage;
+        _addressBarTextBox.AccessibleName = "Address";
         _addressBarTextBox.KeyDown += (_, e) =>
         {
             if (e.KeyCode == Keys.Enter)
@@ -2749,115 +3054,142 @@ public partial class MainForm : Form
                 NavigateToAddressBarUrl();
             }
         };
+        // The pill is drawn in the address box's colour, so an extension's address.bar background shows on all of it.
+        _addressBarTextBox.BackColorChanged += (_, _) => _addressPill.FillColor = _addressBarTextBox.BackColor;
 
-        _favoriteButton.Text = "✩";
-        _favoriteButton.Dock = DockStyle.Fill;
-        _favoriteButton.Margin = ScalePadding(3, 2, 0, 2);
-        _favoriteButton.Font = _favoriteButtonFont;
-        _favoriteButton.FlatStyle = FlatStyle.Flat;
-        _favoriteButton.FlatAppearance.BorderColor = SystemColors.ControlDark;
-        _favoriteButton.FlatAppearance.BorderSize = 1;
-        _favoriteButton.Click += (_, _) => ToggleFavoriteForCurrentPage();
-        _favoriteButton.TabStop = false;
+        // Shown while a protocol other than WebView2 is in use (see UpdateProtocolBadge).
+        _protocolBadgeLabel.AutoSize = true;
+        _protocolBadgeLabel.Anchor = AnchorStyles.None;
+        _protocolBadgeLabel.Font = _protocolBadgeFont;
+        _protocolBadgeLabel.BackColor = Color.Transparent;
+        _protocolBadgeLabel.UseMnemonic = false;
+        _protocolBadgeLabel.Visible = false;
+        _protocolBadgeLabel.Margin = ScalePadding(0, 0, 4, 0);
+        _protocolBadgeLabel.Padding = ScalePadding(6, 1, 6, 1);
 
-        addressInputLayout.Controls.Add(_addressBarTextBox, 0, 0);
-        addressInputLayout.Controls.Add(_favoriteButton, 1, 0);
-
-        _backButton.Text = "Back";
-        _backButton.Dock = DockStyle.Fill;
-        _backButton.Enabled = false;
-        ConfigureStripButton(_backButton);
-        _backButton.Click += (_, _) => GoBack();
-
-        _goButton.Text = "Go";
-        _goButton.Dock = DockStyle.Fill;
-        ConfigureStripButton(_goButton);
-        _goButton.Click += (_, _) => NavigateToAddressBarUrl();
-
-        _refreshButton.Text = "Refresh";
-        _refreshButton.Dock = DockStyle.Fill;
-        ConfigureStripButton(_refreshButton);
+        _refreshButton.Text = string.Empty;
+        _refreshButton.AutoSize = true;
+        _refreshButton.AutoSizeMode = AutoSizeMode.GrowAndShrink;
+        _refreshButton.Anchor = AnchorStyles.None;
+        _refreshButton.BackColor = Color.Transparent;
+        _refreshButton.FlatAppearance.BorderSize = 0;
+        _refreshButton.Font = _stripButtonFont;
+        _refreshButton.AccessibleName = "Refresh";
+        _refreshButton.TabStop = false;
         _refreshButton.Click += (_, _) => RefreshWebView();
 
-        _historyButton.Text = "History";
-        _historyButton.Dock = DockStyle.Fill;
-        ConfigureStripButton(_historyButton);
+        addressInputLayout.Controls.Add(_addressBarTextBox, 0, 0);
+        addressInputLayout.Controls.Add(_protocolBadgeLabel, 1, 0);
+        addressInputLayout.Controls.Add(_refreshButton, 2, 0);
+        _addressPill.Controls.Add(addressInputLayout);
+
+        ConfigureRoundButton(_favoriteButton, "Favourite");
+        _favoriteButton.Click += (_, _) => ToggleFavoriteForCurrentPage();
+
+        // Opens the history and favourites panel (it used to be the History button).
+        _historyButton.Text = "Favorites";
+        _historyButton.AutoSize = true;
+        _historyButton.AutoSizeMode = AutoSizeMode.GrowAndShrink;
+        _historyButton.Anchor = AnchorStyles.Left;
+        _historyButton.FlatAppearance.BorderSize = 1;
+        _historyButton.Font = _stripButtonFont;
+        _historyButton.AccessibleName = "History and favourites";
+        _historyButton.TabStop = false;
         _historyButton.Click += (_, _) => ToggleHistoryPanel();
 
+        // Zoom: the label (click to go back to 100%) and the - and + buttons on one rounded track.
+        _zoomGroupPanel.Anchor = AnchorStyles.Left;
+        _zoomGroupPanel.AccessibleName = "Zoom";
         _zoomLabel.Text = "Zoom 100%";
-        _zoomLabel.Dock = DockStyle.Fill;
-        _zoomLabel.TextAlign = ContentAlignment.MiddleCenter;
-        _zoomLabel.Margin = ScalePadding(3, 2, 3, 2);
+        _zoomLabel.AutoSize = true;
+        _zoomLabel.AutoSizeMode = AutoSizeMode.GrowAndShrink;
+        _zoomLabel.BackColor = Color.Transparent;
         _zoomLabel.Font = _zoomLabelFont;
+        _zoomLabel.Margin = new Padding(0);
+        _zoomLabel.AccessibleName = "Reset zoom";
+        _zoomLabel.TabStop = false;
+        _zoomLabel.Click += (_, _) => SetActiveTabZoom(100);
 
-        _zoomSlider.Minimum = 50;
-        _zoomSlider.Maximum = 200;
-        _zoomSlider.Value = 100;
-        _zoomSlider.TickFrequency = 10;
-        _zoomSlider.AutoSize = false;
-        _zoomSlider.Dock = DockStyle.Fill;
-        _zoomSlider.Margin = ScalePadding(3, 4, 3, 2);
-        _zoomSlider.Scroll += (_, _) => ApplyZoom();
+        foreach ((PillButton zoomButton, string name, int direction) in new[]
+                 {
+                     (_zoomOutButton, "Zoom out", -1),
+                     (_zoomInButton, "Zoom in", 1),
+                 })
+        {
+            zoomButton.Text = string.Empty;
+            zoomButton.AutoSize = false;
+            zoomButton.Size = new Size(ScaleByDpi(AddressRowButtonSize - 2), ScaleByDpi(AddressRowButtonSize - 2));
+            zoomButton.Anchor = AnchorStyles.None;
+            zoomButton.BackColor = Color.Transparent;
+            zoomButton.FlatAppearance.BorderSize = 0;
+            zoomButton.AccessibleName = name;
+            zoomButton.TabStop = false;
+            _chromeToolTip.SetToolTip(zoomButton, name);
+            zoomButton.Click += (_, _) => StepActiveTabZoom(direction);
+        }
 
-        stripLayout.Controls.Add(addressInputLayout, 0, 0);
-        stripLayout.Controls.Add(_backButton, 1, 0);
-        stripLayout.Controls.Add(_goButton, 2, 0);
-        stripLayout.Controls.Add(_refreshButton, 3, 0);
+        _zoomGroupPanel.Controls.Add(_zoomLabel);
+        _zoomGroupPanel.Controls.Add(_zoomOutButton);
+        _zoomGroupPanel.Controls.Add(_zoomInButton);
+
+        stripLayout.Controls.Add(_backButton, 0, 0);
+        stripLayout.Controls.Add(_forwardButton, 1, 0);
+        stripLayout.Controls.Add(_addressPill, 2, 0);
+        stripLayout.Controls.Add(_favoriteButton, 3, 0);
         stripLayout.Controls.Add(_historyButton, 4, 0);
-        stripLayout.Controls.Add(_zoomLabel, 5, 0);
-        stripLayout.Controls.Add(_zoomSlider, 6, 0);
+        stripLayout.Controls.Add(_zoomGroupPanel, 5, 0);
+        _addressBarPanel.Controls.Add(stripLayout);
+
+        BuildTabStrip();
+        UpdateAddressStripLayout();
+        UpdateFavoriteButtonState();
+    }
+
+    /// <summary>The tab strip below the top bar (Web View only): Chrome-style tabs and the + button.</summary>
+    private void BuildTabStrip()
+    {
+        _tabStripPanel.Dock = DockStyle.Top;
+        _tabStripPanel.Height = ScaleByDpi(TabStripHeight);
+        _tabStripPanel.Padding = ScalePadding(8, 5, 8, 0);
+        _tabStripPanel.Visible = false;
+        _tabStripPanel.SizeChanged += (_, _) => UpdateTabLayout();
 
         _tabsLayout = new TableLayoutPanel
         {
             Dock = DockStyle.Fill,
             ColumnCount = 2,
             RowCount = 1,
-            Margin = new Padding(0, 4, 0, 0),
+            Margin = new Padding(0),
             Padding = new Padding(0),
         };
         TableLayoutPanel tabsLayout = _tabsLayout;
         tabsLayout.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100f));
-        tabsLayout.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 40f));
+        tabsLayout.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, ScaleByDpi(36)));
         tabsLayout.RowStyles.Add(new RowStyle(SizeType.Percent, 100f));
 
         _tabsFlowPanel.Dock = DockStyle.Fill;
         _tabsFlowPanel.FlowDirection = FlowDirection.LeftToRight;
         _tabsFlowPanel.WrapContents = false;
+        // Tabs shrink to fit; with very many tabs a scroll bar keeps the last ones reachable.
         _tabsFlowPanel.AutoScroll = true;
         _tabsFlowPanel.Margin = new Padding(0);
         _tabsFlowPanel.Padding = new Padding(0);
         _tabsFlowPanel.SizeChanged += (_, _) => UpdateTabLayout();
 
-        _newTabButton.Text = "+";
-        _newTabButton.Dock = DockStyle.Fill;
-        _newTabButton.Font = _newTabButtonFont;
-        _newTabButton.TextAlign = ContentAlignment.MiddleCenter;
-        _newTabButton.FlatStyle = FlatStyle.Flat;
-        _newTabButton.FlatAppearance.BorderColor = SystemColors.ControlDark;
-        _newTabButton.FlatAppearance.BorderSize = 1;
+        _newTabButton.Text = string.Empty;
         _newTabButton.AutoSize = false;
-        _newTabButton.MinimumSize = new Size(ScaleByDpi(36), ScaleByDpi(28));
-        _newTabButton.Padding = new Padding(0);
-        _newTabButton.Margin = ScalePadding(2, 0, 0, 0);
+        _newTabButton.Anchor = AnchorStyles.Left;
+        _newTabButton.BackColor = Color.Transparent;
+        _newTabButton.FlatAppearance.BorderSize = 0;
+        _newTabButton.Font = _newTabButtonFont;
+        _newTabButton.Size = new Size(ScaleByDpi(26), ScaleByDpi(26));
+        _newTabButton.Margin = ScalePadding(4, 1, 0, 2);
+        _newTabButton.TabStop = false;
         _newTabButton.Click += async (_, _) => await CreateTabAsync(GetConfiguredStartPage(), activate: true);
 
         tabsLayout.Controls.Add(_tabsFlowPanel, 0, 0);
         tabsLayout.Controls.Add(_newTabButton, 1, 0);
-
-        rootLayout.Controls.Add(stripLayout, 0, 0);
-        rootLayout.Controls.Add(tabsLayout, 0, 1);
-
-        _addressBarPanel.Controls.Add(rootLayout);
-        UpdateAddressStripLayout();
-        UpdateFavoriteButtonState();
-    }
-
-    private void ConfigureStripButton(Button button)
-    {
-        button.AutoSize = false;
-        button.Margin = ScalePadding(3, 2, 3, 2);
-        button.Font = _stripButtonFont;
-        button.UseMnemonic = false;
+        _tabStripPanel.Controls.Add(tabsLayout);
     }
 
     private void BuildHistoryPanel()
@@ -3031,7 +3363,7 @@ public partial class MainForm : Form
 
                 HideExtensionPageView();
                 _webViewModeEnabled = true;
-                _addressBarPanel.Visible = true;
+                ApplyViewChrome();
                 _webViewHostPanel.Visible = true;
                 _logBox.Visible = false;
                 _historyPanel.Visible = false;
@@ -3089,7 +3421,7 @@ public partial class MainForm : Form
         _historyPanel.Visible = false;
         _historyButton.BackColor = GetCommandButtonBackColor();
         HideFindPanel(clearHighlights: true);
-        _addressBarPanel.Visible = false;
+        ApplyViewChrome();
         _webViewHostPanel.Visible = false;
         UpdateTabVisibilityAndRendering();
         UpdateZoomControlsForActiveTab();
@@ -3186,20 +3518,24 @@ public partial class MainForm : Form
                source.Equals("about:blank", StringComparison.OrdinalIgnoreCase);
     }
 
-    /// <summary>Highlights the active view: Logs, Web View or one of the extension pages.</summary>
+    /// <summary>Highlights the active view: Log, Web or one of the extension pages.</summary>
     private void UpdateWebViewToggleVisual()
     {
         ThemePalette palette = _palette;
+        Color selectedText = ResolveTextColor(palette.ViewSelectedText);
+        Color normalText = ResolveTextColor(palette.ViewNormalText);
+        Color selectedBack = ResolveSurfaceBack(palette.ViewSelectedBack, selectedText);
 
+        // The selected segment is filled; the others show the switcher's track.
         void StyleViewButton(Button button, bool selected)
         {
-            button.BackColor = selected ? palette.ViewSelectedBack : palette.ViewNormalBack;
-            button.ForeColor = ResolveTextColor(selected ? palette.ViewSelectedText : palette.ViewNormalText);
+            button.BackColor = selected ? selectedBack : Color.Transparent;
+            button.ForeColor = selected ? selectedText : normalText;
         }
 
         StyleViewButton(_logsViewButton, IsLogsViewSelected);
         StyleViewButton(_webViewToggleButton, _webViewModeEnabled);
-        foreach (Button button in _extensionMenuButtonsPanel.Controls.OfType<Button>())
+        foreach (Button button in _viewSwitcherPanel.Controls.OfType<Button>())
         {
             if (button.Tag is ExtensionMenuEntry { Kind: ExtensionMenuEntryKind.Page } entry)
             {
@@ -3281,7 +3617,7 @@ public partial class MainForm : Form
             Visible = false,
         };
 
-        Panel tabHeader = CreateTabHeaderPanel(out PictureBox faviconBox, out Label titleLabel, out Button closeButton);
+        TabHeaderPanel tabHeader = CreateTabHeaderPanel(out PictureBox faviconBox, out Label titleLabel, out PillButton closeButton);
         var tab = new BrowserTab(_nextTabId++, webView, tabHeader, faviconBox, titleLabel, closeButton);
 
         tabHeader.Tag = tab;
@@ -3308,13 +3644,13 @@ public partial class MainForm : Form
             _tabByCore[core] = tab;
             EnsureWorkerRequestFilter(core);
 
-            if (!_sessionDataCleared)
-            {
-                await ClearWebSiteDataAsync(core);
-                _sessionDataCleared = true;
-            }
+            // The first tab clears what an earlier run could have left and puts back the saved cookies. Tabs opened
+            // while that is still running wait for it rather than clearing again (which could delete those cookies).
+            _webSessionPreparation ??= PrepareWebSessionAsync(core);
+            await _webSessionPreparation;
 
             webView.ZoomFactor = tab.ZoomPercent / 100.0;
+            webView.ZoomFactorChanged += (_, _) => OnTabZoomFactorChanged(tab);
         }
         catch (Exception ex)
         {
@@ -3347,18 +3683,17 @@ public partial class MainForm : Form
         return tab;
     }
 
-    private Panel CreateTabHeaderPanel(
+    private TabHeaderPanel CreateTabHeaderPanel(
         out PictureBox faviconBox,
         out Label titleLabel,
-        out Button closeButton)
+        out PillButton closeButton)
     {
-        var header = new Panel
+        var header = new TabHeaderPanel
         {
-            Height = ScaleByDpi(28),
+            Height = ScaleByDpi(29),
             Width = ScaleByDpi(180),
-            Margin = ScalePadding(0, 0, 2, 0),
-            Padding = ScalePadding(4, 4, 4, 3),
-            BackColor = Color.FromArgb(235, 240, 247),
+            Margin = new Padding(0),
+            Padding = ScalePadding(10, 0, 6, 0),
             Cursor = Cursors.Hand,
         };
 
@@ -3366,31 +3701,26 @@ public partial class MainForm : Form
         {
             Dock = DockStyle.Left,
             Width = ScaleByDpi(16),
-            Height = ScaleByDpi(16),
-            SizeMode = PictureBoxSizeMode.StretchImage,
+            SizeMode = PictureBoxSizeMode.Zoom,
             Image = DefaultTabIcon,
             Margin = new Padding(0),
+            BackColor = Color.Transparent,
             Cursor = Cursors.Hand,
         };
 
-        closeButton = new Button
+        closeButton = new PillButton
         {
             Dock = DockStyle.Right,
-            Width = ScaleByDpi(22),
-            Text = "X",
+            Width = ScaleByDpi(20),
+            Text = "×",
             Font = MapFont(_tabCloseFontRegular),
             Tag = TabCloseButtonTag,
             AccessibleName = "Close tab",
-            TextAlign = ContentAlignment.MiddleCenter,
             Padding = new Padding(0),
             Margin = new Padding(0),
-            FlatStyle = FlatStyle.Flat,
             TabStop = false,
-            BackColor = Color.FromArgb(243, 244, 247),
-            Cursor = Cursors.Hand,
+            BackColor = Color.Transparent,
         };
-        closeButton.FlatAppearance.BorderSize = 1;
-        closeButton.FlatAppearance.BorderColor = Color.FromArgb(195, 199, 207);
 
         titleLabel = new Label
         {
@@ -3400,13 +3730,28 @@ public partial class MainForm : Form
             TextAlign = ContentAlignment.MiddleLeft,
             Font = _tabTitleFont,
             UseMnemonic = false,
-            Padding = new Padding(6, 0, 0, 0),
+            Padding = ScalePadding(7, 0, 2, 0),
+            BackColor = Color.Transparent,
             Cursor = Cursors.Hand,
         };
 
         header.Controls.Add(titleLabel);
         header.Controls.Add(closeButton);
         header.Controls.Add(faviconBox);
+
+        // Hovering anywhere on the tab - including its icon, title and close button - highlights it.
+        foreach (Control part in new Control[] { faviconBox, titleLabel, closeButton })
+        {
+            part.MouseEnter += (_, _) => header.SetHovered(true);
+            part.MouseLeave += (_, _) =>
+            {
+                if (!header.IsDisposed && !header.ClientRectangle.Contains(header.PointToClient(MousePosition)))
+                {
+                    header.SetHovered(false);
+                }
+            };
+        }
+
         RegisterOriginalFonts(header);
         ApplyAppFontToTree(header);
         return header;
@@ -3480,7 +3825,8 @@ public partial class MainForm : Form
 
     private void ConfigureCoreSettings(CoreWebView2 core)
     {
-        core.Settings.IsScriptEnabled = true;
+        // Off under OpenHTML: pages are shown without running their JavaScript.
+        core.Settings.IsScriptEnabled = IsScriptEnabledFor(_settings.WebViewProtocol);
         core.Settings.AreDefaultContextMenusEnabled = true;
         core.Settings.IsStatusBarEnabled = true;
         core.Settings.AreDevToolsEnabled = false;
@@ -3492,6 +3838,22 @@ public partial class MainForm : Form
     {
         core.CookieManager.DeleteAllCookies();
         await core.Profile.ClearBrowsingDataAsync();
+    }
+
+    /// <summary>Runs once per session, for the first tab: every tab shares one cookie store and profile.</summary>
+    private async Task PrepareWebSessionAsync(CoreWebView2 core)
+    {
+        try
+        {
+            await ClearWebSiteDataAsync(core);
+        }
+        catch (Exception ex) when (ex is InvalidOperationException or ObjectDisposedException or System.Runtime.InteropServices.COMException)
+        {
+            Log($"Web session data could not be cleared: {ex.Message}");
+        }
+
+        // Before the first page loads, so sites see the saved cookies from the start.
+        RestoreSavedCookies(core);
     }
 
     private void AttachCoreHandlers(CoreWebView2 core)
@@ -3700,13 +4062,20 @@ public partial class MainForm : Form
         ThemePalette palette = _palette;
         Color activeTextColor = ResolveTextColor(palette.TabActiveText);
         Color inactiveTextColor = ResolveTextColor(palette.TabInactiveText);
+        Color activeBack = ResolveSurfaceBack(palette.TabActiveBack, activeTextColor);
+        Color separator = Color.FromArgb(90, inactiveTextColor);
 
-        foreach (BrowserTab tab in _tabs)
+        for (int i = 0; i < _tabs.Count; i++)
         {
+            BrowserTab tab = _tabs[i];
             bool active = ReferenceEquals(tab, _activeTab);
+            // No separator next to the active tab (its rounded shape already marks it) or after the last tab.
+            bool nextIsActive = i + 1 < _tabs.Count && ReferenceEquals(_tabs[i + 1], _activeTab);
+            bool last = i == _tabs.Count - 1;
             Color textColor = active ? activeTextColor : inactiveTextColor;
-            tab.HeaderPanel.BackColor = ResolveSurfaceBack(active ? palette.TabActiveBack : palette.TabInactiveBack, textColor);
-            tab.CloseButton.BackColor = ResolveSurfaceBack(active ? palette.TabCloseActiveBack : palette.TabCloseInactiveBack, textColor);
+            tab.HeaderPanel.IsActive = active;
+            tab.HeaderPanel.FillColor = activeBack;
+            tab.HeaderPanel.SeparatorColor = active || nextIsActive || last ? Color.Empty : separator;
             tab.CloseButton.ForeColor = textColor;
             tab.TitleLabel.ForeColor = textColor;
         }
@@ -3719,49 +4088,54 @@ public partial class MainForm : Form
             return;
         }
 
-        const int tabGap = 2;
-        int scaledTabGap = ScaleByDpi(tabGap);
-        int compactCloseWidthMinimum = Math.Max(ScaleByDpi(14), TextRenderer.MeasureText("X", _tabCloseFontCompact).Width + ScaleByDpi(6));
-        int regularCloseWidth = Math.Max(ScaleByDpi(22), TextRenderer.MeasureText("X", _tabCloseFontRegular).Width + ScaleByDpi(8));
-        int minimumCompactTabWidth = compactCloseWidthMinimum + ScaleByDpi(10);
-        int totalGap = (_tabs.Count - 1) * scaledTabGap;
-        int available = Math.Max(1, _tabsFlowPanel.ClientSize.Width - totalGap);
+        int compactCloseWidth = Math.Max(ScaleByDpi(14), TextRenderer.MeasureText("×", _tabCloseFontCompact).Width + ScaleByDpi(4));
+        int regularCloseWidth = Math.Max(ScaleByDpi(20), TextRenderer.MeasureText("×", _tabCloseFontRegular).Width + ScaleByDpi(6));
+        int minimumCompactTabWidth = compactCloseWidth + ScaleByDpi(12);
+        int available = Math.Max(1, _tabsFlowPanel.ClientSize.Width);
         int rawWidth = Math.Max(1, available / _tabs.Count);
-        bool compact = rawWidth < ScaleByDpi(130);
+        bool compact = rawWidth < ScaleByDpi(120);
         int targetWidth = compact
             ? Math.Max(minimumCompactTabWidth, rawWidth)
-            : Math.Clamp(rawWidth, ScaleByDpi(130), ScaleByDpi(220));
+            : Math.Clamp(rawWidth, ScaleByDpi(120), ScaleByDpi(230));
+        int height = Math.Max(ScaleByDpi(22), _tabsFlowPanel.ClientSize.Height);
 
-        for (int i = 0; i < _tabs.Count; i++)
+        _tabsFlowPanel.SuspendLayout();
+        try
         {
-            BrowserTab tab = _tabs[i];
-            tab.HeaderPanel.Width = targetWidth;
-            tab.HeaderPanel.Height = compact ? ScaleByDpi(26) : ScaleByDpi(28);
-            tab.HeaderPanel.Margin = new Padding(0, 0, i == _tabs.Count - 1 ? 0 : scaledTabGap, 0);
-
-            if (compact)
+            foreach (BrowserTab tab in _tabs)
             {
-                int closeWidth = Math.Clamp(targetWidth / 2, compactCloseWidthMinimum, compactCloseWidthMinimum + 4);
-                int iconWidth = Math.Clamp(targetWidth - closeWidth - ScaleByDpi(2), ScaleByDpi(8), ScaleByDpi(14));
+                tab.HeaderPanel.Width = targetWidth;
+                tab.HeaderPanel.Height = height;
+                tab.HeaderPanel.Margin = new Padding(0);
 
-                tab.HeaderPanel.Padding = ScalePadding(0, 3, 0, 2);
-                tab.TitleLabel.Visible = false;
-                tab.CloseButton.Width = closeWidth;
-                tab.CloseButton.Font = MapFont(_tabCloseFontCompact);
-                tab.CloseButton.FlatAppearance.BorderSize = 0;
-                tab.FaviconBox.Width = iconWidth;
-                tab.FaviconBox.Height = iconWidth;
+                // Docked children fill the height inside the padding, so the vertical padding makes the close button
+                // a small circle centred in the tab.
+                if (compact)
+                {
+                    int closeWidth = Math.Clamp(targetWidth / 2, compactCloseWidth, compactCloseWidth + ScaleByDpi(4));
+                    int iconWidth = Math.Clamp(targetWidth - closeWidth - ScaleByDpi(6), ScaleByDpi(8), ScaleByDpi(14));
+                    int verticalPadding = Math.Max(0, (height - closeWidth) / 2);
+
+                    tab.HeaderPanel.Padding = new Padding(ScaleByDpi(3), verticalPadding, ScaleByDpi(2), verticalPadding);
+                    tab.TitleLabel.Visible = false;
+                    tab.CloseButton.Width = closeWidth;
+                    tab.CloseButton.Font = MapFont(_tabCloseFontCompact);
+                    tab.FaviconBox.Width = iconWidth;
+                }
+                else
+                {
+                    int verticalPadding = Math.Max(0, (height - regularCloseWidth) / 2);
+                    tab.HeaderPanel.Padding = new Padding(ScaleByDpi(10), verticalPadding, ScaleByDpi(6), verticalPadding);
+                    tab.TitleLabel.Visible = true;
+                    tab.CloseButton.Width = regularCloseWidth;
+                    tab.CloseButton.Font = MapFont(_tabCloseFontRegular);
+                    tab.FaviconBox.Width = ScaleByDpi(16);
+                }
             }
-            else
-            {
-                tab.HeaderPanel.Padding = ScalePadding(4, 4, 4, 3);
-                tab.TitleLabel.Visible = true;
-                tab.CloseButton.Width = regularCloseWidth;
-                tab.CloseButton.Font = MapFont(_tabCloseFontRegular);
-                tab.CloseButton.FlatAppearance.BorderSize = 1;
-                tab.FaviconBox.Width = ScaleByDpi(16);
-                tab.FaviconBox.Height = ScaleByDpi(16);
-            }
+        }
+        finally
+        {
+            _tabsFlowPanel.ResumeLayout(true);
         }
     }
 
@@ -4072,6 +4446,23 @@ public partial class MainForm : Form
         Log("Web back navigation requested.");
     }
 
+    private void GoForward()
+    {
+        if (!_webViewInitialized || _activeTab?.WebView.CoreWebView2 is null)
+        {
+            Log("Forward navigation requested before Web View was initialized.");
+            return;
+        }
+
+        if (!_activeTab.WebView.CoreWebView2.CanGoForward)
+        {
+            return;
+        }
+
+        _activeTab.WebView.CoreWebView2.GoForward();
+        Log("Web forward navigation requested.");
+    }
+
     private void RefreshWebView()
     {
         if (!_webViewInitialized || _activeTab?.WebView.CoreWebView2 is null)
@@ -4164,22 +4555,61 @@ public partial class MainForm : Form
         NavigateTabToUrl(_activeTab, normalizedUrl, "History navigation");
     }
 
-    private void ApplyZoom()
+    /// <summary>The + and - buttons: moves the active tab's zoom to the next step up or down.</summary>
+    private void StepActiveTabZoom(int direction)
     {
-        _zoomLabel.Text = $"Zoom {_zoomSlider.Value}%";
+        if (_activeTab is null)
+        {
+            return;
+        }
+
+        int current = _activeTab.ZoomPercent;
+        int target = direction > 0
+            ? ZoomSteps.FirstOrDefault(step => step > current, ZoomSteps[^1])
+            : ZoomSteps.LastOrDefault(step => step < current, ZoomSteps[0]);
+        SetActiveTabZoom(target);
+    }
+
+    private void SetActiveTabZoom(int percent)
+    {
         if (!_webViewInitialized || _activeTab?.WebView.CoreWebView2 is null)
         {
             return;
         }
 
-        double zoom = _zoomSlider.Value / 100.0;
-        _activeTab.ZoomPercent = _zoomSlider.Value;
-        _activeTab.WebView.ZoomFactor = zoom;
+        percent = Math.Clamp(percent, ZoomSteps[0], ZoomSteps[^1]);
+        _activeTab.ZoomPercent = percent;
+        _activeTab.WebView.ZoomFactor = percent / 100.0;
+        UpdateZoomControlsForActiveTab();
 
-        // Dragging the slider changes the zoom many times a second; only the final value is logged.
-        _pendingZoomLog = (_activeTab.Id, _zoomSlider.Value);
+        // Clicking + or - several times in a row is logged once, with the final value.
+        _pendingZoomLog = (_activeTab.Id, percent);
         _zoomLogTimer.Stop();
         _zoomLogTimer.Start();
+    }
+
+    /// <summary>
+    /// The page's own zoom shortcuts (Ctrl + mouse wheel, Ctrl + plus/minus/0) change the zoom inside WebView2. The tab
+    /// remembers it, so the zoom label is right and switching tabs keeps each tab's zoom.
+    /// </summary>
+    private void OnTabZoomFactorChanged(BrowserTab tab)
+    {
+        if (!_tabs.Contains(tab))
+        {
+            return;
+        }
+
+        int percent = (int)Math.Round(tab.WebView.ZoomFactor * 100);
+        if (percent == tab.ZoomPercent)
+        {
+            return;
+        }
+
+        tab.ZoomPercent = percent;
+        if (ReferenceEquals(tab, _activeTab))
+        {
+            UpdateZoomControlsForActiveTab();
+        }
     }
 
     private void OnZoomLogTimerTick(object? sender, EventArgs e)
@@ -4194,9 +4624,9 @@ public partial class MainForm : Form
 
     private void UpdateNavigationButtons()
     {
-        _backButton.Enabled = _webViewModeEnabled &&
-                              _activeTab?.WebView.CoreWebView2 is not null &&
-                              _activeTab.WebView.CoreWebView2.CanGoBack;
+        CoreWebView2? core = _webViewModeEnabled ? _activeTab?.WebView.CoreWebView2 : null;
+        _backButton.Enabled = core?.CanGoBack == true;
+        _forwardButton.Enabled = core?.CanGoForward == true;
     }
 
     private void RefreshHistoryPanelItems()
@@ -4275,7 +4705,7 @@ public partial class MainForm : Form
 
                 RefreshTabTitle(tab);
                 await ApplyExtensionWebContentAsync(tab, navigationSequence);
-                await RefreshTabFaviconAsync(tab);
+                await RefreshTabFaviconAsync(tab, navigationSequence);
                 Log($"Tab {tab.Id} navigation completed: {currentUrl}");
                 QueueCookieRegistrationCheck(tab);
             }
@@ -4437,14 +4867,21 @@ public partial class MainForm : Form
         return "New Tab";
     }
 
-    private async Task RefreshTabFaviconAsync(BrowserTab tab)
+    /// <param name="navigationSequence">The page the icon is for. A slow download for a page the tab has since left
+    /// is dropped, so it cannot replace the icon of the page that is shown now.</param>
+    private async Task RefreshTabFaviconAsync(BrowserTab tab, int navigationSequence)
     {
-        if (!_tabs.Contains(tab) || tab.WebView.CoreWebView2 is null)
+        if (!IsTabStillOnNavigation(tab, navigationSequence) || tab.WebView.CoreWebView2 is null)
         {
             return;
         }
 
         string? faviconUrl = await GetDeclaredFaviconUrlAsync(tab.WebView.CoreWebView2);
+        if (!IsTabStillOnNavigation(tab, navigationSequence))
+        {
+            return;
+        }
+
         if (string.IsNullOrWhiteSpace(faviconUrl))
         {
             faviconUrl = BuildFallbackFaviconUrl(tab.CurrentUrl);
@@ -4457,15 +4894,15 @@ public partial class MainForm : Form
         }
 
         Image? favicon = await TryDownloadImageAsync(faviconUrl);
-        if (favicon is null)
+        if (!IsTabStillOnNavigation(tab, navigationSequence))
         {
-            SetTabFavicon(tab, DefaultTabIcon, ownsImage: false);
+            favicon?.Dispose();
             return;
         }
 
-        if (!_tabs.Contains(tab))
+        if (favicon is null)
         {
-            favicon.Dispose();
+            SetTabFavicon(tab, DefaultTabIcon, ownsImage: false);
             return;
         }
 
@@ -5050,15 +5487,12 @@ public partial class MainForm : Form
                 _favoriteUrls.Any(url => url.Equals(normalizedCurrentUrl, StringComparison.OrdinalIgnoreCase));
         }
 
-        _favoriteButton.BackColor = isFavorite ? Color.Gold : idleBackColor;
-        _favoriteButton.ForeColor = isFavorite ? Color.Black : idleForeColor;
-        string text = isFavorite ? "★" : "✩";
-        if (!string.Equals(_favoriteButton.Text, text, StringComparison.Ordinal))
-        {
-            _favoriteButton.Text = text;
-        }
+        // The star itself shows the state: an outline, or filled gold for a favourite (the "address.favorite" binding).
+        _favoriteButton.BackColor = idleBackColor;
+        _favoriteButton.ForeColor = idleForeColor;
+        _activePageIsFavorite = isFavorite;
 
-        // An extension may have replaced the star with an SVG (ui.svg address.favorite).
+        // Draws the right star (or an extension's SVG, ui.svg address.favorite) and its tooltip.
         ApplyUiElementState();
     }
 
@@ -5197,13 +5631,21 @@ public partial class MainForm : Form
             return;
         }
 
+        // Under the OpenHTML protocol, PhantomHaze fetches page documents itself (see MainForm.WebProtocols.cs).
+        if (sender is CoreWebView2 requestingCore)
+        {
+            TryServeDocumentWithProtocol(requestingCore, tab, e);
+        }
+
         // Cookies sent with requests are no longer logged one by one: new cookies are summarised in a single
         // "N cookies were registered" line (see QueueCookieRegistrationCheck).
     }
 
     private void OnWebResourceResponseReceived(object? sender, CoreWebView2WebResourceResponseReceivedEventArgs e)
     {
-        if (!_webViewModeEnabled || !TryGetTabFromSender(sender, out BrowserTab tab))
+        // Pages keep loading (and setting cookies) while the Log view or an extension page is shown, so this is not
+        // limited to Web View being on screen: cookies set then used to be missed.
+        if (!TryGetTabFromSender(sender, out BrowserTab tab))
         {
             return;
         }
@@ -5272,6 +5714,12 @@ public partial class MainForm : Form
             {
                 Log(registered == 1 ? "1 cookie was registered" : $"{registered} cookies were registered");
             }
+
+            // "Save cookies across sessions": the same snapshot keeps cookies.dat up to date.
+            if (!IsDisposed)
+            {
+                UpdateSavedCookies(cookies);
+            }
         }
         catch (Exception ex) when (ex is InvalidOperationException or ObjectDisposedException or System.Runtime.InteropServices.COMException)
         {
@@ -5339,6 +5787,7 @@ public partial class MainForm : Form
             _extensionMenuOverflowMenu.Dispose();
             _extensionDropdownMenu.Dispose();
             _extensionUiToolTip.Dispose();
+            _chromeToolTip.Dispose();
             _updateBannerToolTip.Dispose();
             _updateBannerSnoozeMenu.Dispose();
             _clockTimer.Dispose();
@@ -5354,6 +5803,7 @@ public partial class MainForm : Form
         try
         {
             _faviconHttpClient.Dispose();
+            _openHtmlHttpClient.Dispose();
         }
         catch
         {
@@ -5450,13 +5900,26 @@ public partial class MainForm : Form
         _toggleButton.Text = _protectionEnabled
             ? "Disable Protection ▼"
             : "Enable Protection";
+        _compactToggleButton.Text = _protectionEnabled
+            ? "Disable Protection ▾"
+            : "Enable Protection";
     }
 
-    private void OnProtectionButtonClick()
+    /// <param name="anchor">The protection button that was clicked (full-width or compact); the menu opens below it.</param>
+    private void OnProtectionButtonClick(Control anchor)
     {
         if (_protectionEnabled)
         {
-            _disableProtectionMenu.Show(_toggleButton, new Point(0, _toggleButton.Height));
+            if (ReferenceEquals(anchor, _compactToggleButton))
+            {
+                // The card is at the right edge of the window, so the menu extends to the left.
+                _disableProtectionMenu.Show(anchor, new Point(anchor.Width, anchor.Height), ToolStripDropDownDirection.BelowLeft);
+            }
+            else
+            {
+                _disableProtectionMenu.Show(anchor, new Point(0, anchor.Height));
+            }
+
             return;
         }
 
@@ -5518,11 +5981,14 @@ public partial class MainForm : Form
         }
     }
 
+    /// <summary>Shows the protection state in the full-width banner and in the compact card of the Web View top bar.</summary>
     private void UpdateProtectionStatusVisual()
     {
+        string compactText;
         if (_protectionEnabled)
         {
             _statusLabel.Text = "Protection Enabled - This window is excluded from supported capture software.";
+            compactText = "Protection Enabled";
         }
         else if (_protectionResumeAtUtc is not null)
         {
@@ -5532,24 +5998,45 @@ public partial class MainForm : Form
                 remaining = TimeSpan.Zero;
             }
 
-            _statusLabel.Text = $"Protection Disabled - This window is visible to capture software. Auto re-enables in {FormatProtectionCountdown(remaining)}.";
+            string countdown = FormatProtectionCountdown(remaining);
+            _statusLabel.Text = $"Protection Disabled - This window is visible to capture software. Auto re-enables in {countdown}.";
+            compactText = $"Protection Disabled\nRe-enables in {countdown}";
         }
         else
         {
             _statusLabel.Text = "Protection Disabled - This window is visible to capture software.";
+            compactText = "Protection Disabled\nUntil you turn it on";
         }
 
+        if (!string.Equals(_compactStatusLabel.Text, compactText, StringComparison.Ordinal))
+        {
+            _compactStatusLabel.Text = compactText;
+        }
+
+        // The full text, for when the banner is shortened with "..." or the compact card is shown.
+        if (!string.Equals(_chromeToolTip.GetToolTip(_statusLabel), _statusLabel.Text, StringComparison.Ordinal))
+        {
+            _chromeToolTip.SetToolTip(_statusLabel, _statusLabel.Text);
+            _chromeToolTip.SetToolTip(_compactStatusLabel, _statusLabel.Text);
+        }
+
+        Color statusBack;
+        Color statusText;
         if (IsDarkTheme())
         {
-            _statusLabel.BackColor = _protectionEnabled
-                ? Color.FromArgb(58, 123, 85)
-                : Color.FromArgb(133, 76, 73);
-            _statusLabel.ForeColor = Color.White;
-            return;
+            statusBack = _protectionEnabled ? Color.FromArgb(58, 123, 85) : Color.FromArgb(133, 76, 73);
+            statusText = Color.White;
+        }
+        else
+        {
+            statusBack = _protectionEnabled ? Color.LightGreen : Color.LightSalmon;
+            statusText = Color.Black;
         }
 
-        _statusLabel.BackColor = _protectionEnabled ? Color.LightGreen : Color.LightSalmon;
-        _statusLabel.ForeColor = Color.Black;
+        _statusLabel.BackColor = statusBack;
+        _statusLabel.ForeColor = statusText;
+        _compactProtectionPanel.HeaderFillColor = statusBack;
+        _compactStatusLabel.ForeColor = statusText;
     }
 
     private static string FormatProtectionCountdown(TimeSpan remaining)
@@ -5573,15 +6060,16 @@ public partial class MainForm : Form
     private void UpdateZoomControlsForActiveTab()
     {
         bool enabled = _webViewModeEnabled && _activeTab is not null;
-        _zoomSlider.Enabled = enabled;
+        int zoomPercent = enabled ? _activeTab!.ZoomPercent : 100;
+        _zoomLabel.Enabled = enabled;
+        _zoomOutButton.Enabled = enabled && zoomPercent > ZoomSteps[0];
+        _zoomInButton.Enabled = enabled && zoomPercent < ZoomSteps[^1];
 
-        int zoomPercent = enabled ? Math.Clamp(_activeTab!.ZoomPercent, _zoomSlider.Minimum, _zoomSlider.Maximum) : 100;
-        if (_zoomSlider.Value != zoomPercent)
+        string text = _compactAddressStrip ? $"{zoomPercent}%" : $"Zoom {zoomPercent}%";
+        if (!string.Equals(_zoomLabel.Text, text, StringComparison.Ordinal))
         {
-            _zoomSlider.Value = zoomPercent;
+            _zoomLabel.Text = text;
         }
-
-        _zoomLabel.Text = $"Zoom {zoomPercent}%";
     }
 
     private void UpdateResponsiveLayout()
@@ -5598,35 +6086,16 @@ public partial class MainForm : Form
         PositionExtensionLauncherPanel();
     }
 
+    /// <summary>On a narrow address row the zoom label shows just the percentage, leaving more room for the address.</summary>
     private void UpdateAddressStripLayout()
     {
-        if (_addressStripLayout is null || _addressStripLayout.ColumnStyles.Count < 7)
+        int width = _addressBarPanel.ClientSize.Width;
+        bool compact = width > 0 && width < ScaleByDpi(CompactAddressStripWidth);
+        if (compact != _compactAddressStrip)
         {
-            return;
+            _compactAddressStrip = compact;
+            UpdateZoomControlsForActiveTab();
         }
-
-        int availableWidth = Math.Max(1, _addressBarPanel.ClientSize.Width - _addressBarPanel.Padding.Horizontal);
-        int compactThreshold = ScaleByDpi(MinimumAddressInputWidth) +
-                               ScaleByDpi(CompactBackButtonWidth) +
-                               ScaleByDpi(CompactGoButtonWidth) +
-                               ScaleByDpi(CompactRefreshButtonWidth) +
-                               ScaleByDpi(CompactHistoryButtonWidth) +
-                               ScaleByDpi(DefaultZoomLabelWidth) +
-                               ScaleByDpi(CompactZoomSliderWidth);
-
-        bool compact = availableWidth < compactThreshold;
-
-        _addressStripLayout.ColumnStyles[1].Width = ScaleByDpi(compact ? CompactBackButtonWidth : DefaultBackButtonWidth);
-        _addressStripLayout.ColumnStyles[2].Width = ScaleByDpi(compact ? CompactGoButtonWidth : DefaultGoButtonWidth);
-        _addressStripLayout.ColumnStyles[3].Width = ScaleByDpi(compact ? CompactRefreshButtonWidth : DefaultRefreshButtonWidth);
-        _addressStripLayout.ColumnStyles[4].Width = ScaleByDpi(compact ? CompactHistoryButtonWidth : DefaultHistoryButtonWidth);
-        _addressStripLayout.ColumnStyles[5].Width = ScaleByDpi(DefaultZoomLabelWidth);
-        _addressStripLayout.ColumnStyles[6].Width = ScaleByDpi(compact ? CompactZoomSliderWidth : DefaultZoomSliderWidth);
-
-        _zoomLabel.TextAlign = compact ? ContentAlignment.MiddleLeft : ContentAlignment.MiddleCenter;
-        _zoomLabel.Margin = compact
-            ? ScalePadding(0, 2, 3, 2)
-            : ScalePadding(3, 2, 3, 2);
     }
 
     private string GetHistoryTitleText()
@@ -5956,45 +6425,85 @@ public partial class MainForm : Form
             customTabs.FirstOrDefault(tab => ReferenceEquals(tab.Page, settingsTabs.SelectedTab))?.Shown?.Invoke();
         };
 
+        // Web View settings: rendering, protocol, history, cookies, search engine and start page.
         var generalLayout = new TableLayoutPanel
         {
             Dock = DockStyle.Fill,
             ColumnCount = 2,
-            RowCount = 6,
+            RowCount = 11,
             Padding = ScalePadding(12, 12, 12, 12),
+            AutoScroll = true,
         };
         generalLayout.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, ScaleByDpi(250)));
         generalLayout.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100f));
-        generalLayout.RowStyles.Add(new RowStyle(SizeType.Absolute, ScaleByDpi(36)));
-        generalLayout.RowStyles.Add(new RowStyle(SizeType.Absolute, ScaleByDpi(36)));
-        generalLayout.RowStyles.Add(new RowStyle(SizeType.Absolute, ScaleByDpi(36)));
-        generalLayout.RowStyles.Add(new RowStyle(SizeType.Absolute, ScaleByDpi(36)));
-        generalLayout.RowStyles.Add(new RowStyle(SizeType.Absolute, ScaleByDpi(36)));
+        for (int row = 0; row < 10; row++)
+        {
+            generalLayout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+        }
+
         generalLayout.RowStyles.Add(new RowStyle(SizeType.Percent, 100f));
+        int settingRowHeight = ScaleByDpi(34);
+
+        Label BuildSettingsNote(string text)
+        {
+            return new Label
+            {
+                Text = text,
+                Dock = DockStyle.Fill,
+                AutoSize = true,
+                TextAlign = ContentAlignment.TopLeft,
+                Font = dialogFont,
+                UseMnemonic = false,
+                ForeColor = SystemColors.GrayText,
+                Margin = ScalePadding(20, 0, 3, 8),
+            };
+        }
 
         var renderInBackgroundCheckBox = new CheckBox
         {
             Text = "Render web pages in the background",
             Dock = DockStyle.Fill,
+            Height = settingRowHeight,
             Checked = draftSettings.RenderWebViewInBackground,
             TextAlign = ContentAlignment.MiddleLeft,
+        };
+
+        var protocolComboBox = new ComboBox
+        {
+            Dock = DockStyle.Fill,
+            DropDownStyle = ComboBoxStyle.DropDownList,
+            Margin = ScalePadding(3, 6, 3, 6),
+        };
+        OptionItem<WebViewProtocol>[] protocolOptions = WebViewProtocols
+            .Select(info => new OptionItem<WebViewProtocol>(info.Protocol, info.Name))
+            .ToArray();
+        foreach (OptionItem<WebViewProtocol> option in protocolOptions)
+        {
+            protocolComboBox.Items.Add(option);
+        }
+
+        protocolComboBox.SelectedItem = protocolOptions.FirstOrDefault(option => option.Value == draftSettings.WebViewProtocol) ?? protocolOptions[0];
+        Label protocolDescriptionLabel = BuildSettingsNote(GetWebViewProtocolInfo(draftSettings.WebViewProtocol).Description);
+        protocolDescriptionLabel.MaximumSize = new Size(ScaleByDpi(660), 0);
+        protocolComboBox.SelectedIndexChanged += (_, _) =>
+        {
+            if (protocolComboBox.SelectedItem is OptionItem<WebViewProtocol> selected)
+            {
+                protocolDescriptionLabel.Text = GetWebViewProtocolInfo(selected.Value).Description;
+            }
         };
 
         var persistHistoryCheckBox = new CheckBox
         {
             Text = "Save history across sessions",
             Dock = DockStyle.Fill,
+            Height = settingRowHeight,
             Checked = draftSettings.PersistHistoryAcrossSessions,
             TextAlign = ContentAlignment.MiddleLeft,
         };
 
-        var retentionComboBox = new ComboBox
-        {
-            Dock = DockStyle.Fill,
-            DropDownStyle = ComboBoxStyle.DropDownList,
-            Enabled = draftSettings.PersistHistoryAcrossSessions,
-        };
-        OptionItem<int>[] retentionOptions =
+        // History and cookies offer the same durations.
+        OptionItem<int>[] BuildRetentionOptions() =>
         [
             new OptionItem<int>(1, "1 day"),
             new OptionItem<int>(7, "7 days"),
@@ -6004,23 +6513,54 @@ public partial class MainForm : Form
             new OptionItem<int>(-1, "Forever"),
         ];
 
-        foreach (OptionItem<int> option in retentionOptions)
+        ComboBox BuildRetentionComboBox(int selectedDays, bool enabled, int fallbackDays)
         {
-            retentionComboBox.Items.Add(option);
+            var comboBox = new ComboBox
+            {
+                Dock = DockStyle.Fill,
+                DropDownStyle = ComboBoxStyle.DropDownList,
+                Enabled = enabled,
+                Margin = ScalePadding(3, 6, 3, 6),
+            };
+            OptionItem<int>[] options = BuildRetentionOptions();
+            foreach (OptionItem<int> option in options)
+            {
+                comboBox.Items.Add(option);
+            }
+
+            comboBox.SelectedItem = options.FirstOrDefault(option => option.Value == selectedDays) ??
+                                    options.First(option => option.Value == fallbackDays);
+            return comboBox;
         }
 
-        OptionItem<int>? selectedRetentionOption = retentionOptions.FirstOrDefault(option => option.Value == draftSettings.HistoryRetentionDays) ?? retentionOptions[0];
-        retentionComboBox.SelectedItem = selectedRetentionOption;
-
+        ComboBox retentionComboBox = BuildRetentionComboBox(draftSettings.HistoryRetentionDays, draftSettings.PersistHistoryAcrossSessions, 1);
         persistHistoryCheckBox.CheckedChanged += (_, _) =>
         {
             retentionComboBox.Enabled = persistHistoryCheckBox.Checked;
         };
 
+        var persistCookiesCheckBox = new CheckBox
+        {
+            Text = "Save cookies across sessions (stay signed in to websites)",
+            Dock = DockStyle.Fill,
+            Height = settingRowHeight,
+            Checked = draftSettings.PersistCookiesAcrossSessions,
+            TextAlign = ContentAlignment.MiddleLeft,
+        };
+        ComboBox cookieRetentionComboBox = BuildRetentionComboBox(draftSettings.CookieRetentionDays, draftSettings.PersistCookiesAcrossSessions, DefaultCookieRetentionDays);
+        persistCookiesCheckBox.CheckedChanged += (_, _) =>
+        {
+            cookieRetentionComboBox.Enabled = persistCookiesCheckBox.Checked;
+        };
+        Label cookieNoteLabel = BuildSettingsNote(
+            "Off by default. Saved cookies are encrypted for your Windows account. Turning this off deletes the cookies PhantomHaze has saved.");
+        cookieNoteLabel.MaximumSize = new Size(ScaleByDpi(660), 0);
+
         var searchEngineComboBox = new ComboBox
         {
             Dock = DockStyle.Fill,
             DropDownStyle = ComboBoxStyle.DropDownList,
+            Margin = ScalePadding(3, 6, 3, 6),
         };
         OptionItem<SearchEngine>[] searchOptions =
         [
@@ -6043,23 +6583,44 @@ public partial class MainForm : Form
         {
             Dock = DockStyle.Fill,
             Text = draftSettings.StartingPage,
+            Margin = ScalePadding(3, 6, 3, 6),
         };
+
+        Label BuildRowLabel(string text)
+        {
+            Label label = BuildSettingsLabel(text);
+            label.Height = settingRowHeight;
+            return label;
+        }
 
         // The theme moved to the Appearance tab, together with the text colour and font.
         generalLayout.Controls.Add(renderInBackgroundCheckBox, 0, 0);
         generalLayout.SetColumnSpan(renderInBackgroundCheckBox, 2);
 
-        generalLayout.Controls.Add(persistHistoryCheckBox, 0, 1);
+        generalLayout.Controls.Add(BuildRowLabel("Web View protocol"), 0, 1);
+        generalLayout.Controls.Add(protocolComboBox, 1, 1);
+        generalLayout.Controls.Add(protocolDescriptionLabel, 0, 2);
+        generalLayout.SetColumnSpan(protocolDescriptionLabel, 2);
+
+        generalLayout.Controls.Add(persistHistoryCheckBox, 0, 3);
         generalLayout.SetColumnSpan(persistHistoryCheckBox, 2);
 
-        generalLayout.Controls.Add(BuildSettingsLabel("Saved history retention"), 0, 2);
-        generalLayout.Controls.Add(retentionComboBox, 1, 2);
+        generalLayout.Controls.Add(BuildRowLabel("Saved history retention"), 0, 4);
+        generalLayout.Controls.Add(retentionComboBox, 1, 4);
 
-        generalLayout.Controls.Add(BuildSettingsLabel("Default search engine"), 0, 3);
-        generalLayout.Controls.Add(searchEngineComboBox, 1, 3);
+        generalLayout.Controls.Add(persistCookiesCheckBox, 0, 5);
+        generalLayout.SetColumnSpan(persistCookiesCheckBox, 2);
 
-        generalLayout.Controls.Add(BuildSettingsLabel("Web View starting page"), 0, 4);
-        generalLayout.Controls.Add(startPageTextBox, 1, 4);
+        generalLayout.Controls.Add(BuildRowLabel("Saved cookie retention"), 0, 6);
+        generalLayout.Controls.Add(cookieRetentionComboBox, 1, 6);
+        generalLayout.Controls.Add(cookieNoteLabel, 0, 7);
+        generalLayout.SetColumnSpan(cookieNoteLabel, 2);
+
+        generalLayout.Controls.Add(BuildRowLabel("Default search engine"), 0, 8);
+        generalLayout.Controls.Add(searchEngineComboBox, 1, 8);
+
+        generalLayout.Controls.Add(BuildRowLabel("Web View starting page"), 0, 9);
+        generalLayout.Controls.Add(startPageTextBox, 1, 9);
 
         generalTab.Controls.Add(generalLayout);
 
@@ -6672,6 +7233,16 @@ public partial class MainForm : Form
         appearanceTab.ApplyTo?.Invoke(draftSettings);
         draftSettings.RenderWebViewInBackground = renderInBackgroundCheckBox.Checked;
         draftSettings.PersistHistoryAcrossSessions = persistHistoryCheckBox.Checked;
+        draftSettings.PersistCookiesAcrossSessions = persistCookiesCheckBox.Checked;
+        if (cookieRetentionComboBox.SelectedItem is OptionItem<int> cookieRetentionOption)
+        {
+            draftSettings.CookieRetentionDays = cookieRetentionOption.Value;
+        }
+
+        if (protocolComboBox.SelectedItem is OptionItem<WebViewProtocol> protocolOption)
+        {
+            draftSettings.WebViewProtocol = protocolOption.Value;
+        }
 
         if (retentionComboBox.SelectedItem is OptionItem<int> retentionOption)
         {
@@ -6731,6 +7302,7 @@ public partial class MainForm : Form
     /// <param name="newOrUpdatedExtensionIds">Extensions whose source changed; they announce themselves (app.log) again.</param>
     private void ApplyCommittedSettings(AppSettings newSettings, IEnumerable<string> newOrUpdatedExtensionIds)
     {
+        AppSettings previousSettings = _settings;
         HashSet<string> previouslyActiveExtensionIds = _loadedExtensions
             .Where(IsExtensionActive)
             .Select(extension => extension.Definition.Id)
@@ -6753,6 +7325,12 @@ public partial class MainForm : Form
         else
         {
             TryDeleteFile(_historyFilePath);
+        }
+
+        ApplySavedCookieSettings(previousSettings);
+        if (previousSettings.WebViewProtocol != _settings.WebViewProtocol)
+        {
+            ApplyWebViewProtocolToOpenTabs();
         }
 
         _addressBarTextBox.PlaceholderText = NormalizeStartPage(GetEffectiveStartPage());

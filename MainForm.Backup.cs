@@ -199,6 +199,7 @@ public partial class MainForm
         }
 
         NormalizeSettings(imported);
+        KeepSettingsMissingFromImport(contents.SettingsJson, imported);
 
         // Every extension in the file is checked exactly like an imported .phext file; broken ones are skipped.
         var incoming = new List<(InstalledExtensionEntry Entry, string Source, PhantomExtensionDefinition Definition)>();

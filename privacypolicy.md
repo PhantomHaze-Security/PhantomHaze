@@ -1,5 +1,5 @@
 PhantomHaze — Security & Acceptable Use Policy
-Last Updated: September 2026
+Last Updated: November 2026
 1. Purpose
 PhantomHaze is a privacy-focused web browser designed to help users protect the visibility of browser content from supported screen-capture, screenshot, screen-recording, and screen-sharing mechanisms.
 PhantomHaze is provided as a browser and privacy tool. It does not control, monitor, endorse, or take responsibility for the websites, services, content, communications, downloads, uploads, or activities that users access through the browser.
@@ -37,6 +37,8 @@ Operating-system updates
 Security vulnerabilities
 Capture methods that operate outside supported Windows protection mechanisms
 Users should not treat PhantomHaze as a guarantee against photography, screenshots from another device, malicious software, or other methods of obtaining information displayed on the screen.
+Saved cookies: by default, PhantomHaze does not keep website cookies after it closes. If the user turns on "Save cookies across sessions" (Settings -> General), cookies are stored on the user's computer, encrypted with Windows Data Protection (DPAPI) for the user's Windows account, and deleted when they expire, when the chosen retention period ends, or when the setting is turned off. Saved cookies are never included in exported settings files.
+OpenHTML protocol: when the user selects the OpenHTML Web View protocol, PhantomHaze downloads web pages directly from the websites the user visits. Page content is not sent to openhtml.org or any other third party.
 5. Security Boundary
 PhantomHaze's protection mechanisms are intended to protect content displayed within PhantomHaze itself.
 They do not automatically protect:

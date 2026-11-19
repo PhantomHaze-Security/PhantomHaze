@@ -83,8 +83,8 @@ HTML
 
 ## Example: a page, a menu and a new look
 
-This extension adds its own page (shown like **Logs** and **Web View**), a search button and a **Tools** dropdown to
-the menu bar, and restyles the menu bar - including an SVG gear in a pill-shaped Settings button.
+This extension adds its own page (shown like **Log** and **Web**), a search button and a **Tools** dropdown to
+the menu bar, and restyles the menu bar - including its own SVG gear in a pill-shaped Settings button.
 
 ```text
 meta.name "Focus Tools"
@@ -206,9 +206,10 @@ the file. `menu.button`, `menu.dropdown` and `app.page` ids cannot use the name 
 ### Extension pages
 
 - `app.page <id> "<label>" <<TAG ... TAG`
-  - Gives the extension its own page in the main window. A button with the label appears in the menu bar next to
-    **Logs** and **Web View**; clicking it shows the page in place of the log panel or the web pages, and the button
-    is highlighted like the other views while the page is shown. A page keeps its state while another view is shown.
+  - Gives the extension its own page in the main window. The label appears as one more segment of the menu bar's
+    **Log | Web** switcher; clicking it shows the page in place of the log panel or the web pages, and the segment is
+    highlighted like the other views while the page is shown. A page keeps its state while another view is shown.
+    Pages that do not fit in the menu bar are listed in its » menu.
   - The block is HTML. A fragment is wrapped in a page that follows the app's theme, text colour and font; a complete
     document (containing `<html`) is used as written.
   - Like extension windows, a page only ever shows the extension's own content: web links the user clicks open in a
@@ -310,25 +311,29 @@ log) rather than replaced by an unrelated fallback font.
 
 | Element            | What it is                      | text | tooltip | visible | background | foreground | border | font | ui.svg | ui.shape |
 | :----------------- | :------------------------------ | :--: | :-----: | :-----: | :--------: | :--------: | :----: | :--: | :----: | :------: |
-| `menu.bar`         | The top menu bar                |      |         |         | ✓          |            |        |      |        |          |
+| `menu.bar`         | The top bar (both rows)         |      |         |         | ✓          |            |        |      |        |          |
 | `menu.logo`        | The PhantomHaze logo            |      | ✓       | ✓       | ✓          |            |        |      | ✓      | ✓        |
 | `menu.title`       | The PhantomHaze name            | ✓    | ✓       | ✓       | ✓          | ✓          |        | ✓    | ✓      | ✓        |
-| `menu.logs`        | The Logs button                 | ✓    | ✓       | ✓       | ✓          | ✓          | ✓      | ✓    | ✓      | ✓        |
-| `menu.webview`     | The Web View button             | ✓    | ✓       | ✓       | ✓          | ✓          | ✓      | ✓    | ✓      | ✓        |
-| `menu.clock`       | The clock left of Settings      |      | ✓       | ✓       | ✓          | ✓          |        | ✓    |        | ✓        |
-| `menu.settings`    | The Settings button             | ✓    | ✓       |         | ✓          | ✓          | ✓      | ✓    | ✓      | ✓        |
+| `menu.logs`        | The Log segment                 | ✓    | ✓       | ✓       | ✓          | ✓          | ✓      | ✓    | ✓      | ✓        |
+| `menu.webview`     | The Web segment                 | ✓    | ✓       | ✓       | ✓          | ✓          | ✓      | ✓    | ✓      | ✓        |
+| `menu.clock`       | The clock (right of the menu)   |      | ✓       | ✓       | ✓          | ✓          |        | ✓    |        | ✓        |
+| `menu.settings`    | The Settings (gear) button      | ✓    | ✓       |         | ✓          | ✓          | ✓      | ✓    | ✓      | ✓        |
 | `address.bar`      | The address box                 |      | ✓       |         | ✓          | ✓          |        | ✓    |        |          |
 | `address.favorite` | The favourite (star) button     |      | ✓       | ✓       |            |            | ✓      | ✓    | ✓      | ✓        |
 | `address.back`     | The Back button                 | ✓    | ✓       | ✓       | ✓          | ✓          | ✓      | ✓    | ✓      | ✓        |
-| `address.go`       | The Go button                   | ✓    | ✓       | ✓       | ✓          | ✓          | ✓      | ✓    | ✓      | ✓        |
-| `address.refresh`  | The Refresh button              | ✓    | ✓       | ✓       | ✓          | ✓          | ✓      | ✓    | ✓      | ✓        |
-| `address.history`  | The History button              | ✓    | ✓       | ✓       | ✓          | ✓          | ✓      | ✓    | ✓      | ✓        |
-| `address.zoom`     | The zoom percentage             |      | ✓       | ✓       | ✓          | ✓          |        | ✓    |        |          |
+| `address.forward`  | The Forward button              | ✓    | ✓       | ✓       | ✓          | ✓          | ✓      | ✓    | ✓      | ✓        |
+| `address.refresh`  | The Refresh button (in the box) | ✓    | ✓       | ✓       | ✓          | ✓          | ✓      | ✓    | ✓      | ✓        |
+| `address.history`  | The Favorites button            | ✓    | ✓       | ✓       | ✓          | ✓          | ✓      | ✓    | ✓      | ✓        |
+| `address.zoom`     | The zoom label (resets to 100%) |      | ✓       | ✓       | ✓          | ✓          |        | ✓    |        |          |
 | `tabs.new`         | The new tab (+) button          | ✓    | ✓       | ✓       | ✓          | ✓          | ✓      | ✓    | ✓      | ✓        |
 | `log.panel`        | The log panel                   |      |         |         | ✓          | ✓          |        | ✓    |        |          |
 | `history.panel`    | The history and favourites panel|      |         |         | ✓          |            |        |      |        |          |
 
 Using a property an element does not support is an error when the file is imported, so mistakes are caught early.
+
+Since PhantomHaze v1.3.6 the Settings, Back, Forward, Refresh, favourite and new tab buttons show built-in icons
+instead of text. A `ui.svg` replaces the icon (removing it brings the icon back), and a `text` value is shown next to
+the icon. `address.go` (the Go button until v1.3.5) is still accepted as another name for `address.forward`.
 
 Two parts of PhantomHaze can never be changed by an extension:
 

@@ -26,14 +26,18 @@
 ###  Stealth Capture Protection
 Leverages native Windows `WDA_EXCLUDEFROMCAPTURE` API to block screen recorders, screenshot utilities, and desktop-sharing apps from capturing your window.
 Includes timed disable options with a live countdown banner so you always know when protection will automatically resume.
+In Web View the protection status sits in a compact card at the right of the top bar; in the Log view it spans the full width.
 
 ###  True Ephemeral Privacy
-* **Zero Session Footprint:** Web history and session cookies are stored strictly in memory and wiped automatically the moment you close the app.
+* **Zero Session Footprint:** By default, web history and cookies are stored strictly in memory and wiped automatically the moment you close the app.
+* **Optional Saved Cookies:** Turn on **Settings -> General -> Save cookies across sessions** to stay signed in to websites. It is off by default; saved cookies are encrypted with Windows DPAPI for your Windows account, kept for the time you choose (1 day to forever, like saved history), and deleted as soon as you turn the setting off.
 * **Persistent Favorites:** Keeps your bookmarked favorite sites safely saved across sessions without storing tracking cookies.
 * **Logs You Control:** Logs (including the addresses of pages you open) are kept in `%LOCALAPPDATA%\PhantomHaze\logs`, so the Master Log covers everything since installation. Cookie names and values are never logged, and **Settings -> About -> Delete all logs** removes them at any time.
 
 ###  Modern Browser Suite
-* **Tabbed Navigation:** Clean tab interface with live site favicons and title updates.
+* **Clean Top Bar:** The PhantomHaze logo, a **Log | Web** switcher and a Settings gear, with Back, Forward, a rounded address box (Refresh inside it), favourites and zoom controls in Web View.
+* **Tabbed Navigation:** Chrome-style tabs with live site favicons and title updates.
+* **Web View Protocols:** Choose how pages load in **Settings -> General -> Web View protocol**: **WebView2** (the default, a full Microsoft Edge engine) or **OpenHTML**, where PhantomHaze downloads each page's raw HTML itself and shows it with the site's JavaScript turned off. Nothing is sent to any third party.
 * **In-Page Search (`Ctrl+F`):** Fast search panel with real-time match highlighting.
 * **Live Status Logging:** Instant visual feedback whenever protection is active or toggled.
 * **Smooth View Switching:** Web View transitions wait for the page surface to be ready, with an inline loading state to prevent partial renders.
@@ -55,10 +59,10 @@ Includes timed disable options with a live countdown banner so you always know w
 * **Extension UI Launcher:** Extensions with `ui.html` automatically get a bottom-right launcher button with their icon.
 * **Web View Modification Hooks:** Extensions can inject JS/CSS and block matching web requests.
 * **App Surface Customization:** Extensions can add settings fields, menu bar buttons and dropdown menus, plus override start page/search engine while enabled.
-* **Extension Pages:** Extensions can add their own page, shown in the main window just like Logs and Web View.
+* **Extension Pages:** Extensions can add their own page, shown as another segment of the **Log | Web** switcher.
 * **UI Customization:** Extensions can restyle PhantomHaze's own controls and replace them with SVG graphics or shapes (the protection banner is off-limits, so an extension can never fake your protection status).
 
-Extension language reference: [`PHEXT_GUIDE.md`](./PHEXT_GUIDE.md)
+Extension language reference: [`.claude/skills/phantomscript/SKILL.md`](./.claude/skills/phantomscript/SKILL.md)
 
 ---
 
