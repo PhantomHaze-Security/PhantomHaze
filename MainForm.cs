@@ -305,6 +305,9 @@ public partial class MainForm : Form
         // The page address announced by the last NavigationStarting, until its document request arrives. OpenHTML
         // fetches only that request, so frames inside the page are loaded by the tab itself.
         public string? PendingPageUrl { get; set; }
+
+        // The id of the OpenHTML page script while it is added to this tab (see UpdateOpenHtmlPageScriptAsync).
+        public string? OpenHtmlScriptId { get; set; }
     }
 
     // The top bar: the menu row (logo, Log | Web | extension pages, Settings, extension buttons, clock), the address
@@ -3645,6 +3648,7 @@ public partial class MainForm : Form
             AddWebResourceRequestedFilterForAllFrames(core);
             AttachCoreHandlers(core);
             await core.AddScriptToExecuteOnDocumentCreatedAsync(BuildFindShortcutBridgeScript());
+            await UpdateOpenHtmlPageScriptAsync(tab);
             _tabByCore[core] = tab;
             EnsureWorkerRequestFilter(core);
 
@@ -3829,8 +3833,8 @@ public partial class MainForm : Form
 
     private void ConfigureCoreSettings(CoreWebView2 core)
     {
-        // Off under OpenHTML: pages are shown without running their JavaScript.
-        core.Settings.IsScriptEnabled = IsScriptEnabledFor(_settings.WebViewProtocol);
+        // Pages run their JavaScript under every Web View protocol, OpenHTML included.
+        core.Settings.IsScriptEnabled = true;
         core.Settings.AreDefaultContextMenusEnabled = true;
         core.Settings.IsStatusBarEnabled = true;
         core.Settings.AreDevToolsEnabled = false;
@@ -7335,7 +7339,7 @@ public partial class MainForm : Form
         ApplySavedCookieSettings(previousSettings);
         if (previousSettings.WebViewProtocol != _settings.WebViewProtocol)
         {
-            ApplyWebViewProtocolToOpenTabs();
+            _ = ApplyWebViewProtocolToOpenTabsAsync();
         }
 
         _addressBarTextBox.PlaceholderText = NormalizeStartPage(GetEffectiveStartPage());

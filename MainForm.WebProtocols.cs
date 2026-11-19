@@ -7,11 +7,12 @@ namespace PhantomHaze;
 
 // Web View protocols (Settings -> General -> Web View protocol): how pages get from the web into a tab.
 //  - WebView2 (default): Microsoft Edge WebView2 loads and runs pages itself, like a normal browser.
-//  - OpenHTML: PhantomHaze downloads each page's raw HTML itself and hands it to the tab, which shows it with the site's
-//    JavaScript turned off. The page keeps its real address, so links, Back/Forward, Refresh, history and favourites
-//    work as usual. Images, styles and other files the page uses still load directly.
-// Adding a protocol: add it to WebViewProtocol and WebViewProtocols, then handle it in IsScriptEnabledFor and in
-// TryServeDocumentWithProtocol.
+//  - OpenHTML: PhantomHaze downloads each page's raw HTML itself and hands it to the tab, which shows it and runs its
+//    JavaScript like any other page. The page keeps its real address, so links, Back/Forward, Refresh, history,
+//    favourites and the page's own scripts work as usual. Images, scripts, styles and other files the page uses, and
+//    requests its scripts make, still load directly. Sites cannot install service workers while OpenHTML is on (see
+//    OpenHtmlPageScript), so the pages they open keep coming through PhantomHaze.
+// Adding a protocol: add it to WebViewProtocol and WebViewProtocols, then handle it in TryServeDocumentWithProtocol.
 public partial class MainForm
 {
     private enum WebViewProtocol
@@ -33,8 +34,8 @@ public partial class MainForm
         new(
             WebViewProtocol.OpenHtml,
             "OpenHTML",
-            "PhantomHaze downloads each page's raw HTML itself and shows it with the site's JavaScript turned off. " +
-            "Pages run no site scripts, but sites that need JavaScript will not work properly.",
+            "PhantomHaze downloads each page's raw HTML itself and hands it to the tab, which shows it and runs its " +
+            "JavaScript like any other page. Images, scripts and other files the page uses still load directly.",
             Badge: "OpenHTML"),
     ];
 
@@ -63,9 +64,6 @@ public partial class MainForm
         return WebViewProtocols.FirstOrDefault(info => info.Protocol == protocol) ?? WebViewProtocols[0];
     }
 
-    /// <summary>Whether pages run their own JavaScript under the protocol (scripts PhantomHaze injects always run).</summary>
-    private static bool IsScriptEnabledFor(WebViewProtocol protocol) => protocol != WebViewProtocol.OpenHtml;
-
     /// <summary>Shows the protocol's badge in the address box (nothing for WebView2).</summary>
     private void UpdateProtocolBadge()
     {
@@ -76,29 +74,69 @@ public partial class MainForm
     }
 
     /// <summary>
-    /// Settings were saved with another protocol: every open tab switches to it for its next page, and the tab on
-    /// screen reloads so it matches the setting straight away. Other tabs are not reloaded, so a form being filled in
-    /// or a page that was the answer to a form is not lost or sent again.
+    /// Runs in every page and frame of a tab while OpenHTML is on. With JavaScript running, a site could install a
+    /// service worker, which answers the site's later page loads inside the browser: they would bypass PhantomHaze's
+    /// own fetch and OpenHTML would quietly stop applying to that site. Registering one fails instead, as it does when
+    /// a browser does not allow service workers, so sites carry on without one.
     /// </summary>
-    private void ApplyWebViewProtocolToOpenTabs()
+    private const string OpenHtmlPageScript =
+        "(() => {" +
+        "try {" +
+        "if (typeof ServiceWorkerContainer === 'undefined') { return; }" +
+        "const message = 'Service workers are turned off while PhantomHaze uses the OpenHTML protocol.';" +
+        "Object.defineProperty(ServiceWorkerContainer.prototype, 'register', {" +
+        "configurable: true, writable: true," +
+        "value: function register() { return Promise.reject(new DOMException(message, 'SecurityError')); }," +
+        "});" +
+        "} catch (_) { }" +
+        "})();";
+
+    /// <summary>Adds the OpenHTML page script to the tab while OpenHTML is on, and removes it otherwise.</summary>
+    private async Task UpdateOpenHtmlPageScriptAsync(BrowserTab tab)
+    {
+        if (tab.WebView.CoreWebView2 is not CoreWebView2 core)
+        {
+            return;
+        }
+
+        bool wanted = _settings.WebViewProtocol == WebViewProtocol.OpenHtml;
+        if (wanted && tab.OpenHtmlScriptId is null)
+        {
+            string id = await core.AddScriptToExecuteOnDocumentCreatedAsync(OpenHtmlPageScript);
+
+            // The protocol can change again (or another call add the script) while this one is being added.
+            if (_settings.WebViewProtocol == WebViewProtocol.OpenHtml && tab.OpenHtmlScriptId is null)
+            {
+                tab.OpenHtmlScriptId = id;
+            }
+            else
+            {
+                core.RemoveScriptToExecuteOnDocumentCreated(id);
+            }
+        }
+        else if (!wanted && tab.OpenHtmlScriptId is string existing)
+        {
+            tab.OpenHtmlScriptId = null;
+            core.RemoveScriptToExecuteOnDocumentCreated(existing);
+        }
+    }
+
+    /// <summary>
+    /// Settings were saved with another protocol: every open tab uses it from its next page, and the tab on screen
+    /// reloads so it matches the setting straight away. Other tabs are not reloaded, so a form being filled in or a
+    /// page that was the answer to a form is not lost or sent again. Switching to OpenHTML also removes the service
+    /// workers sites installed earlier in the session (see OpenHtmlPageScript).
+    /// </summary>
+    private async Task ApplyWebViewProtocolToOpenTabsAsync()
     {
         UpdateProtocolBadge();
-        bool scriptEnabled = IsScriptEnabledFor(_settings.WebViewProtocol);
-        bool reloaded = false;
-        foreach (BrowserTab tab in _tabs)
+        WebViewProtocol protocol = _settings.WebViewProtocol;
+        foreach (BrowserTab tab in _tabs.ToList())
         {
             try
             {
-                if (tab.WebView.CoreWebView2 is CoreWebView2 core)
-                {
-                    core.Settings.IsScriptEnabled = scriptEnabled;
-                    tab.OpenHtmlRedirectCount = 0;
-                    if (_webViewModeEnabled && ReferenceEquals(tab, _activeTab))
-                    {
-                        core.Reload();
-                        reloaded = true;
-                    }
-                }
+                tab.OpenHtmlRedirectCount = 0;
+                await UpdateOpenHtmlPageScriptAsync(tab);
             }
             catch (Exception ex) when (ex is InvalidOperationException or ObjectDisposedException or COMException)
             {
@@ -106,7 +144,41 @@ public partial class MainForm
             }
         }
 
-        Log($"Web View protocol set to {GetWebViewProtocolInfo(_settings.WebViewProtocol).Name}" +
+        if (protocol == WebViewProtocol.OpenHtml &&
+            _tabs.Select(tab => tab.WebView.CoreWebView2).FirstOrDefault(core => core is not null) is CoreWebView2 profileCore)
+        {
+            try
+            {
+                // Every tab shares one profile, so this covers all of them.
+                await profileCore.Profile.ClearBrowsingDataAsync(CoreWebView2BrowsingDataKinds.ServiceWorkers);
+            }
+            catch (Exception ex) when (ex is InvalidOperationException or ObjectDisposedException or COMException)
+            {
+                Log($"Service workers could not be removed for OpenHTML: {ex.Message}");
+            }
+        }
+
+        // Settings may have been saved again while this ran; the newest save does its own reload.
+        if (protocol != _settings.WebViewProtocol)
+        {
+            return;
+        }
+
+        bool reloaded = false;
+        try
+        {
+            if (_webViewModeEnabled && _activeTab?.WebView.CoreWebView2 is CoreWebView2 activeCore)
+            {
+                activeCore.Reload();
+                reloaded = true;
+            }
+        }
+        catch (Exception ex) when (ex is InvalidOperationException or ObjectDisposedException or COMException)
+        {
+            // The tab is closing.
+        }
+
+        Log($"Web View protocol set to {GetWebViewProtocolInfo(protocol).Name}" +
             (reloaded ? "; the current tab was reloaded and other tabs use it from their next page." : "; open tabs use it from their next page."));
     }
 
@@ -384,7 +456,7 @@ public partial class MainForm
         return changed;
     }
 
-    /// <summary>A redirect, as a page that sends the tab to the new address (meta refresh works with scripts off).</summary>
+    /// <summary>A redirect, as a page that sends the tab to the new address (a meta refresh, which needs no script).</summary>
     private static CoreWebView2WebResourceResponse CreateOpenHtmlRedirectResponse(CoreWebView2 core, Uri target)
     {
         return CreateHtmlResponse(core, 200, "OK", OpenHtmlDocuments.BuildRedirectPage(target.AbsoluteUri));

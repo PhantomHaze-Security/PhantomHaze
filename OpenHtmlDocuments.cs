@@ -24,7 +24,8 @@ internal static class OpenHtmlDocuments
     public sealed record CookieChange(string Name, Cookie? Cookie, CoreWebView2CookieSameSiteKind? SameSite, string Domain, string Path);
 
     // Response headers handed on to the tab with an OpenHTML page or file. They protect the user (who may frame the page,
-    // what it may load, how it is sniffed) or say how to show it (a download's file name). Cookies were applied
+    // what it and its scripts may load, how it is sniffed), decide what the page's JavaScript may use (cross-origin
+    // isolation) or say how to show it (a download's file name). Cookies were applied
     // separately; encoding and length headers describe the network transfer, not the decoded body the tab gets.
     private static readonly string[] PassedOnResponseHeaders =
     [
@@ -34,7 +35,9 @@ internal static class OpenHtmlDocuments
         "Referrer-Policy",
         "Permissions-Policy",
         "Cross-Origin-Opener-Policy",
+        "Cross-Origin-Embedder-Policy",
         "Cross-Origin-Resource-Policy",
+        "Origin-Agent-Cluster",
         "Content-Disposition",
         "Content-Language",
         "Refresh",

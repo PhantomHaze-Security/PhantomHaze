@@ -37,7 +37,7 @@ In Web View the protection status sits in a compact card at the right of the top
 ###  Modern Browser Suite
 * **Clean Top Bar:** The PhantomHaze logo, a **Log | Web** switcher and a Settings gear, with Back, Forward, a rounded address box (Refresh inside it), favourites and zoom controls in Web View.
 * **Tabbed Navigation:** Chrome-style tabs with live site favicons and title updates.
-* **Web View Protocols:** Choose how pages load in **Settings -> General -> Web View protocol**: **WebView2** (the default, a full Microsoft Edge engine) or **OpenHTML**, where PhantomHaze downloads each page's raw HTML itself and shows it with the site's JavaScript turned off. Nothing is sent to any third party.
+* **Web View Protocols:** Choose how pages load in **Settings -> General -> Web View protocol**: **WebView2** (the default, a full Microsoft Edge engine) or **OpenHTML**, where PhantomHaze downloads each page's raw HTML itself and the tab shows it and runs its JavaScript like any other page. Sites cannot install service workers while OpenHTML is on, so every page they open still comes through PhantomHaze. Nothing is sent to any third party.
 * **In-Page Search (`Ctrl+F`):** Fast search panel with real-time match highlighting.
 * **Live Status Logging:** Instant visual feedback whenever protection is active or toggled.
 * **Smooth View Switching:** Web View transitions wait for the page surface to be ready, with an inline loading state to prevent partial renders.
