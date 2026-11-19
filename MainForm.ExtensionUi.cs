@@ -510,6 +510,12 @@ public partial class MainForm
             }
 
             ConfigureExtensionSurfaceCore(webView.CoreWebView2);
+            await ConfigureCaptureShieldAsync(webView, webView.CoreWebView2, isTab: false);
+            if (IsDisposed || webView.IsDisposed)
+            {
+                return;
+            }
+
             RenderExtensionPageSafely(state);
         }
         catch (Exception ex)
@@ -651,6 +657,7 @@ public partial class MainForm
                     core.NewWindowRequested -= OnExtensionWindowNewWindowRequested;
                     core.NavigationStarting -= OnExtensionWindowNavigationStarting;
                     core.WebResourceRequested -= OnExtensionWindowWebResourceRequested;
+                    ForgetShieldSurface(core);
                 }
 
                 _extensionPageHostPanel.Controls.Remove(webView);

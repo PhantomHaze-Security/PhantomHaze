@@ -4,10 +4,11 @@ using Microsoft.Web.WebView2.Core;
 namespace PhantomHaze;
 
 /// <summary>
-/// The parts of the OpenHTML protocol that do not need a browser tab (see MainForm.WebProtocols.cs): which responses
-/// are pages, how Set-Cookie headers are read, and the redirect and error pages PhantomHaze shows.
+/// The parts of the HazeFetch protocol that do not need a browser tab (see MainForm.WebProtocols.cs): which responses
+/// are pages, which sites need the browser's own loading, which headers the tab gets, how Set-Cookie headers are read,
+/// and the redirect page PhantomHaze shows.
 /// </summary>
-internal static class OpenHtmlDocuments
+internal static class HazeFetchDocuments
 {
     public static bool IsHtmlMediaType(string? mediaType)
     {
@@ -23,7 +24,7 @@ internal static class OpenHtmlDocuments
     /// </summary>
     public sealed record CookieChange(string Name, Cookie? Cookie, CoreWebView2CookieSameSiteKind? SameSite, string Domain, string Path);
 
-    // Response headers handed on to the tab with an OpenHTML page or file. They protect the user (who may frame the page,
+    // Response headers handed on to the tab with an HazeFetch page or file. They protect the user (who may frame the page,
     // what it and its scripts may load, how it is sniffed), decide what the page's JavaScript may use (cross-origin
     // isolation) or say how to show it (a download's file name). Cookies were applied
     // separately; encoding and length headers describe the network transfer, not the decoded body the tab gets.
@@ -41,12 +42,17 @@ internal static class OpenHtmlDocuments
         "Content-Disposition",
         "Content-Language",
         "Refresh",
+        // Smooth browsing: the site's own caching rules decide whether Back/Forward can show the page instantly from
+        // the browser's back/forward cache, and preload hints and client-hint requests let pages load as fast as usual.
+        "Cache-Control",
+        "Link",
+        "Accept-CH",
     ];
 
-    /// <summary>The response headers for the tab: the content type, the passed-on headers and no caching.</summary>
+    /// <summary>The response headers for the tab: the content type and the passed-on headers.</summary>
     public static string BuildResponseHeaders(string contentType, IEnumerable<KeyValuePair<string, IEnumerable<string>>> siteHeaders)
     {
-        var lines = new List<string> { $"Content-Type: {RemoveLineBreaks(contentType)}", "Cache-Control: no-store" };
+        var lines = new List<string> { $"Content-Type: {RemoveLineBreaks(contentType)}" };
         foreach ((string name, IEnumerable<string> values) in siteHeaders)
         {
             string? allowed = PassedOnResponseHeaders.FirstOrDefault(header => header.Equals(name, StringComparison.OrdinalIgnoreCase));
@@ -69,6 +75,55 @@ internal static class OpenHtmlDocuments
     }
 
     private static string RemoveLineBreaks(string value) => value.Replace("\r", string.Empty, StringComparison.Ordinal).Replace("\n", string.Empty, StringComparison.Ordinal).Trim();
+
+    /// <summary>
+    /// Whether a response shows that the site needs the browser's own loading, so the tab should load it itself:
+    /// a bot check that compares the connection with the browser's (Cloudflare, DataDome, Akamai and similar) or an
+    /// HTTP sign-in prompt (only the browser shows the sign-in box).
+    /// </summary>
+    public static bool NeedsBrowserLoading(int status, IEnumerable<KeyValuePair<string, IEnumerable<string>>> headers, out string reason)
+    {
+        var byName = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        foreach ((string name, IEnumerable<string> values) in headers)
+        {
+            byName[name] = string.Join(", ", values);
+        }
+
+        string Header(string name) => byName.TryGetValue(name, out string? value) ? value : string.Empty;
+
+        if (status == 401 && (byName.ContainsKey("WWW-Authenticate") || byName.ContainsKey("Proxy-Authenticate")))
+        {
+            reason = "asks for a sign-in";
+            return true;
+        }
+
+        if (status == 407)
+        {
+            reason = "needs a proxy sign-in";
+            return true;
+        }
+
+        if (byName.ContainsKey("cf-mitigated") || byName.ContainsKey("x-datadome") || byName.ContainsKey("x-px-blocked") ||
+            byName.ContainsKey("x-amzn-waf-action") || byName.ContainsKey("x-sucuri-block"))
+        {
+            reason = "runs a bot check";
+            return true;
+        }
+
+        string server = Header("Server");
+        if (status is 403 or 429 or 503 &&
+            (server.Contains("cloudflare", StringComparison.OrdinalIgnoreCase) ||
+             server.Contains("AkamaiGHost", StringComparison.OrdinalIgnoreCase) ||
+             server.Contains("DataDome", StringComparison.OrdinalIgnoreCase) ||
+             byName.ContainsKey("x-iinfo") || byName.ContainsKey("akamai-grn")))
+        {
+            reason = "refused PhantomHaze's own request (bot protection)";
+            return true;
+        }
+
+        reason = string.Empty;
+        return false;
+    }
 
     /// <summary>The address without its #fragment (requests never carry one; navigations can).</summary>
     public static string WithoutFragment(string url)
@@ -221,14 +276,14 @@ internal static class OpenHtmlDocuments
                $"<p>Redirecting to <a href=\"{attribute}\">{attribute}</a></p></body></html>";
     }
 
-    public static string BuildMessagePage(string title, string url, string message)
+    /// <summary>The page shown when HazeFetch has to stop (for example a redirect loop); everything from the site is encoded.</summary>
+    public static string BuildErrorPage(string url, string problem)
     {
-        return "<!DOCTYPE html><html><head><meta charset=\"utf-8\">" +
-               $"<title>{WebUtility.HtmlEncode(title)}</title></head>" +
+        return "<!DOCTYPE html><html><head><meta charset=\"utf-8\"><title>This page could not be loaded</title></head>" +
                "<body style=\"font-family:'Segoe UI',sans-serif;padding:32px;max-width:720px;margin:auto;line-height:1.5\">" +
-               $"<h2>{WebUtility.HtmlEncode(title)}</h2>" +
+               "<h2>This page could not be loaded</h2>" +
                $"<p><b>Address:</b> {WebUtility.HtmlEncode(url)}</p>" +
-               $"<p><b>Problem:</b> {WebUtility.HtmlEncode(message)}</p>" +
+               $"<p><b>Problem:</b> {WebUtility.HtmlEncode(problem)}</p>" +
                "<p>You can try again with Refresh, or switch to the WebView2 protocol in Settings &rarr; General.</p>" +
                "</body></html>";
     }

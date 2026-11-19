@@ -38,7 +38,7 @@ Security vulnerabilities
 Capture methods that operate outside supported Windows protection mechanisms
 Users should not treat PhantomHaze as a guarantee against photography, screenshots from another device, malicious software, or other methods of obtaining information displayed on the screen.
 Saved cookies: by default, PhantomHaze does not keep website cookies after it closes. If the user turns on "Save cookies across sessions" (Settings -> General), cookies are stored on the user's computer, encrypted with Windows Data Protection (DPAPI) for the user's Windows account, and deleted when they expire, when the chosen retention period ends, or when the setting is turned off. Saved cookies are never included in exported settings files.
-OpenHTML protocol: when the user selects the OpenHTML Web View protocol, PhantomHaze downloads web pages directly from the websites the user visits. Page content is not sent to openhtml.org or any other third party.
+HazeFetch protocol: when the user selects the HazeFetch Web View protocol, PhantomHaze downloads web pages directly from the websites the user visits. Page content is not sent to any third party.
 5. Security Boundary
 PhantomHaze's protection mechanisms are intended to protect content displayed within PhantomHaze itself.
 They do not automatically protect:

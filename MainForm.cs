@@ -299,15 +299,15 @@ public partial class MainForm : Form
         // tab has moved on before touching the new document.
         public int NavigationSequence { get; set; }
 
-        // Redirects OpenHTML followed in a row for this tab (see FetchOpenHtmlDocumentAsync); stops redirect loops.
-        public int OpenHtmlRedirectCount { get; set; }
+        // Redirects HazeFetch followed in a row for this tab (see FetchHazeFetchDocumentAsync); stops redirect loops.
+        public int HazeFetchRedirectCount { get; set; }
 
-        // The page address announced by the last NavigationStarting, until its document request arrives. OpenHTML
+        // The page address announced by the last NavigationStarting, until its document request arrives. HazeFetch
         // fetches only that request, so frames inside the page are loaded by the tab itself.
         public string? PendingPageUrl { get; set; }
 
-        // The id of the OpenHTML page script while it is added to this tab (see UpdateOpenHtmlPageScriptAsync).
-        public string? OpenHtmlScriptId { get; set; }
+        // The id of the HazeFetch page script while it is added to this tab (see UpdateHazeFetchPageScriptAsync).
+        public string? HazeFetchScriptId { get; set; }
     }
 
     // The top bar: the menu row (logo, Log | Web | extension pages, Settings, extension buttons, clock), the address
@@ -551,6 +551,8 @@ public partial class MainForm : Form
             Log($"Settings file: {_settingsFilePath}");
             Log($"Extensions root: {_extensionsRootPath}");
             LogTrueOsBuild();
+            // Pop-up windows (tooltips, drop-down lists, menus) are watched before protection is first applied.
+            StartCaptureShield();
             ApplyProtection(enable: true);
 
             // Decides at every startup whether the update banner is shown; it runs in the background.
@@ -1775,6 +1777,7 @@ public partial class MainForm : Form
 
         extensionWindow.FormClosed += (_, _) =>
         {
+            ForgetShieldSurface(state.WebView?.CoreWebView2);
             if (_openExtensionWindowsById.TryGetValue(windowKey, out ExtensionWindowState? current) &&
                 ReferenceEquals(current, state))
             {
@@ -1840,6 +1843,12 @@ public partial class MainForm : Form
             }
 
             ConfigureExtensionSurfaceCore(webView.CoreWebView2);
+            await ConfigureCaptureShieldAsync(webView, webView.CoreWebView2, isTab: false);
+            if (window.IsDisposed || webView.IsDisposed)
+            {
+                return;
+            }
+
             RenderExtensionWindow(state);
         }
         catch (Exception ex)
@@ -2297,6 +2306,7 @@ public partial class MainForm : Form
         _contentHostPanel.Controls.Add(_findPanel);
         _contentHostPanel.Controls.Add(_extensionLauncherPanel);
         _contentHostPanel.Controls.Add(_webViewLoadingOverlayPanel);
+        BuildBrowserStatusLabel();
         _contentHostPanel.Resize += (_, _) =>
         {
             PositionFindPanel();
@@ -2554,7 +2564,8 @@ public partial class MainForm : Form
         try
         {
             _addressBarPanel.Visible = web;
-            _tabStripPanel.Visible = web;
+            // In fullscreen (videos, web games) only the page is shown.
+            _tabStripPanel.Visible = web && _fullScreenTab is null;
             _compactProtectionPanel.Visible = web;
             _statusLabel.Visible = !web;
             _toggleButton.Visible = !web;
@@ -3422,9 +3433,12 @@ public partial class MainForm : Form
     /// <summary>Hides Web View (address bar, tabs, history and find panels) without deciding what is shown instead.</summary>
     private void LeaveWebViewMode()
     {
+        ExitFullScreen(askPage: true);
+        _hoveredLinkText = null;
         _webViewModeSwitchVersion++;
         HideWebViewLoadingOverlay();
         _webViewModeEnabled = false;
+        UpdateBrowserStatusLabel();
         _historyPanel.Visible = false;
         _historyButton.BackColor = GetCommandButtonBackColor();
         HideFindPanel(clearHighlights: true);
@@ -3647,8 +3661,10 @@ public partial class MainForm : Form
             ConfigureCoreSettings(core);
             AddWebResourceRequestedFilterForAllFrames(core);
             AttachCoreHandlers(core);
+            // The browser's own pop-ups (menus, dialogs, pickers, tooltips) are replaced by protected ones.
+            await ConfigureCaptureShieldAsync(webView, core, isTab: true);
             await core.AddScriptToExecuteOnDocumentCreatedAsync(BuildFindShortcutBridgeScript());
-            await UpdateOpenHtmlPageScriptAsync(tab);
+            await UpdateHazeFetchPageScriptAsync(tab);
             _tabByCore[core] = tab;
             EnsureWorkerRequestFilter(core);
 
@@ -3833,7 +3849,7 @@ public partial class MainForm : Form
 
     private void ConfigureCoreSettings(CoreWebView2 core)
     {
-        // Pages run their JavaScript under every Web View protocol, OpenHTML included.
+        // Pages run their JavaScript under every Web View protocol, HazeFetch included.
         core.Settings.IsScriptEnabled = true;
         core.Settings.AreDefaultContextMenusEnabled = true;
         core.Settings.IsStatusBarEnabled = true;
@@ -3934,7 +3950,14 @@ public partial class MainForm : Form
             _ = ClearFindHighlightsAsync(previous);
         }
 
+        if (_fullScreenTab is not null && !ReferenceEquals(tab, _fullScreenTab))
+        {
+            ExitFullScreen(askPage: true);
+        }
+
         _activeTab = tab;
+        _hoveredLinkText = null;
+        UpdateBrowserStatusLabel();
         RefreshTabTitle(tab);
         UpdateTabVisibilityAndRendering();
 
@@ -4010,6 +4033,11 @@ public partial class MainForm : Form
 
     private void RemoveTabAndDispose(BrowserTab tab)
     {
+        if (ReferenceEquals(tab, _fullScreenTab))
+        {
+            ExitFullScreen(askPage: false);
+        }
+
         if (_findPanel.Visible && ReferenceEquals(_activeTab, tab) && !string.IsNullOrWhiteSpace(_findTextBox.Text))
         {
             _ = ClearFindHighlightsAsync(tab);
@@ -4020,6 +4048,7 @@ public partial class MainForm : Form
             CoreWebView2 core = tab.WebView.CoreWebView2;
             DetachCoreHandlers(core);
             _tabByCore.Remove(core);
+            ForgetShieldSurface(core);
             if (ReferenceEquals(core, _workerRequestFilterCore))
             {
                 _workerRequestFilterCore = null;
@@ -5640,7 +5669,7 @@ public partial class MainForm : Form
             return;
         }
 
-        // Under the OpenHTML protocol, PhantomHaze fetches page documents itself (see MainForm.WebProtocols.cs).
+        // Under the HazeFetch protocol, PhantomHaze fetches page documents itself (see MainForm.WebProtocols.cs).
         if (sender is CoreWebView2 requestingCore)
         {
             TryServeDocumentWithProtocol(requestingCore, tab, e);
@@ -5792,6 +5821,8 @@ public partial class MainForm : Form
 
         try
         {
+            StopCaptureShield();
+            _browserNoticeTimer.Dispose();
             _extensionLauncherToolTip.Dispose();
             _extensionMenuOverflowMenu.Dispose();
             _extensionDropdownMenu.Dispose();
@@ -5812,7 +5843,7 @@ public partial class MainForm : Form
         try
         {
             _faviconHttpClient.Dispose();
-            _openHtmlHttpClient.Dispose();
+            _hazeFetchHttpClient.Dispose();
         }
         catch
         {
@@ -7374,6 +7405,9 @@ public partial class MainForm : Form
 
     private void SyncAuxiliaryWindowProtection()
     {
+        // Every other window of this process (tooltips, drop-down lists, menus) and the taskbar/Alt+Tab previews.
+        SyncProcessWindowsProtection();
+
         foreach (Form window in _protectedAuxiliaryWindows.Keys.ToArray())
         {
             ApplyProtectionToAuxiliaryWindow(window);

@@ -27,6 +27,7 @@
 Leverages native Windows `WDA_EXCLUDEFROMCAPTURE` API to block screen recorders, screenshot utilities, and desktop-sharing apps from capturing your window.
 Includes timed disable options with a live countdown banner so you always know when protection will automatically resume.
 In Web View the protection status sits in a compact card at the right of the top bar; in the Log view it spans the full width.
+Protection covers everything PhantomHaze shows, not just the main window: menus, tooltips, drop-down lists, dialogs, file and colour pickers, print, download and permission prompts are all PhantomHaze's own protected windows or drawn inside the page, and taskbar thumbnails, Alt+Tab and Peek show the app icon instead of a live preview. Browser features that would open a window screen capture could see (picture-in-picture, Windows notifications, sharing, screen sharing from web pages) are turned off.
 
 ###  True Ephemeral Privacy
 * **Zero Session Footprint:** By default, web history and cookies are stored strictly in memory and wiped automatically the moment you close the app.
@@ -37,7 +38,8 @@ In Web View the protection status sits in a compact card at the right of the top
 ###  Modern Browser Suite
 * **Clean Top Bar:** The PhantomHaze logo, a **Log | Web** switcher and a Settings gear, with Back, Forward, a rounded address box (Refresh inside it), favourites and zoom controls in Web View.
 * **Tabbed Navigation:** Chrome-style tabs with live site favicons and title updates.
-* **Web View Protocols:** Choose how pages load in **Settings -> General -> Web View protocol**: **WebView2** (the default, a full Microsoft Edge engine) or **OpenHTML**, where PhantomHaze downloads each page's raw HTML itself and the tab shows it and runs its JavaScript like any other page. Sites cannot install service workers while OpenHTML is on, so every page they open still comes through PhantomHaze. Nothing is sent to any third party.
+* **Web View Protocols:** Choose how pages load in **Settings -> General -> Web View protocol**: **WebView2** (the default, a full Microsoft Edge engine) or **HazeFetch**, where PhantomHaze downloads each page itself (over HTTP/2, with the browser's own request headers and cookies) and the tab shows it and runs its JavaScript like any other page, so everyday sites and light web games work as usual. Sites with bot checks or sign-in prompts, very large files and anything HazeFetch cannot fetch are handed back to the browser automatically. Sites cannot install service workers while HazeFetch is on, so every page they open still comes through PhantomHaze. Nothing is sent to any third party.
+* **Fullscreen:** Videos and web games can go fullscreen; the top bar and tabs hide until you press Esc.
 * **In-Page Search (`Ctrl+F`):** Fast search panel with real-time match highlighting.
 * **Live Status Logging:** Instant visual feedback whenever protection is active or toggled.
 * **Smooth View Switching:** Web View transitions wait for the page surface to be ready, with an inline loading state to prevent partial renders.

@@ -7,18 +7,18 @@ namespace PhantomHaze;
 
 // Web View protocols (Settings -> General -> Web View protocol): how pages get from the web into a tab.
 //  - WebView2 (default): Microsoft Edge WebView2 loads and runs pages itself, like a normal browser.
-//  - OpenHTML: PhantomHaze downloads each page's raw HTML itself and hands it to the tab, which shows it and runs its
+//  - HazeFetch: PhantomHaze downloads each page's raw HTML itself and hands it to the tab, which shows it and runs its
 //    JavaScript like any other page. The page keeps its real address, so links, Back/Forward, Refresh, history,
 //    favourites and the page's own scripts work as usual. Images, scripts, styles and other files the page uses, and
-//    requests its scripts make, still load directly. Sites cannot install service workers while OpenHTML is on (see
-//    OpenHtmlPageScript), so the pages they open keep coming through PhantomHaze.
+//    requests its scripts make, still load directly. Sites cannot install service workers while HazeFetch is on (see
+//    HazeFetchPageScript), so the pages they open keep coming through PhantomHaze.
 // Adding a protocol: add it to WebViewProtocol and WebViewProtocols, then handle it in TryServeDocumentWithProtocol.
 public partial class MainForm
 {
     private enum WebViewProtocol
     {
         WebView2 = 0,
-        OpenHtml = 1,
+        HazeFetch = 1,
     }
 
     /// <param name="Badge">Shown in the address box while the protocol is in use (null: no badge).</param>
@@ -32,30 +32,36 @@ public partial class MainForm
             "Pages load and run in Microsoft Edge WebView2, like in a normal browser. Best for most sites.",
             Badge: null),
         new(
-            WebViewProtocol.OpenHtml,
-            "OpenHTML",
-            "PhantomHaze downloads each page's raw HTML itself and hands it to the tab, which shows it and runs its " +
-            "JavaScript like any other page. Images, scripts and other files the page uses still load directly.",
-            Badge: "OpenHTML"),
+            WebViewProtocol.HazeFetch,
+            "HazeFetch",
+            "PhantomHaze downloads each page itself and hands it to the tab, which shows it and runs its JavaScript like " +
+            "any other page. Images, scripts, games and other files the page uses still load directly, and sites that " +
+            "need the browser's own loading (bot checks, sign-in prompts) are handed back to it automatically.",
+            Badge: "HazeFetch"),
     ];
 
-    // Pages and files OpenHTML fetches are held in memory; larger files are left to the tab.
-    private const int OpenHtmlMaximumBodyBytes = 25 * 1024 * 1024;
-    private const int OpenHtmlMaximumRedirects = 20;
-    private static readonly TimeSpan OpenHtmlTimeout = TimeSpan.FromSeconds(30);
+    // Pages and files HazeFetch fetches are held in memory; larger files are left to the tab.
+    private const int HazeFetchMaximumBodyBytes = 25 * 1024 * 1024;
+    private const int HazeFetchMaximumRedirects = 20;
+    private static readonly TimeSpan HazeFetchTimeout = TimeSpan.FromSeconds(20);
+
+    // Sites HazeFetch hands back to the tab for the rest of the session: they run a bot check that compares the
+    // connection with the browser's, or ask for HTTP sign-in (see HazeFetchDocuments.NeedsBrowserLoading).
+    private readonly HashSet<string> _hazeFetchBrowserSites = new(StringComparer.OrdinalIgnoreCase);
 
     // Redirects are not followed here: each hop is handed back to the tab, which requests it again, so web.block
     // rules apply to every address. Cookies come from (and go back to) the tab's own cookie store.
-    private readonly HttpClient _openHtmlHttpClient = new(new SocketsHttpHandler
+    private readonly HttpClient _hazeFetchHttpClient = new(new SocketsHttpHandler
     {
         AllowAutoRedirect = false,
         UseCookies = false,
         AutomaticDecompression = DecompressionMethods.All,
-        ConnectTimeout = TimeSpan.FromSeconds(15),
+        ConnectTimeout = TimeSpan.FromSeconds(10),
         PooledConnectionLifetime = TimeSpan.FromMinutes(5),
+        EnableMultipleHttp2Connections = true,
     })
     {
-        // Each fetch has its own limit for the whole download (OpenHtmlTimeout).
+        // Each fetch has its own limit for the whole download (HazeFetchTimeout).
         Timeout = Timeout.InfiniteTimeSpan,
     };
 
@@ -74,16 +80,16 @@ public partial class MainForm
     }
 
     /// <summary>
-    /// Runs in every page and frame of a tab while OpenHTML is on. With JavaScript running, a site could install a
+    /// Runs in every page and frame of a tab while HazeFetch is on. With JavaScript running, a site could install a
     /// service worker, which answers the site's later page loads inside the browser: they would bypass PhantomHaze's
-    /// own fetch and OpenHTML would quietly stop applying to that site. Registering one fails instead, as it does when
+    /// own fetch and HazeFetch would quietly stop applying to that site. Registering one fails instead, as it does when
     /// a browser does not allow service workers, so sites carry on without one.
     /// </summary>
-    private const string OpenHtmlPageScript =
+    private const string HazeFetchPageScript =
         "(() => {" +
         "try {" +
         "if (typeof ServiceWorkerContainer === 'undefined') { return; }" +
-        "const message = 'Service workers are turned off while PhantomHaze uses the OpenHTML protocol.';" +
+        "const message = 'Service workers are turned off while PhantomHaze uses the HazeFetch protocol.';" +
         "Object.defineProperty(ServiceWorkerContainer.prototype, 'register', {" +
         "configurable: true, writable: true," +
         "value: function register() { return Promise.reject(new DOMException(message, 'SecurityError')); }," +
@@ -91,32 +97,32 @@ public partial class MainForm
         "} catch (_) { }" +
         "})();";
 
-    /// <summary>Adds the OpenHTML page script to the tab while OpenHTML is on, and removes it otherwise.</summary>
-    private async Task UpdateOpenHtmlPageScriptAsync(BrowserTab tab)
+    /// <summary>Adds the HazeFetch page script to the tab while HazeFetch is on, and removes it otherwise.</summary>
+    private async Task UpdateHazeFetchPageScriptAsync(BrowserTab tab)
     {
         if (tab.WebView.CoreWebView2 is not CoreWebView2 core)
         {
             return;
         }
 
-        bool wanted = _settings.WebViewProtocol == WebViewProtocol.OpenHtml;
-        if (wanted && tab.OpenHtmlScriptId is null)
+        bool wanted = _settings.WebViewProtocol == WebViewProtocol.HazeFetch;
+        if (wanted && tab.HazeFetchScriptId is null)
         {
-            string id = await core.AddScriptToExecuteOnDocumentCreatedAsync(OpenHtmlPageScript);
+            string id = await core.AddScriptToExecuteOnDocumentCreatedAsync(HazeFetchPageScript);
 
             // The protocol can change again (or another call add the script) while this one is being added.
-            if (_settings.WebViewProtocol == WebViewProtocol.OpenHtml && tab.OpenHtmlScriptId is null)
+            if (_settings.WebViewProtocol == WebViewProtocol.HazeFetch && tab.HazeFetchScriptId is null)
             {
-                tab.OpenHtmlScriptId = id;
+                tab.HazeFetchScriptId = id;
             }
             else
             {
                 core.RemoveScriptToExecuteOnDocumentCreated(id);
             }
         }
-        else if (!wanted && tab.OpenHtmlScriptId is string existing)
+        else if (!wanted && tab.HazeFetchScriptId is string existing)
         {
-            tab.OpenHtmlScriptId = null;
+            tab.HazeFetchScriptId = null;
             core.RemoveScriptToExecuteOnDocumentCreated(existing);
         }
     }
@@ -124,19 +130,21 @@ public partial class MainForm
     /// <summary>
     /// Settings were saved with another protocol: every open tab uses it from its next page, and the tab on screen
     /// reloads so it matches the setting straight away. Other tabs are not reloaded, so a form being filled in or a
-    /// page that was the answer to a form is not lost or sent again. Switching to OpenHTML also removes the service
-    /// workers sites installed earlier in the session (see OpenHtmlPageScript).
+    /// page that was the answer to a form is not lost or sent again. Switching to HazeFetch also removes the service
+    /// workers sites installed earlier in the session (see HazeFetchPageScript).
     /// </summary>
     private async Task ApplyWebViewProtocolToOpenTabsAsync()
     {
         UpdateProtocolBadge();
+        // Sites handed to the browser earlier get another chance with the new choice.
+        _hazeFetchBrowserSites.Clear();
         WebViewProtocol protocol = _settings.WebViewProtocol;
         foreach (BrowserTab tab in _tabs.ToList())
         {
             try
             {
-                tab.OpenHtmlRedirectCount = 0;
-                await UpdateOpenHtmlPageScriptAsync(tab);
+                tab.HazeFetchRedirectCount = 0;
+                await UpdateHazeFetchPageScriptAsync(tab);
             }
             catch (Exception ex) when (ex is InvalidOperationException or ObjectDisposedException or COMException)
             {
@@ -144,7 +152,7 @@ public partial class MainForm
             }
         }
 
-        if (protocol == WebViewProtocol.OpenHtml &&
+        if (protocol == WebViewProtocol.HazeFetch &&
             _tabs.Select(tab => tab.WebView.CoreWebView2).FirstOrDefault(core => core is not null) is CoreWebView2 profileCore)
         {
             try
@@ -154,7 +162,7 @@ public partial class MainForm
             }
             catch (Exception ex) when (ex is InvalidOperationException or ObjectDisposedException or COMException)
             {
-                Log($"Service workers could not be removed for OpenHTML: {ex.Message}");
+                Log($"Service workers could not be removed for HazeFetch: {ex.Message}");
             }
         }
 
@@ -183,24 +191,29 @@ public partial class MainForm
     }
 
     /// <summary>
-    /// Called for every request a tab makes (after web.block rules). Under OpenHTML, the tab's page documents are
-    /// fetched by PhantomHaze and handed to the tab. Frames inside a page, everything else, and every request under
-    /// WebView2 are left to the tab (frames keep the browser's own cookie rules, such as SameSite).
+    /// Called for every request a tab makes (after web.block rules). Under HazeFetch, the tab's page documents are
+    /// fetched by PhantomHaze and handed to the tab. Frames inside a page, everything else, every request under
+    /// WebView2 and pages of sites that need the browser's own loading (see HazeFetchBrowserSites) are left to the tab.
     /// </summary>
     private void TryServeDocumentWithProtocol(CoreWebView2 core, BrowserTab tab, CoreWebView2WebResourceRequestedEventArgs e)
     {
-        if (_settings.WebViewProtocol != WebViewProtocol.OpenHtml || !IsOpenHtmlDocumentRequest(e) || !IsPendingPageRequest(tab, e.Request.Uri))
+        if (_settings.WebViewProtocol != WebViewProtocol.HazeFetch || !IsHazeFetchDocumentRequest(e) || !IsPendingPageRequest(tab, e.Request.Uri))
         {
             return;
         }
 
         // Answered once: a frame of the page that happens to load the same address is left to the tab.
         tab.PendingPageUrl = null;
+        if (Uri.TryCreate(e.Request.Uri, UriKind.Absolute, out Uri? uri) && _hazeFetchBrowserSites.Contains(uri.Host))
+        {
+            return;
+        }
+
         CoreWebView2Deferral deferral = e.GetDeferral();
-        _ = ServeOpenHtmlDocumentAsync(core, tab, e, deferral);
+        _ = ServeHazeFetchDocumentAsync(core, tab, e, deferral);
     }
 
-    private static bool IsOpenHtmlDocumentRequest(CoreWebView2WebResourceRequestedEventArgs e)
+    private static bool IsHazeFetchDocumentRequest(CoreWebView2WebResourceRequestedEventArgs e)
     {
         if (e.ResourceContext != CoreWebView2WebResourceContext.Document)
         {
@@ -220,10 +233,10 @@ public partial class MainForm
     private static bool IsPendingPageRequest(BrowserTab tab, string requestUrl)
     {
         return tab.PendingPageUrl is string pending &&
-               string.Equals(OpenHtmlDocuments.WithoutFragment(pending), OpenHtmlDocuments.WithoutFragment(requestUrl), StringComparison.Ordinal);
+               string.Equals(HazeFetchDocuments.WithoutFragment(pending), HazeFetchDocuments.WithoutFragment(requestUrl), StringComparison.Ordinal);
     }
 
-    private async Task ServeOpenHtmlDocumentAsync(
+    private async Task ServeHazeFetchDocumentAsync(
         CoreWebView2 core,
         BrowserTab tab,
         CoreWebView2WebResourceRequestedEventArgs e,
@@ -232,25 +245,37 @@ public partial class MainForm
         string url = e.Request.Uri;
         try
         {
-            CoreWebView2WebResourceResponse? response = await FetchOpenHtmlDocumentAsync(core, tab, e.Request, url);
+            CoreWebView2WebResourceResponse? response = await FetchHazeFetchDocumentAsync(core, tab, e.Request, url);
             if (response is not null)
             {
                 e.Response = response;
             }
         }
-        catch (Exception ex) when (ex is HttpRequestException or OperationCanceledException or IOException or InvalidOperationException
-                                       or OpenHtmlException or UriFormatException)
+        catch (HazeFetchException ex) when (ex.SiteAnswered)
         {
+            // The site already answered (a redirect loop, a broken download): asking it again could repeat what the
+            // request did or use up a link that works only once, so the tab shows what went wrong instead.
             try
             {
-                string problem = ex is OperationCanceledException ? $"The site did not answer within {OpenHtmlTimeout.TotalSeconds:0} seconds." : ex.Message;
-                Log($"Tab {tab.Id} OpenHTML could not load {TrimForLog(url, 220)}: {problem}");
-                e.Response = CreateOpenHtmlMessageResponse(core, 502, "Bad Gateway", "OpenHTML could not load this page", url, problem);
+                Log($"Tab {tab.Id} HazeFetch could not load {TrimForLog(url, 220)}: {ex.Message}");
+                e.Response = core.Environment.CreateWebResourceResponse(
+                    new MemoryStream(Encoding.UTF8.GetBytes(HazeFetchDocuments.BuildErrorPage(url, ex.Message))),
+                    502,
+                    "Bad Gateway",
+                    "Content-Type: text/html; charset=utf-8\r\nCache-Control: no-store");
             }
             catch (Exception responseError) when (responseError is InvalidOperationException or ObjectDisposedException or COMException)
             {
                 // The tab closed while the page was loading.
             }
+        }
+        catch (Exception ex) when (ex is HttpRequestException or OperationCanceledException or IOException or InvalidOperationException
+                                       or HazeFetchException or UriFormatException)
+        {
+            // Smooth browsing first: when the site could not be reached at all, the tab tries itself (with the
+            // browser's own error page if the site really is unreachable).
+            string problem = ex is OperationCanceledException ? $"no answer within {HazeFetchTimeout.TotalSeconds:0} seconds" : ex.Message;
+            Log($"Tab {tab.Id} HazeFetch could not load {TrimForLog(url, 220)} ({problem}); the tab loads it itself.");
         }
         catch (Exception ex) when (ex is ObjectDisposedException or COMException)
         {
@@ -269,30 +294,53 @@ public partial class MainForm
         }
     }
 
+    // Request headers the tab's own request carries that HazeFetch does not copy: HttpClient sets them itself (host,
+    // connection, compression), or PhantomHaze builds them (cookies).
+    private static readonly HashSet<string> HazeFetchSkippedRequestHeaders = new(StringComparer.OrdinalIgnoreCase)
+    {
+        "Host", "Cookie", "Connection", "Keep-Alive", "Proxy-Connection", "Transfer-Encoding", "Content-Length",
+        "Accept-Encoding", "Upgrade", "TE", "Trailer",
+    };
+
     /// <returns>The response for the tab, or null to let the tab load the address itself.</returns>
-    private async Task<CoreWebView2WebResourceResponse?> FetchOpenHtmlDocumentAsync(
+    private async Task<CoreWebView2WebResourceResponse?> FetchHazeFetchDocumentAsync(
         CoreWebView2 core,
         BrowserTab tab,
         CoreWebView2WebResourceRequest original,
         string url)
     {
         // One limit for the whole fetch: connecting, the headers and the body (HttpClient.Timeout stops at the headers).
-        using var timeout = new CancellationTokenSource(OpenHtmlTimeout);
+        using var timeout = new CancellationTokenSource(HazeFetchTimeout);
         var requestUri = new Uri(url);
-        using var request = new HttpRequestMessage(HttpMethod.Get, requestUri);
-        request.Headers.TryAddWithoutValidation("User-Agent", core.Settings.UserAgent);
-        request.Headers.TryAddWithoutValidation("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8");
-        string? referer = GetRequestHeader(original, "Referer");
-        foreach (string header in new[] { "Accept-Language", "Referer" })
+        using var request = new HttpRequestMessage(HttpMethod.Get, requestUri)
         {
-            if (GetRequestHeader(original, header) is string value)
+            // HTTP/2 (multiplexed, header compression) where the site offers it, like the browser.
+            Version = HttpVersion.Version20,
+            VersionPolicy = HttpVersionPolicy.RequestVersionOrLower,
+        };
+
+        // The browser's own request headers (user agent, client hints, Sec-Fetch-*, language, referrer...), so sites
+        // answer exactly as they would answer the browser.
+        foreach (KeyValuePair<string, string> header in EnumerateRequestHeaders(original))
+        {
+            if (!HazeFetchSkippedRequestHeaders.Contains(header.Key))
             {
-                request.Headers.TryAddWithoutValidation(header, value);
+                request.Headers.TryAddWithoutValidation(header.Key, header.Value);
             }
         }
 
+        if (!request.Headers.Contains("User-Agent"))
+        {
+            request.Headers.TryAddWithoutValidation("User-Agent", core.Settings.UserAgent);
+        }
+
+        if (!request.Headers.Contains("Accept"))
+        {
+            request.Headers.TryAddWithoutValidation("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8");
+        }
+
         // Like the browser: SameSite=Strict cookies are not sent when another site links to this page.
-        bool crossSite = OpenHtmlDocuments.IsCrossSiteNavigation(GetRequestHeader(original, "Sec-Fetch-Site"), referer, requestUri);
+        bool crossSite = HazeFetchDocuments.IsCrossSiteNavigation(GetRequestHeader(original, "Sec-Fetch-Site"), GetRequestHeader(original, "Referer"), requestUri);
         List<CoreWebView2Cookie> cookies = await core.CookieManager.GetCookiesAsync(url);
         string? cookieHeader = BuildCookieHeader(cookies.Where(cookie => !crossSite || cookie.SameSite != CoreWebView2CookieSameSiteKind.Strict));
         if (cookieHeader is not null)
@@ -300,13 +348,25 @@ public partial class MainForm
             request.Headers.TryAddWithoutValidation("Cookie", cookieHeader);
         }
 
-        using HttpResponseMessage response = await _openHtmlHttpClient.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, timeout.Token);
+        using HttpResponseMessage response = await _hazeFetchHttpClient.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, timeout.Token);
         if (!_tabs.Contains(tab))
         {
             return null;
         }
 
-        if (ApplyOpenHtmlSetCookies(core, requestUri, response) > 0)
+        // Bot checks (Cloudflare, DataDome, ...) compare the connection with the browser, and sign-in prompts (HTTP
+        // authentication) need the browser: those sites are loaded by the tab itself for the rest of the session.
+        if (HazeFetchDocuments.NeedsBrowserLoading((int)response.StatusCode, EnumerateResponseHeaders(response), out string reason))
+        {
+            if (_hazeFetchBrowserSites.Add(requestUri.Host))
+            {
+                Log($"Tab {tab.Id} HazeFetch: {requestUri.Host} {reason}; the tab loads this site itself for the rest of the session.");
+            }
+
+            return null;
+        }
+
+        if (ApplyHazeFetchSetCookies(core, requestUri, response) > 0)
         {
             QueueCookieRegistrationCheck(tab);
         }
@@ -315,50 +375,66 @@ public partial class MainForm
         if (status is >= 300 and < 400 && response.Headers.Location is Uri location)
         {
             Uri target = location.IsAbsoluteUri ? location : new Uri(requestUri, location);
-            if (target.Scheme != Uri.UriSchemeHttp && target.Scheme != Uri.UriSchemeHttps)
+            // A redirect to an app link (mailto:, sign-in callbacks of apps, ...) is followed the same way; the tab then
+            // asks before opening the app (a protected PhantomHaze prompt).
+            if (++tab.HazeFetchRedirectCount > HazeFetchMaximumRedirects)
             {
-                throw new OpenHtmlException($"The site redirected to an address OpenHTML cannot open ({target.Scheme}:).");
-            }
-
-            if (++tab.OpenHtmlRedirectCount > OpenHtmlMaximumRedirects)
-            {
-                tab.OpenHtmlRedirectCount = 0;
-                throw new OpenHtmlException($"The site redirected more than {OpenHtmlMaximumRedirects} times in a row.");
+                // Stops a redirect loop for good (the next navigation starts counting again).
+                tab.HazeFetchRedirectCount = 0;
+                throw new HazeFetchException($"the site redirected more than {HazeFetchMaximumRedirects} times in a row", siteAnswered: true);
             }
 
             // The tab goes to the new address itself, so web.block rules and this protocol apply to it again. A
             // zero-second meta refresh replaces this page in the tab's history, so Back skips it.
-            Log($"Tab {tab.Id} OpenHTML: {TrimForLog(url, 200)} redirects to {TrimForLog(target.AbsoluteUri, 200)}");
-            return CreateOpenHtmlRedirectResponse(core, target);
+            Log($"Tab {tab.Id} HazeFetch: {TrimForLog(url, 200)} redirects to {TrimForLog(target.AbsoluteUri, 200)}");
+            return CreateHazeFetchRedirectResponse(core, target);
         }
 
-        tab.OpenHtmlRedirectCount = 0;
+        tab.HazeFetchRedirectCount = 0;
         string? mediaType = response.Content.Headers.ContentType?.MediaType;
-        bool isPage = OpenHtmlDocuments.IsHtmlMediaType(mediaType);
+        bool isPage = HazeFetchDocuments.IsHtmlMediaType(mediaType);
 
         // Files that are not pages (PDFs, images, downloads) are handed over from this same response, so a link that
         // works only once is not used up by a second request. A file too large to hold in memory is the exception.
-        byte[]? body = await ReadOpenHtmlBodyAsync(response.Content, timeout.Token);
+        byte[]? body;
+        try
+        {
+            body = await ReadHazeFetchBodyAsync(response.Content, timeout.Token);
+        }
+        catch (Exception ex) when (ex is IOException or HttpRequestException or OperationCanceledException)
+        {
+            throw new HazeFetchException(
+                ex is OperationCanceledException ? $"the site stopped sending the page (no data within {HazeFetchTimeout.TotalSeconds:0} seconds)" : $"the download broke off ({ex.Message})",
+                siteAnswered: true);
+        }
+
         if (body is null)
         {
-            if (isPage)
-            {
-                throw new OpenHtmlException($"The page is larger than {OpenHtmlMaximumBodyBytes / (1024 * 1024)} MB.");
-            }
-
-            Log($"Tab {tab.Id} OpenHTML: {TrimForLog(url, 220)} is a file larger than {OpenHtmlMaximumBodyBytes / (1024 * 1024)} MB; the tab downloads it itself.");
+            Log($"Tab {tab.Id} HazeFetch: {TrimForLog(url, 220)} is larger than {HazeFetchMaximumBodyBytes / (1024 * 1024)} MB; the tab loads it itself.");
             return null;
         }
 
-        string headers = OpenHtmlDocuments.BuildResponseHeaders(
+        string headers = HazeFetchDocuments.BuildResponseHeaders(
             response.Content.Headers.ContentType?.ToString() ?? (isPage ? "text/html" : "application/octet-stream"),
             EnumerateResponseHeaders(response));
-        Log($"Tab {tab.Id} OpenHTML: fetched {TrimForLog(url, 220)} ({status}, {FormatOpenHtmlSize(body.Length)}{(isPage ? string.Empty : ", " + (mediaType ?? "file"))})");
+        Log($"Tab {tab.Id} HazeFetch: fetched {TrimForLog(url, 220)} ({status}, HTTP/{response.Version}, {FormatHazeFetchSize(body.Length)}{(isPage ? string.Empty : ", " + (mediaType ?? "file"))})");
         return core.Environment.CreateWebResourceResponse(
             new MemoryStream(body),
             status,
-            OpenHtmlDocuments.SanitizeReasonPhrase(response.ReasonPhrase, status),
+            HazeFetchDocuments.SanitizeReasonPhrase(response.ReasonPhrase, status),
             headers);
+    }
+
+    private static IEnumerable<KeyValuePair<string, string>> EnumerateRequestHeaders(CoreWebView2WebResourceRequest request)
+    {
+        try
+        {
+            return request.Headers.ToList();
+        }
+        catch (Exception ex) when (ex is ArgumentException or InvalidOperationException or COMException)
+        {
+            return Array.Empty<KeyValuePair<string, string>>();
+        }
     }
 
     private static string? GetRequestHeader(CoreWebView2WebResourceRequest request, string name)
@@ -378,10 +454,10 @@ public partial class MainForm
         return response.Headers.Concat(response.Content.Headers);
     }
 
-    /// <returns>The body, or null when it is larger than OpenHtmlMaximumBodyBytes.</returns>
-    private static async Task<byte[]?> ReadOpenHtmlBodyAsync(HttpContent content, CancellationToken cancellationToken)
+    /// <returns>The body, or null when it is larger than HazeFetchMaximumBodyBytes.</returns>
+    private static async Task<byte[]?> ReadHazeFetchBodyAsync(HttpContent content, CancellationToken cancellationToken)
     {
-        if (content.Headers.ContentLength is long declared && declared > OpenHtmlMaximumBodyBytes)
+        if (content.Headers.ContentLength is long declared && declared > HazeFetchMaximumBodyBytes)
         {
             return null;
         }
@@ -392,7 +468,7 @@ public partial class MainForm
         int read;
         while ((read = await stream.ReadAsync(chunk, cancellationToken)) > 0)
         {
-            if (buffer.Length + read > OpenHtmlMaximumBodyBytes)
+            if (buffer.Length + read > HazeFetchMaximumBodyBytes)
             {
                 return null;
             }
@@ -414,7 +490,7 @@ public partial class MainForm
     /// Stores the page's Set-Cookie headers in the tab's cookie store (the response the tab gets has none), so logins
     /// and cookie banners work and "Save cookies across sessions" sees them. Returns how many cookies changed.
     /// </summary>
-    private int ApplyOpenHtmlSetCookies(CoreWebView2 core, Uri uri, HttpResponseMessage response)
+    private int ApplyHazeFetchSetCookies(CoreWebView2 core, Uri uri, HttpResponseMessage response)
     {
         if (!response.Headers.TryGetValues("Set-Cookie", out IEnumerable<string>? values))
         {
@@ -426,7 +502,7 @@ public partial class MainForm
         {
             try
             {
-                foreach (OpenHtmlDocuments.CookieChange change in OpenHtmlDocuments.ParseSetCookieHeader(uri, header))
+                foreach (HazeFetchDocuments.CookieChange change in HazeFetchDocuments.ParseSetCookieHeader(uri, header))
                 {
                     if (change.Cookie is Cookie cookie)
                     {
@@ -457,42 +533,30 @@ public partial class MainForm
     }
 
     /// <summary>A redirect, as a page that sends the tab to the new address (a meta refresh, which needs no script).</summary>
-    private static CoreWebView2WebResourceResponse CreateOpenHtmlRedirectResponse(CoreWebView2 core, Uri target)
-    {
-        return CreateHtmlResponse(core, 200, "OK", OpenHtmlDocuments.BuildRedirectPage(target.AbsoluteUri));
-    }
-
-    private static CoreWebView2WebResourceResponse CreateOpenHtmlMessageResponse(
-        CoreWebView2 core,
-        int status,
-        string reason,
-        string title,
-        string url,
-        string message)
-    {
-        return CreateHtmlResponse(core, status, reason, OpenHtmlDocuments.BuildMessagePage(title, url, message));
-    }
-
-    private static CoreWebView2WebResourceResponse CreateHtmlResponse(CoreWebView2 core, int status, string reason, string html)
+    private static CoreWebView2WebResourceResponse CreateHazeFetchRedirectResponse(CoreWebView2 core, Uri target)
     {
         return core.Environment.CreateWebResourceResponse(
-            new MemoryStream(Encoding.UTF8.GetBytes(html)),
-            status,
-            reason,
+            new MemoryStream(Encoding.UTF8.GetBytes(HazeFetchDocuments.BuildRedirectPage(target.AbsoluteUri))),
+            200,
+            "OK",
             "Content-Type: text/html; charset=utf-8\r\nCache-Control: no-store");
     }
 
-    private static string FormatOpenHtmlSize(int bytes)
+    private static string FormatHazeFetchSize(int bytes)
     {
         return bytes < 1024 ? $"{bytes} bytes" : FormattableString.Invariant($"{bytes / 1024.0:0.#} KB");
     }
 
-    /// <summary>A problem with a page OpenHTML fetched (too large, too many redirects, ...); shown on the error page.</summary>
-    private sealed class OpenHtmlException : Exception
+    /// <summary>A problem with a page HazeFetch fetched (too many redirects, a broken download, ...).</summary>
+    private sealed class HazeFetchException : Exception
     {
-        public OpenHtmlException(string message)
+        public HazeFetchException(string message, bool siteAnswered)
             : base(message)
         {
+            SiteAnswered = siteAnswered;
         }
+
+        /// <summary>True when the site already answered, so the request must not be sent again.</summary>
+        public bool SiteAnswered { get; }
     }
 }
