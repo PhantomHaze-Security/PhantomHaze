@@ -22,10 +22,18 @@ public partial class MainForm
     private bool _closeCookieCaptureInProgress;
     private bool _closeCookieCaptureDone;
 
+    // True once the saved cookies are back in Web View (or there were none). Until then a snapshot of Web View's
+    // cookies would be missing them, so it must not replace cookies.dat (that would delete every saved login).
+    private bool _savedCookiesRestored = true;
+
+    // Set when the window has cleaned up (CleanupWebSession): late snapshots no longer write cookies.dat.
+    private bool _webSessionCleanedUp;
+
     /// <summary>Reads cookies.dat at startup. With the setting off, a file left from earlier is deleted.</summary>
     private void LoadSavedCookies()
     {
         _savedCookies.Clear();
+        _savedCookiesRestored = true;
         if (!_settings.PersistCookiesAcrossSessions)
         {
             DeleteSavedCookiesFile();
@@ -41,6 +49,7 @@ public partial class MainForm
 
             byte[] json = ProtectedData.Unprotect(File.ReadAllBytes(_savedCookiesFilePath), SavedCookiesEntropy, DataProtectionScope.CurrentUser);
             _savedCookies.Load(SavedCookieStore.Deserialize(json), _settings.CookieRetentionDays, DateTimeOffset.UtcNow);
+            _savedCookiesRestored = _savedCookies.Cookies.Count == 0;
             Log(_savedCookies.Cookies.Count == 1 ? "1 saved cookie was loaded." : $"{_savedCookies.Cookies.Count} saved cookies were loaded.");
         }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or CryptographicException or JsonException or NotSupportedException)
@@ -48,15 +57,20 @@ public partial class MainForm
             // Unreadable (damaged, or saved by another Windows account): it can never be used, so it is removed.
             Log($"The saved cookies could not be read and were deleted: {ex.Message}");
             _savedCookies.Clear();
+            _savedCookiesRestored = true;
             DeleteSavedCookiesFile();
         }
     }
 
-    /// <summary>Puts the saved cookies into Web View. Runs once, for the first tab, before it loads anything.</summary>
+    /// <summary>
+    /// Puts the saved cookies into Web View, for the first tab, before it loads anything. If that tab's WebView closes
+    /// or fails meanwhile, the next tab tries again (see CreateTabAsync).
+    /// </summary>
     private void RestoreSavedCookies(CoreWebView2 core)
     {
         if (!_settings.PersistCookiesAcrossSessions || _savedCookies.Cookies.Count == 0)
         {
+            _savedCookiesRestored = true;
             return;
         }
 
@@ -83,12 +97,20 @@ public partial class MainForm
                 _knownCookieKeys.Add($"{saved.Name}\n{saved.Domain}\n{saved.Path}");
                 restored++;
             }
-            catch (Exception ex) when (ex is ArgumentException or COMException or InvalidOperationException)
+            catch (Exception ex) when (ex is ArgumentException or COMException)
             {
                 // A cookie WebView2 does not accept (for example an invalid domain) is skipped.
             }
+            catch (InvalidOperationException ex)
+            {
+                // The WebView closed or its browser process went away (ObjectDisposedException is one of these): the
+                // saved cookies stay saved and are put back by the next tab.
+                Log($"The saved cookies could not be restored yet ({ex.Message}); the next tab tries again.");
+                return;
+            }
         }
 
+        _savedCookiesRestored = true;
         Log(restored == 1 ? "1 saved cookie was restored." : $"{restored} saved cookies were restored.");
     }
 
@@ -124,7 +146,7 @@ public partial class MainForm
     /// <summary>Saves a snapshot of Web View's cookies (taken after page loads and Set-Cookie responses, and at close).</summary>
     private void UpdateSavedCookies(IReadOnlyList<CoreWebView2Cookie> liveCookies)
     {
-        if (!_settings.PersistCookiesAcrossSessions)
+        if (!_settings.PersistCookiesAcrossSessions || !_savedCookiesRestored || _webSessionCleanedUp)
         {
             return;
         }
@@ -192,6 +214,7 @@ public partial class MainForm
         {
             bool hadSavedCookies = _savedCookies.Cookies.Count > 0 || File.Exists(_savedCookiesFilePath);
             _savedCookies.Clear();
+            _savedCookiesRestored = true;
             DeleteSavedCookiesFile();
             if (hadSavedCookies || previous.PersistCookiesAcrossSessions)
             {
@@ -203,6 +226,8 @@ public partial class MainForm
 
         if (!previous.PersistCookiesAcrossSessions)
         {
+            // Nothing was saved before, so there is nothing to put back: the current cookies are saved from now on.
+            _savedCookiesRestored = true;
             Log($"Cookies are now saved across sessions (kept for {DescribeRetention(_settings.CookieRetentionDays)}).");
             _ = CaptureCookiesAfterSettingsChangeAsync();
             return;
@@ -317,7 +342,8 @@ public partial class MainForm
             _closeCookieCaptureDone = true;
         }
 
-        if (!IsDisposed && IsHandleCreated)
+        // Windows shutting down (or Task Manager) can close the window while the snapshot ran; it is closed already then.
+        if (!_webSessionCleanedUp && !IsDisposed && IsHandleCreated)
         {
             BeginInvoke(new Action(Close));
         }

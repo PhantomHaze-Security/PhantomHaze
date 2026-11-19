@@ -269,8 +269,8 @@ public partial class MainForm
                 // The tab closed while the page was loading.
             }
         }
-        catch (Exception ex) when (ex is HttpRequestException or OperationCanceledException or IOException or InvalidOperationException
-                                       or HazeFetchException or UriFormatException)
+        catch (Exception ex) when (ex is (HttpRequestException or OperationCanceledException or IOException or InvalidOperationException
+                                        or HazeFetchException or UriFormatException) and not ObjectDisposedException)
         {
             // Smooth browsing first: when the site could not be reached at all, the tab tries itself (with the
             // browser's own error page if the site really is unreachable).
@@ -295,11 +295,13 @@ public partial class MainForm
     }
 
     // Request headers the tab's own request carries that HazeFetch does not copy: HttpClient sets them itself (host,
-    // connection, compression), or PhantomHaze builds them (cookies).
+    // connection, compression), PhantomHaze builds them (cookies), or they would let the site answer with less than the
+    // whole page - "304 Not Modified" (an empty body) or "206 Partial Content" - which the tab would show as the page.
     private static readonly HashSet<string> HazeFetchSkippedRequestHeaders = new(StringComparer.OrdinalIgnoreCase)
     {
         "Host", "Cookie", "Connection", "Keep-Alive", "Proxy-Connection", "Transfer-Encoding", "Content-Length",
         "Accept-Encoding", "Upgrade", "TE", "Trailer",
+        "If-None-Match", "If-Modified-Since", "If-Match", "If-Unmodified-Since", "If-Range", "Range",
     };
 
     /// <returns>The response for the tab, or null to let the tab load the address itself.</returns>
@@ -366,12 +368,23 @@ public partial class MainForm
             return null;
         }
 
+        int status = (int)response.StatusCode;
+        bool tooLarge = status is < 300 or >= 400 && response.Content.Headers.ContentLength is long declared && declared > HazeFetchMaximumBodyBytes;
+        if (tooLarge || status is 304 or 206)
+        {
+            // A file too large to hold in memory (or, should a site send one anyway, a reply that is not the whole page):
+            // the tab requests it again itself, so a large download shows the usual progress. This response's cookies
+            // are not stored, because the tab's own request gets them again.
+            Log($"Tab {tab.Id} HazeFetch: {TrimForLog(url, 220)} " +
+                (tooLarge ? $"is larger than {HazeFetchMaximumBodyBytes / (1024 * 1024)} MB" : $"answered {status}") + "; the tab loads it itself.");
+            return null;
+        }
+
         if (ApplyHazeFetchSetCookies(core, requestUri, response) > 0)
         {
             QueueCookieRegistrationCheck(tab);
         }
 
-        int status = (int)response.StatusCode;
         if (status is >= 300 and < 400 && response.Headers.Location is Uri location)
         {
             Uri target = location.IsAbsoluteUri ? location : new Uri(requestUri, location);

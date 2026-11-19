@@ -31,7 +31,7 @@ Protection covers everything PhantomHaze shows, not just the main window: menus,
 
 ###  True Ephemeral Privacy
 * **Zero Session Footprint:** By default, web history and cookies are stored strictly in memory and wiped automatically the moment you close the app.
-* **Optional Saved Cookies:** Turn on **Settings -> General -> Save cookies across sessions** to stay signed in to websites. It is off by default; saved cookies are encrypted with Windows DPAPI for your Windows account, kept for the time you choose (1 day to forever, like saved history), and deleted as soon as you turn the setting off.
+* **Optional Saved Cookies:** Turn on **Settings -> General -> Save cookies across sessions** to stay signed in to websites. It is off by default; saved cookies are encrypted with Windows DPAPI for your Windows account, kept for the time you choose (1 day to forever, like saved history; cookies a site meant to end when the browser closes are kept at most 30 days), and deleted as soon as you turn the setting off.
 * **Persistent Favorites:** Keeps your bookmarked favorite sites safely saved across sessions without storing tracking cookies.
 * **Logs You Control:** Logs (including the addresses of pages you open) are kept in `%LOCALAPPDATA%\PhantomHaze\logs`, so the Master Log covers everything since installation. Cookie names and values are never logged, and **Settings -> About -> Delete all logs** removes them at any time.
 

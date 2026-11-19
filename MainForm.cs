@@ -3707,6 +3707,11 @@ public partial class MainForm : Form
             // while that is still running wait for it rather than clearing again (which could delete those cookies).
             _webSessionPreparation ??= PrepareWebSessionAsync(core);
             await _webSessionPreparation;
+            if (!_savedCookiesRestored)
+            {
+                // The first tab's WebView went away before the saved cookies were back: this tab puts them back.
+                RestoreSavedCookies(core);
+            }
 
             webView.ZoomFactor = tab.ZoomPercent / 100.0;
             webView.ZoomFactorChanged += (_, _) => OnTabZoomFactorChanged(tab);
@@ -5806,6 +5811,7 @@ public partial class MainForm : Form
 
     private void CleanupWebSession()
     {
+        _webSessionCleanedUp = true;
         _updateCheckCancellation.Cancel();
         SaveSettings();
         SaveHistory();

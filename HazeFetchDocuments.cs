@@ -39,6 +39,7 @@ internal static class HazeFetchDocuments
         "Cross-Origin-Embedder-Policy",
         "Cross-Origin-Resource-Policy",
         "Origin-Agent-Cluster",
+        "Strict-Transport-Security",
         "Content-Disposition",
         "Content-Language",
         "Refresh",

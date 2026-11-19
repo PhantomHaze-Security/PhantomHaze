@@ -54,9 +54,20 @@ internal sealed class SavedCookieStore
 
     public IReadOnlyList<SavedCookie> Cookies => _cookies;
 
+    /// <summary>
+    /// The longest a session cookie (one the site meant to end when the browser closes, so it has no expiry date) is
+    /// kept, even when the retention period is "as long as each site allows".
+    /// </summary>
+    public const int SessionCookieMaximumDays = 30;
+
     /// <param name="retentionDays">Days a cookie is kept after it was first saved; negative keeps it until it expires.</param>
     public static bool IsWithinRetention(SavedCookie cookie, int retentionDays, DateTimeOffset now)
     {
+        if (cookie.ExpiresUtc is null)
+        {
+            retentionDays = retentionDays < 0 ? SessionCookieMaximumDays : Math.Min(retentionDays, SessionCookieMaximumDays);
+        }
+
         return retentionDays < 0 || cookie.SavedAtUtc > now.AddDays(-retentionDays);
     }
 

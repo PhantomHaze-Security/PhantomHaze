@@ -42,10 +42,11 @@ public partial class MainForm
     private object? _windowCreationCallback;
     private bool _shieldDialogOpen;
     private bool _screenSharingNoticeShown;
-    // Pages whose picker requests keep being cancelled; they are refused until their next page load (a page could
-    // otherwise reopen a modal picker the moment the previous one closes).
-    private readonly Dictionary<CoreWebView2, (int Count, DateTime FirstUtc)> _cancelledShieldRequests = new();
-    private readonly HashSet<CoreWebView2> _shieldRequestsRefused = new();
+    // Sites whose picker or print requests keep being cancelled are refused for a minute, across page loads (a page
+    // could otherwise reopen a modal dialog the moment the previous one closes, or reload itself to start over).
+    private static readonly TimeSpan ShieldRefusalLength = TimeSpan.FromSeconds(60);
+    private readonly Dictionary<string, (int Count, DateTime FirstUtc)> _cancelledShieldRequests = new(StringComparer.OrdinalIgnoreCase);
+    private readonly Dictionary<string, DateTime> _shieldRequestsRefusedUntil = new(StringComparer.OrdinalIgnoreCase);
     // Permission prompts waiting for an answer, per site origin and permission: a second request waits for the same answer.
     private readonly Dictionary<string, List<Action<bool>>> _pendingPermissionAnswers = new(StringComparer.OrdinalIgnoreCase);
 
@@ -212,11 +213,6 @@ public partial class MainForm
         }
 
         view.KeyDown += OnShieldWebViewKeyDown;
-        core.NavigationStarting += (_, _) =>
-        {
-            _cancelledShieldRequests.Remove(core);
-            _shieldRequestsRefused.Remove(core);
-        };
         await core.AddScriptToExecuteOnDocumentCreatedAsync(CaptureShieldPageScript);
     }
 
@@ -225,8 +221,6 @@ public partial class MainForm
         if (core is not null)
         {
             _shieldSurfaces.Remove(core);
-            _cancelledShieldRequests.Remove(core);
-            _shieldRequestsRefused.Remove(core);
         }
     }
 
@@ -829,9 +823,14 @@ public partial class MainForm
 
     // -- Printing --
 
-    private async Task PrintPageAsync(CoreWebView2 core, ShieldSurface surface)
+    /// <param name="requestedByPage">
+    /// True when the page asked (window.print()): cancelled requests then count towards refusing the site for a while,
+    /// so a page cannot keep the print dialog open. Ctrl+P and the menu are the user's own and always work.
+    /// </param>
+    private async Task PrintPageAsync(CoreWebView2 core, ShieldSurface surface, bool requestedByPage = false)
     {
-        if (_shieldDialogOpen || surface.View.IsDisposed)
+        string site = GetShieldSite(core);
+        if (_shieldDialogOpen || surface.View.IsDisposed || (requestedByPage && IsShieldRequestRefused(site)))
         {
             return;
         }
@@ -846,6 +845,11 @@ public partial class MainForm
         finally
         {
             _shieldDialogOpen = false;
+        }
+
+        if (requestedByPage)
+        {
+            NoteShieldRequestOutcome(site, accepted: choice >= 0);
         }
 
         try
@@ -933,11 +937,12 @@ public partial class MainForm
         if (type == "print")
         {
             ReplyToPage(core, id, ok: true, value: null, objects: null);
-            _ = PrintPageAsync(core, surface);
+            _ = PrintPageAsync(core, surface, requestedByPage: true);
             return;
         }
 
-        if (_shieldDialogOpen || _shieldRequestsRefused.Contains(core))
+        string site = GetShieldSite(core);
+        if (_shieldDialogOpen || IsShieldRequestRefused(site))
         {
             ReplyToPage(core, id, ok: false, value: null, objects: null);
             return;
@@ -970,7 +975,7 @@ public partial class MainForm
                     return;
             }
 
-            NoteShieldRequestOutcome(core, accepted);
+            NoteShieldRequestOutcome(site, accepted);
         }
         catch (Exception ex) when (ex is InvalidOperationException or ObjectDisposedException or COMException or ArgumentException or IOException or UnauthorizedAccessException)
         {
@@ -983,24 +988,58 @@ public partial class MainForm
         }
     }
 
-    /// <summary>Three cancelled pickers within 30 seconds: the page is refused further pickers until it loads again.</summary>
-    private void NoteShieldRequestOutcome(CoreWebView2 core, bool accepted)
+    /// <summary>The site a WebView shows (scheme, host and port), which picker and print limits are kept for.</summary>
+    private static string GetShieldSite(CoreWebView2 core)
+    {
+        try
+        {
+            return Uri.TryCreate(core.Source, UriKind.Absolute, out Uri? uri) ? uri.GetLeftPart(UriPartial.Authority) : "(page)";
+        }
+        catch (Exception ex) when (ex is InvalidOperationException or COMException)
+        {
+            return "(page)";
+        }
+    }
+
+    private bool IsShieldRequestRefused(string site)
+    {
+        if (!_shieldRequestsRefusedUntil.TryGetValue(site, out DateTime until))
+        {
+            return false;
+        }
+
+        if (DateTime.UtcNow < until)
+        {
+            return true;
+        }
+
+        _shieldRequestsRefusedUntil.Remove(site);
+        return false;
+    }
+
+    /// <summary>
+    /// Three cancelled picker or print requests from a site within 30 seconds: the site is refused more for a minute,
+    /// even if it reloads.
+    /// </summary>
+    private void NoteShieldRequestOutcome(string site, bool accepted)
     {
         if (accepted)
         {
-            _cancelledShieldRequests.Remove(core);
+            _cancelledShieldRequests.Remove(site);
             return;
         }
 
         DateTime now = DateTime.UtcNow;
-        (int count, DateTime first) = _cancelledShieldRequests.TryGetValue(core, out var previous) && now - previous.FirstUtc < TimeSpan.FromSeconds(30)
+        (int count, DateTime first) = _cancelledShieldRequests.TryGetValue(site, out var previous) && now - previous.FirstUtc < TimeSpan.FromSeconds(30)
             ? (previous.Count + 1, previous.FirstUtc)
             : (1, now);
-        _cancelledShieldRequests[core] = (count, first);
-        if (count >= 3 && _shieldRequestsRefused.Add(core))
+        _cancelledShieldRequests[site] = (count, first);
+        if (count >= 3)
         {
-            Log("A page kept opening pickers that were cancelled; it can open no more until it is loaded again.");
-            ShowBrowserNotice("This page's pickers are blocked until it reloads.");
+            _cancelledShieldRequests.Remove(site);
+            _shieldRequestsRefusedUntil[site] = now + ShieldRefusalLength;
+            Log($"{site} kept opening pickers or print dialogs that were cancelled; it can open no more for a minute.");
+            ShowBrowserNotice("This site's pickers and print dialogs are blocked for a minute.");
         }
     }
 
@@ -1575,6 +1614,8 @@ public partial class MainForm
           const request = (message) => new Promise((resolve) => {
             if (isTop) {
               if (!webview) { resolve(null); return; }
+              // Pickers open only right after a click or key press, as in a browser.
+              if (message.type !== 'print' && navigator.userActivation && !navigator.userActivation.isActive) { resolve(null); return; }
               const id = newId();
               pending.set(id, resolve);
               try { webview.postMessage(Object.assign({}, message, { phantomHaze: 'shield', id })); } catch (_) { pending.delete(id); resolve(null); }
