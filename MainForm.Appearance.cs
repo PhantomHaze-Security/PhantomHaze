@@ -204,17 +204,21 @@ public partial class MainForm
 
     private bool IsDarkTheme() => _palette.IsDark;
 
+    /// <summary>Buttons drawn in the theme's button colours (filled, with an outline).</summary>
     private Button[] CommandButtons =>
     [
-        _toggleButton, _backButton, _goButton, _refreshButton, _historyButton, _newTabButton,
+        _toggleButton, _backButton, _forwardButton, _historyButton,
         _historyClearButton, _findCloseButton, _settingsButton, _updateBannerUpdateButton,
     ];
+
+    /// <summary>Buttons drawn without a fill on a surface of their own (the address box, the zoom group, the tab strip, the protection card).</summary>
+    private PillButton[] GhostButtons => [_refreshButton, _zoomLabel, _zoomInButton, _zoomOutButton, _newTabButton, _compactToggleButton];
 
     /// <summary>The panels a gradient theme paints (everything else shows them through a transparent background).</summary>
     private ThemedPanel[] ThemeSurfaces =>
     [
-        _menuBarPanel, _addressBarPanel, _historyPanel, _contentHostPanel, _webViewHostPanel, _extensionPageHostPanel,
-        _webViewLoadingOverlayPanel,
+        _menuBarPanel, _addressBarPanel, _tabStripPanel, _historyPanel, _contentHostPanel, _webViewHostPanel,
+        _extensionPageHostPanel, _webViewLoadingOverlayPanel,
     ];
 
     private ToolStrip[] PopupMenus => [_disableProtectionMenu, _extensionMenuOverflowMenu, _extensionDropdownMenu, _updateBannerSnoozeMenu];
@@ -382,7 +386,9 @@ public partial class MainForm
 
         BackColor = palette.AppBack;
         _menuBarPanel.BackColor = palette.MenuBack;
-        _addressBarPanel.BackColor = palette.PanelBack;
+        // The address row is part of the top bar and shows its colour (or the gradient behind it).
+        _addressBarPanel.BackColor = Color.Transparent;
+        _tabStripPanel.BackColor = palette.PanelBack;
         _contentHostPanel.BackColor = palette.AppBack;
         _webViewHostPanel.BackColor = palette.AppBack;
         _extensionPageHostPanel.BackColor = palette.AppBack;
@@ -399,6 +405,10 @@ public partial class MainForm
         _favoriteButton.FlatAppearance.BorderColor = palette.ButtonBorder;
         _webViewToggleButton.FlatAppearance.BorderColor = palette.ButtonBorder;
         _logsViewButton.FlatAppearance.BorderColor = palette.ButtonBorder;
+        _viewSwitcherPanel.BorderColor = palette.ButtonBorder;
+        _zoomGroupPanel.BorderColor = palette.ButtonBorder;
+        _addressPill.BorderColor = palette.ButtonBorder;
+        _compactProtectionPanel.BorderColor = palette.ButtonBorder;
 
         ApplyGradientTransparency(palette.Gradient is not null);
         UpdateProtectionStatusVisual();
@@ -422,10 +432,28 @@ public partial class MainForm
         Color buttonText = ResolveTextColor(palette.ButtonText);
         Color buttonBack = ResolveSurfaceBack(palette.ButtonBack, buttonText);
 
-        foreach (Control label in new Control[] { _menuLogoLabel, _menuLogoPictureBox, _menuClockLabel, _webViewLoadingLabel, _historyTitleLabel, _favoritesTitleLabel, _zoomLabel, _findCountLabel })
+        foreach (Control label in new Control[] { _menuLogoLabel, _menuLogoPictureBox, _menuClockLabel, _webViewLoadingLabel, _historyTitleLabel, _favoritesTitleLabel, _findCountLabel })
         {
             label.ForeColor = text;
         }
+
+        // Surfaces of the top bar: the view switcher's track, the zoom group, the address box and the protection card.
+        Color viewNormalText = ResolveTextColor(palette.ViewNormalText);
+        _viewSwitcherPanel.TrackColor = ResolveSurfaceBack(palette.ViewNormalBack, viewNormalText);
+        _zoomGroupPanel.TrackColor = buttonBack;
+        _compactProtectionPanel.FillColor = buttonBack;
+        _protocolBadgeLabel.ForeColor = Blend(inputText, inputBack, 0.35);
+
+        // Ghost buttons have no fill of their own until hovered.
+        foreach (PillButton button in GhostButtons)
+        {
+            button.BackColor = Color.Transparent;
+            button.ForeColor = buttonText;
+        }
+
+        _refreshButton.ForeColor = inputText;
+        _newTabButton.ForeColor = ResolveTextColor(palette.TabInactiveText);
+        UpdateZoomButtonIcons();
 
         foreach (Control input in new Control[] { _addressBarTextBox, _historyListBox, _favoritesListBox, _findTextBox })
         {
@@ -450,12 +478,36 @@ public partial class MainForm
         UpdateWebViewToggleVisual();
     }
 
+    // The - and + icons of the zoom group, drawn in the button text colour (they are not extension elements, so the
+    // ui.svg machinery that draws the other icons does not cover them).
+    private readonly Dictionary<PillButton, (Color Color, int Size)> _zoomButtonIconState = new();
+
+    private void UpdateZoomButtonIcons()
+    {
+        int side = ScaleByDpi(14);
+        foreach ((PillButton button, PhantomSvgDocument icon) in new[] { (_zoomOutButton, PhantomIcons.Minus), (_zoomInButton, PhantomIcons.Plus) })
+        {
+            if (_zoomButtonIconState.TryGetValue(button, out (Color Color, int Size) state) &&
+                state.Color == button.ForeColor && state.Size == side && button.Image is not null)
+            {
+                continue;
+            }
+
+            Image? previous = button.Image;
+            button.Image = PhantomSvgRenderer.Render(icon, new Size(side, side), button.ForeColor);
+            previous?.Dispose();
+            _zoomButtonIconState[button] = (button.ForeColor, side);
+        }
+    }
+
     private void ApplyGradientTransparency(bool gradient)
     {
+        // The address box, the zoom group, the view switcher and the protection card are always transparent outside
+        // their rounded shapes (and so are the layouts inside them); they are not in this list.
         Control?[] containers =
         [
-            _menuLayout, _menuLogoLayout, _extensionMenuButtonsPanel, _menuLogoLabel, _menuLogoPictureBox, _menuClockLabel,
-            _addressRootLayout, _addressStripLayout, _addressInputLayout, _tabsLayout, _tabsFlowPanel, _zoomLabel,
+            _headerLayout, _menuLayout, _menuLogoLayout, _extensionMenuButtonsPanel, _menuLogoLabel, _menuLogoPictureBox,
+            _menuClockLabel, _addressStripLayout, _tabsLayout, _tabsFlowPanel,
             _historyLayout, _historyTitleLabel, _favoritesTitleLabel, _webViewLoadingLabel,
         ];
 
@@ -483,15 +535,6 @@ public partial class MainForm
             }
         }
 
-        // TrackBar cannot be transparent.
-        if (gradient)
-        {
-            _zoomSlider.BackColor = _palette.PanelBack;
-        }
-        else
-        {
-            _zoomSlider.ResetBackColor();
-        }
     }
 
     protected override void OnPaintBackground(PaintEventArgs e)
@@ -1337,6 +1380,7 @@ public partial class MainForm
                  {
                      _tabCloseFontRegular, _tabCloseFontCompact, _menuButtonFontRegular, _menuButtonFontBold, _menuTitleFont,
                      _tabTitleFont, _stripButtonFont, _favoriteButtonFont, _zoomLabelFont, _newTabButtonFont, _logFont,
+                     _statusLabelFont, _compactProtectionFont, _protocolBadgeFont,
                  })
         {
             font.Dispose();

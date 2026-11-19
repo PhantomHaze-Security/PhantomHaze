@@ -126,7 +126,10 @@ internal static class NativeMethods
     // declaring Windows 10/11 support. RtlGetVersion in ntdll is unaffected
     // by that shim, so it's the only reliable way to confirm the real build
     // number without also having to get the manifest right.
-    [StructLayout(LayoutKind.Sequential)]
+    // RtlGetVersion fills the wide-character (W) structure: szCSDVersion is 128 UTF-16 characters (256 bytes). Without
+    // CharSet.Unicode it was marshalled as 128 bytes, so dwOSVersionInfoSize did not match any valid size and the
+    // native call could write past the end of the marshalling buffer.
+    [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
     private struct OSVERSIONINFOEX
     {
         public uint dwOSVersionInfoSize;
@@ -200,4 +203,154 @@ internal static class NativeMethods
         WDA_EXCLUDEFROMCAPTURE => "WDA_EXCLUDEFROMCAPTURE (protected — physical view normal, capture excluded)",
         _ => $"Unknown affinity (0x{affinity:X})"
     };
+
+    // ---- Watching PhantomHaze's own top-level windows ----
+    // Tooltips, combo box drop-down lists, menus and dialogs are top-level windows of their own, so the main window's
+    // capture exclusion does not cover them. A WinEvent hook reports every window this process creates or shows, so
+    // each one can be excluded from capture too (see MainForm.CaptureShield.cs).
+    public const uint EVENT_OBJECT_CREATE = 0x8000;
+    public const uint EVENT_OBJECT_DESTROY = 0x8001;
+    public const uint EVENT_OBJECT_SHOW = 0x8002;
+    public const int OBJID_WINDOW = 0;
+    private const uint WINEVENT_OUTOFCONTEXT = 0x0000;
+    private const uint GA_ROOT = 2;
+
+    public delegate void WinEventProc(IntPtr hWinEventHook, uint eventType, IntPtr hwnd, int idObject, int idChild, uint idEventThread, uint dwmsEventTime);
+
+    [DllImport("user32.dll")]
+    private static extern IntPtr SetWinEventHook(uint eventMin, uint eventMax, IntPtr hmodWinEventProc, WinEventProc lpfnWinEventProc, uint idProcess, uint idThread, uint dwFlags);
+
+    [DllImport("user32.dll")]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool UnhookWinEvent(IntPtr hWinEventHook);
+
+    [DllImport("user32.dll")]
+    private static extern IntPtr GetAncestor(IntPtr hwnd, uint gaFlags);
+
+    [DllImport("user32.dll")]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    public static extern bool IsWindow(IntPtr hWnd);
+
+    private delegate bool EnumWindowsProc(IntPtr hWnd, IntPtr lParam);
+
+    [DllImport("user32.dll")]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool EnumThreadWindows(uint dwThreadId, EnumWindowsProc lpfn, IntPtr lParam);
+
+    /// <summary>Reports windows this process creates, destroys or shows; out of context, on the calling (UI) thread.</summary>
+    public static IntPtr WatchProcessWindows(WinEventProc callback)
+    {
+        try
+        {
+            return SetWinEventHook(EVENT_OBJECT_CREATE, EVENT_OBJECT_SHOW, IntPtr.Zero, callback, (uint)Environment.ProcessId, 0, WINEVENT_OUTOFCONTEXT);
+        }
+        catch (Exception ex) when (ex is DllNotFoundException or EntryPointNotFoundException)
+        {
+            return IntPtr.Zero;
+        }
+    }
+
+    public static void StopWatchingProcessWindows(IntPtr hook)
+    {
+        if (hook != IntPtr.Zero)
+        {
+            UnhookWinEvent(hook);
+        }
+    }
+
+    /// <summary>True for a top-level window (not a child window inside another one).</summary>
+    public static bool IsTopLevelWindow(IntPtr hWnd) => hWnd != IntPtr.Zero && GetAncestor(hWnd, GA_ROOT) == hWnd;
+
+    /// <summary>Every top-level window of the calling thread (tooltips, drop-downs, menus, dialogs, forms).</summary>
+    public static List<IntPtr> GetCurrentThreadTopLevelWindows()
+    {
+        var windows = new List<IntPtr>();
+        EnumWindowsProc callback = (hWnd, _) =>
+        {
+            windows.Add(hWnd);
+            return true;
+        };
+        EnumThreadWindows(GetCurrentThreadId(), callback, IntPtr.Zero);
+        GC.KeepAlive(callback);
+        return windows;
+    }
+
+    // ---- Taskbar thumbnails, Alt+Tab and Peek ----
+    // These previews are drawn by the Windows shell, so a screen recording would show a protected window's content in
+    // them. While protection is on, Windows shows the app icon instead of a live preview and Peek ignores the window.
+    private const int DWMWA_FORCE_ICONIC_REPRESENTATION = 7;
+    private const int DWMWA_DISALLOW_PEEK = 11;
+    private const int DWMWA_EXCLUDED_FROM_PEEK = 12;
+
+    [DllImport("dwmapi.dll")]
+    private static extern int DwmSetWindowAttribute(IntPtr hwnd, int dwAttribute, ref int pvAttribute, int cbAttribute);
+
+    public static void HideFromShellPreviews(IntPtr hWnd, bool hide)
+    {
+        try
+        {
+            int value = hide ? 1 : 0;
+            DwmSetWindowAttribute(hWnd, DWMWA_FORCE_ICONIC_REPRESENTATION, ref value, sizeof(int));
+            DwmSetWindowAttribute(hWnd, DWMWA_DISALLOW_PEEK, ref value, sizeof(int));
+            DwmSetWindowAttribute(hWnd, DWMWA_EXCLUDED_FROM_PEEK, ref value, sizeof(int));
+        }
+        catch (Exception ex) when (ex is DllNotFoundException or EntryPointNotFoundException)
+        {
+            // Desktop composition is unavailable; there are no previews to hide either.
+        }
+    }
+
+    // A thread-local CBT hook that sees each window the UI thread creates before it is first shown, so pop-ups
+    // (tooltips, the edit box right-click menu, drop-down lists) are excluded from capture before their first frame.
+    // The WinEvent hook above covers windows created on other threads, a moment later.
+    private const int HCBT_CREATEWND = 3;
+    private const int WS_CHILD = 0x40000000;
+
+    public static IntPtr WatchThreadWindowCreation(Action<IntPtr> onTopLevelWindowCreated, out object keepAlive)
+    {
+        IntPtr hook = IntPtr.Zero;
+        CbtHookProc callback = (nCode, wParam, lParam) =>
+        {
+            if (nCode == HCBT_CREATEWND)
+            {
+                try
+                {
+                    // lParam is a CBT_CREATEWND whose first field points to the CREATESTRUCT; style follows four
+                    // pointers and four ints.
+                    IntPtr createStruct = Marshal.ReadIntPtr(lParam);
+                    int style = Marshal.ReadInt32(createStruct, (4 * IntPtr.Size) + 16);
+                    if ((style & WS_CHILD) == 0)
+                    {
+                        onTopLevelWindowCreated(wParam);
+                    }
+                }
+                catch
+                {
+                    // An exception must never cross back into native code.
+                }
+            }
+
+            return CallNextHookEx(hook, nCode, wParam, lParam);
+        };
+
+        keepAlive = callback;
+        try
+        {
+            hook = SetWindowsHookEx(WH_CBT, callback, IntPtr.Zero, GetCurrentThreadId());
+        }
+        catch (Exception ex) when (ex is DllNotFoundException or EntryPointNotFoundException)
+        {
+            hook = IntPtr.Zero;
+        }
+
+        return hook;
+    }
+
+    public static void StopWatchingThreadWindowCreation(IntPtr hook)
+    {
+        if (hook != IntPtr.Zero)
+        {
+            UnhookWindowsHookEx(hook);
+        }
+    }
 }

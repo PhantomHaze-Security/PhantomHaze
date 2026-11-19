@@ -14,6 +14,7 @@ public partial class MainForm
         long Extensions,
         long History,
         long Favorites,
+        long Cookies,
         long Settings,
         long Fonts,
         long Logs,
@@ -111,6 +112,7 @@ public partial class MainForm
         Label extensionsSizeLabel = AddRow("    Extensions", "…");
         Label historySizeLabel = AddRow("    History", "…");
         Label favoritesSizeLabel = AddRow("    Favourites", "…");
+        Label cookiesSizeLabel = AddRow("    Saved cookies", "…");
         Label settingsSizeLabel = AddRow("    Settings", "…");
         Label fontsSizeLabel = AddRow("    Fonts", "…");
         Label logsSizeLabel = AddRow("    Logs", "…");
@@ -255,11 +257,14 @@ public partial class MainForm
             }
 
             appSizeLabel.Text = $"{FormatMegabytes(sizes.App)} ({sizes.AppDescription})";
-            long total = sizes.Extensions + sizes.History + sizes.Favorites + sizes.Settings + sizes.Fonts + sizes.Logs + sizes.TemporaryWebData;
+            long total = sizes.Extensions + sizes.History + sizes.Favorites + sizes.Cookies + sizes.Settings + sizes.Fonts + sizes.Logs + sizes.TemporaryWebData;
             dataSizeLabel.Text = FormatMegabytes(total);
             extensionsSizeLabel.Text = FormatMegabytes(sizes.Extensions);
             historySizeLabel.Text = FormatMegabytes(sizes.History);
             favoritesSizeLabel.Text = FormatMegabytes(sizes.Favorites);
+            cookiesSizeLabel.Text = _settings.PersistCookiesAcrossSessions
+                ? $"{FormatMegabytes(sizes.Cookies)} (encrypted)"
+                : $"{FormatMegabytes(sizes.Cookies)} (saving cookies is off)";
             settingsSizeLabel.Text = FormatMegabytes(sizes.Settings);
             fontsSizeLabel.Text = FormatMegabytes(sizes.Fonts);
             logsSizeLabel.Text = FormatMegabytes(sizes.Logs);
@@ -326,6 +331,8 @@ public partial class MainForm
             ("Windows build", buildText),
             ("Architecture", RuntimeInformation.ProcessArchitecture.ToString()),
             ("WebView2 runtime", webView2),
+            ("Web View protocol", GetWebViewProtocolInfo(_settings.WebViewProtocol).Name),
+            ("Saved cookies", _settings.PersistCookiesAcrossSessions ? $"On (kept for {DescribeRetention(_settings.CookieRetentionDays)})" : "Off"),
             ("Capture protection", _protectionEnabled ? "On" : "Off"),
             ("Display scale", string.Create(CultureInfo.InvariantCulture, $"{DeviceDpi * 100 / 96}%")),
             ("Extensions", $"{_settings.Extensions.Count} installed, {activeExtensions} active"),
@@ -358,13 +365,14 @@ public partial class MainForm
         long extensions = GetDirectorySize(_extensionsRootPath);
         long history = GetFileSize(_historyFilePath);
         long favorites = GetFileSize(_favoritesFilePath);
+        long cookies = GetFileSize(_savedCookiesFilePath);
         long fonts = GetDirectorySize(_fontCacheDirectory);
         long logs = GetDirectorySize(_logDirectory);
         long appData = GetDirectorySize(GetAppDataDirectory());
         // Everything else in the data folder: settings.json, the update reminder, preserved unreadable files.
-        long settings = Math.Max(0, appData - extensions - history - favorites - fonts - logs);
+        long settings = Math.Max(0, appData - extensions - history - favorites - cookies - fonts - logs);
         long temporary = GetDirectorySize(Path.Combine(Path.GetTempPath(), "PhantomHaze"));
-        return new AboutSizes(appSize, appDescription, extensions, history, favorites, settings, fonts, logs, temporary);
+        return new AboutSizes(appSize, appDescription, extensions, history, favorites, cookies, settings, fonts, logs, temporary);
     }
 
     private static long GetFileSize(string path)

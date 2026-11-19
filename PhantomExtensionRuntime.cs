@@ -248,7 +248,7 @@ internal static class PhantomUiTargets
 
     public static IReadOnlyList<PhantomUiTargetInfo> BuiltIn { get; } =
     [
-        new("menu.bar", "The top menu bar", PhantomUiCapabilities.Background),
+        new("menu.bar", "The top bar (the menu row, and in Web View the address row)", PhantomUiCapabilities.Background),
         new("menu.logo", "The PhantomHaze logo in the menu bar",
             PhantomUiCapabilities.Tooltip | PhantomUiCapabilities.Visible | PhantomUiCapabilities.Background |
             PhantomUiCapabilities.Svg | PhantomUiCapabilities.Shape),
@@ -256,12 +256,12 @@ internal static class PhantomUiTargets
             PhantomUiCapabilities.Text | PhantomUiCapabilities.Tooltip | PhantomUiCapabilities.Visible |
             PhantomUiCapabilities.Background | PhantomUiCapabilities.Foreground | PhantomUiCapabilities.Font |
             PhantomUiCapabilities.Svg | PhantomUiCapabilities.Shape),
-        new("menu.logs", "The Logs button", ButtonLike),
-        new("menu.webview", "The Web View button", ButtonLike),
-        new("menu.clock", "The clock to the left of Settings",
+        new("menu.logs", "The Log segment of the view switcher", ButtonLike),
+        new("menu.webview", "The Web segment of the view switcher", ButtonLike),
+        new("menu.clock", "The clock at the right of the menu row",
             PhantomUiCapabilities.Tooltip | PhantomUiCapabilities.Visible | PhantomUiCapabilities.Background |
             PhantomUiCapabilities.Foreground | PhantomUiCapabilities.Font | PhantomUiCapabilities.Shape),
-        new("menu.settings", "The Settings button (it can be restyled but never hidden)", ButtonLike & ~PhantomUiCapabilities.Visible),
+        new("menu.settings", "The Settings (gear) button (it can be restyled but never hidden)", ButtonLike & ~PhantomUiCapabilities.Visible),
         new("address.bar", "The address box",
             PhantomUiCapabilities.Tooltip | PhantomUiCapabilities.Background | PhantomUiCapabilities.Foreground |
             PhantomUiCapabilities.Font),
@@ -269,10 +269,12 @@ internal static class PhantomUiTargets
             PhantomUiCapabilities.Tooltip | PhantomUiCapabilities.Visible | PhantomUiCapabilities.Border |
             PhantomUiCapabilities.Font | PhantomUiCapabilities.Svg | PhantomUiCapabilities.Shape),
         new("address.back", "The Back button", ButtonLike),
-        new("address.go", "The Go button", ButtonLike),
-        new("address.refresh", "The Refresh button", ButtonLike),
-        new("address.history", "The History button", ButtonLike),
-        new("address.zoom", "The zoom percentage label",
+        new("address.forward", "The Forward button", ButtonLike),
+        // Until v1.3.5 this was the Go button; it now names the Forward button, so extensions that use it still load.
+        new("address.go", "The Forward button (older name of address.forward)", ButtonLike),
+        new("address.refresh", "The Refresh button inside the address box", ButtonLike),
+        new("address.history", "The Favorites button (opens history and favourites)", ButtonLike),
+        new("address.zoom", "The zoom percentage label (click to reset to 100%)",
             PhantomUiCapabilities.Tooltip | PhantomUiCapabilities.Visible | PhantomUiCapabilities.Background |
             PhantomUiCapabilities.Foreground | PhantomUiCapabilities.Font),
         new("tabs.new", "The new tab (+) button", ButtonLike),

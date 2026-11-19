@@ -64,6 +64,12 @@ public partial class MainForm
 
         public Func<Font>? DefaultFont { get; init; }
         public Func<Image?>? DefaultImage { get; init; }
+
+        /// <summary>The built-in icon of an icon button (Settings, Back, Forward, Refresh, the star, +); an extension's ui.svg replaces it.</summary>
+        public Func<PhantomSvgDocument?>? DefaultIcon { get; init; }
+
+        /// <summary>The normal tooltip (icon buttons have no text, so they are named when hovered).</summary>
+        public Func<string?>? DefaultTooltip { get; init; }
     }
 
     /// <summary>The combined customisations of one control (later extensions win, property by property).</summary>
@@ -130,14 +136,22 @@ public partial class MainForm
     // ---- Menu bar -----------------------------------------------------------------------------------------------
 
     /// <summary>
-    /// Rebuilds the extension area of the menu bar: first the page buttons (they switch views, like Logs and Web View),
-    /// then each extension's buttons and dropdowns in the order its file declares them.
+    /// Rebuilds what extensions add to the menu bar: their pages become segments after Log | Web (they switch views like
+    /// those two), and each extension's buttons and dropdowns follow Settings in the order its file declares them.
     /// </summary>
     private void RebuildExtensionMenuButtons()
     {
         _extensionMenuButtonsPanel.SuspendLayout();
+        _viewSwitcherPanel.SuspendLayout();
         try
         {
+            // Log and Web are permanent; only the extensions' page segments are recreated.
+            foreach (Control control in _viewSwitcherPanel.Controls.OfType<Control>().Where(control => control.Tag is ExtensionMenuEntry).ToArray())
+            {
+                _viewSwitcherPanel.Controls.Remove(control);
+                control.Dispose();
+            }
+
             // The overflow button is permanent; only the per-extension buttons are recreated.
             _extensionMenuButtonsPanel.Controls.Remove(_extensionMenuOverflowButton);
             foreach (Control control in _extensionMenuButtonsPanel.Controls.OfType<Control>().ToArray())
@@ -170,12 +184,13 @@ public partial class MainForm
             }
 
             ConfigureMenuButton(_extensionMenuOverflowButton, "»");
-            _extensionMenuOverflowButton.MinimumSize = new Size(ScaleByDpi(40), 0);
+            _extensionMenuOverflowButton.MinimumSize = new Size(ScaleByDpi(36), ScaleByDpi(MenuRowControlHeight));
             _extensionMenuOverflowButton.Visible = false;
             _extensionMenuButtonsPanel.Controls.Add(_extensionMenuOverflowButton);
         }
         finally
         {
+            _viewSwitcherPanel.ResumeLayout(true);
             _extensionMenuButtonsPanel.ResumeLayout(true);
         }
 
@@ -185,9 +200,17 @@ public partial class MainForm
 
     private void AddExtensionMenuButton(ExtensionMenuEntry entry)
     {
-        var button = new Button();
-        ConfigureMenuButton(button, GetDefaultExtensionButtonText(entry));
-        button.MinimumSize = new Size(ScaleByDpi(64), 0);
+        var button = new PillButton();
+        if (entry.Kind == ExtensionMenuEntryKind.Page)
+        {
+            // A page is one more view, so it joins Log | Web as a segment of the switcher.
+            ConfigureViewSegment(button, GetDefaultExtensionButtonText(entry));
+        }
+        else
+        {
+            ConfigureMenuButton(button, GetDefaultExtensionButtonText(entry));
+        }
+
         // Labels come from extensions: show '&' literally instead of turning it into a mnemonic.
         button.UseMnemonic = false;
         button.AccessibleName = string.IsNullOrWhiteSpace(entry.Label) ? entry.ElementId : entry.Label;
@@ -198,7 +221,15 @@ public partial class MainForm
 
         button.Tag = entry;
         button.Click += (_, _) => RunExtensionMenuEntry(entry, button);
-        _extensionMenuButtonsPanel.Controls.Add(button);
+        if (entry.Kind == ExtensionMenuEntryKind.Page)
+        {
+            _viewSwitcherPanel.Controls.Add(button);
+        }
+        else
+        {
+            _extensionMenuButtonsPanel.Controls.Add(button);
+        }
+
         _extensionElementButtons[GetElementKey(entry.Extension.Definition.Id, entry.ElementId)] = button;
     }
 
@@ -479,6 +510,12 @@ public partial class MainForm
             }
 
             ConfigureExtensionSurfaceCore(webView.CoreWebView2);
+            await ConfigureCaptureShieldAsync(webView, webView.CoreWebView2, isTab: false);
+            if (IsDisposed || webView.IsDisposed)
+            {
+                return;
+            }
+
             RenderExtensionPageSafely(state);
         }
         catch (Exception ex)
@@ -620,6 +657,7 @@ public partial class MainForm
                     core.NewWindowRequested -= OnExtensionWindowNewWindowRequested;
                     core.NavigationStarting -= OnExtensionWindowNavigationStarting;
                     core.WebResourceRequested -= OnExtensionWindowWebResourceRequested;
+                    ForgetShieldSurface(core);
                 }
 
                 _extensionPageHostPanel.Controls.Remove(webView);
@@ -661,7 +699,14 @@ public partial class MainForm
 
     private void BuildUiTargetBindings()
     {
-        void Bind(string name, Control control, Func<string>? text = null, Func<Font>? font = null, Func<Image?>? image = null)
+        void Bind(
+            string name,
+            Control control,
+            Func<string>? text = null,
+            Func<Font>? font = null,
+            Func<Image?>? image = null,
+            Func<PhantomSvgDocument?>? icon = null,
+            Func<string?>? tooltip = null)
         {
             PhantomUiCapabilities capabilities = PhantomUiTargets.TryGetBuiltIn(name, out PhantomUiTargetInfo info)
                 ? info.Capabilities
@@ -671,6 +716,8 @@ public partial class MainForm
                 DefaultText = text,
                 DefaultFont = font,
                 DefaultImage = image,
+                DefaultIcon = icon,
+                DefaultTooltip = tooltip,
             };
 
             if (font is not null)
@@ -685,19 +732,29 @@ public partial class MainForm
         Bind("menu.bar", _menuBarPanel);
         Bind("menu.logo", _menuLogoPictureBox, image: () => _defaultLogoImage);
         Bind("menu.title", _menuLogoLabel, text: () => "PhantomHaze", font: () => MapFont(_menuTitleFont));
-        Bind("menu.logs", _logsViewButton, text: () => "Logs", font: () => MapFont(IsLogsViewSelected ? _menuButtonFontBold : _menuButtonFontRegular));
-        Bind("menu.webview", _webViewToggleButton, text: () => "Web View", font: () => MapFont(_webViewModeEnabled ? _menuButtonFontBold : _menuButtonFontRegular));
+        Bind("menu.logs", _logsViewButton, text: () => "Log", font: () => MapFont(IsLogsViewSelected ? _menuButtonFontBold : _menuButtonFontRegular));
+        Bind("menu.webview", _webViewToggleButton, text: () => "Web", font: () => MapFont(_webViewModeEnabled ? _menuButtonFontBold : _menuButtonFontRegular));
         Bind("menu.clock", _menuClockLabel, font: () => MapFont(_menuButtonFontRegular));
-        // These two inherit the window's font; MapFont(Font) is that same font unless an app font is in use.
-        Bind("menu.settings", _settingsButton, text: () => "Settings", font: () => MapFont(Font));
+        Bind("menu.settings", _settingsButton, text: () => string.Empty, font: () => MapFont(_menuButtonFontRegular),
+            icon: () => PhantomIcons.Settings, tooltip: () => "Settings");
         Bind("address.bar", _addressBarTextBox, font: () => MapFont(Font));
-        Bind("address.favorite", _favoriteButton, font: () => MapFont(_favoriteButtonFont));
-        Bind("address.back", _backButton, text: () => "Back", font: () => MapFont(_stripButtonFont));
-        Bind("address.go", _goButton, text: () => "Go", font: () => MapFont(_stripButtonFont));
-        Bind("address.refresh", _refreshButton, text: () => "Refresh", font: () => MapFont(_stripButtonFont));
-        Bind("address.history", _historyButton, text: () => "History", font: () => MapFont(_stripButtonFont));
-        Bind("address.zoom", _zoomLabel, font: () => MapFont(_zoomLabelFont));
-        Bind("tabs.new", _newTabButton, text: () => "+", font: () => MapFont(_newTabButtonFont));
+        Bind("address.favorite", _favoriteButton, font: () => MapFont(_favoriteButtonFont),
+            icon: () => _activePageIsFavorite ? PhantomIcons.StarFilled : PhantomIcons.StarOutline,
+            tooltip: () => _activePageIsFavorite ? "Remove from favourites" : "Add to favourites");
+        Bind("address.back", _backButton, text: () => string.Empty, font: () => MapFont(_stripButtonFont),
+            icon: () => PhantomIcons.Back, tooltip: () => "Back");
+        // "address.go" was the Go button until v1.3.5; it stays as another name for Forward so older extensions load.
+        Bind("address.forward", _forwardButton, text: () => string.Empty, font: () => MapFont(_stripButtonFont),
+            icon: () => PhantomIcons.Forward, tooltip: () => "Forward");
+        Bind("address.go", _forwardButton, text: () => string.Empty, font: () => MapFont(_stripButtonFont),
+            icon: () => PhantomIcons.Forward, tooltip: () => "Forward");
+        Bind("address.refresh", _refreshButton, text: () => string.Empty, font: () => MapFont(_stripButtonFont),
+            icon: () => PhantomIcons.Refresh, tooltip: () => "Refresh");
+        Bind("address.history", _historyButton, text: () => "Favorites", font: () => MapFont(_stripButtonFont),
+            tooltip: () => "History and favourites");
+        Bind("address.zoom", _zoomLabel, font: () => MapFont(_zoomLabelFont), tooltip: () => "Zoom - click to reset to 100%");
+        Bind("tabs.new", _newTabButton, text: () => string.Empty, font: () => MapFont(_newTabButtonFont),
+            icon: () => PhantomIcons.Plus, tooltip: () => "New tab");
         Bind("log.panel", _logBox, font: () => MapFont(_logFont));
         Bind("history.panel", _historyPanel);
     }
@@ -722,15 +779,23 @@ public partial class MainForm
             var previousBackgroundOverrides = new HashSet<Control>(_surfacesWithBackgroundOverride);
             _surfacesWithBackgroundOverride.Clear();
 
+            // "address.go" and "address.forward" name the same button: it is brought up to date once.
+            var updated = new HashSet<Control>();
             foreach (UiTargetBinding binding in _uiTargetBindings.Values)
             {
+                if (!updated.Add(binding.Control))
+                {
+                    continue;
+                }
+
                 overrides.TryGetValue(binding.Control, out UiOverride? customization);
                 ApplyBuiltInElementState(binding, customization);
             }
 
-            foreach (Button button in _extensionMenuButtonsPanel.Controls.OfType<Button>().ToList())
+            // Page segments (in the view switcher) and the buttons and dropdowns after Settings.
+            foreach (Button button in _extensionElementButtons.Values.ToList())
             {
-                if (button.Tag is ExtensionMenuEntry entry)
+                if (!button.IsDisposed && button.Tag is ExtensionMenuEntry entry)
                 {
                     overrides.TryGetValue(button, out UiOverride? customization);
                     ApplyExtensionElementState(button, entry, customization);
@@ -885,9 +950,11 @@ public partial class MainForm
         string? tooltip = customization?.Tooltip;
         if (tooltip is null && customization?.Svg is not null && customization.Text is null)
         {
-            tooltip = binding.DefaultText?.Invoke() ?? control.AccessibleName;
+            string? defaultText = binding.DefaultText?.Invoke();
+            tooltip = string.IsNullOrEmpty(defaultText) ? binding.DefaultTooltip?.Invoke() ?? control.AccessibleName : defaultText;
         }
 
+        tooltip ??= binding.DefaultTooltip?.Invoke();
         SetExtensionToolTip(control, tooltip);
 
         if (binding.DefaultFont is not null)
@@ -903,15 +970,15 @@ public partial class MainForm
         }
 
         ApplyColorOverrides(control, customization);
-        ApplyGraphicOverrides(control, customization, binding.DefaultImage);
+        ApplyGraphicOverrides(control, customization, binding.DefaultImage, binding.DefaultIcon?.Invoke());
     }
 
     private void ApplyExtensionElementState(Button button, ExtensionMenuEntry entry, UiOverride? customization)
     {
-        // Page buttons are bold while their page is shown, like Logs and Web View.
+        // Page segments are bold while their page is shown, like Log and Web.
         Font baseFont = entry.Kind == ExtensionMenuEntryKind.Page
             ? MapFont(IsActiveExtensionPage(entry) ? _menuButtonFontBold : _menuButtonFontRegular)
-            : MapFont(Font);
+            : MapFont(_menuButtonFontRegular);
         Font font = customization?.HasFont == true
             ? GetOverrideFont(baseFont, customization.FontFamily, customization.FontSize, customization.FontStyle)
             : baseFont;
@@ -939,7 +1006,7 @@ public partial class MainForm
 
         SetExtensionToolTip(button, tooltip);
         ApplyColorOverrides(button, customization);
-        ApplyGraphicOverrides(button, customization, defaultImage: null);
+        ApplyGraphicOverrides(button, customization, defaultImage: null, defaultSvg: null);
     }
 
     private void SetExtensionToolTip(Control control, string? tooltip)
@@ -1003,9 +1070,10 @@ public partial class MainForm
         return applied;
     }
 
-    private void ApplyGraphicOverrides(Control control, UiOverride? customization, Func<Image?>? defaultImage)
+    /// <param name="defaultSvg">The control's built-in icon, drawn when no extension gives it an SVG.</param>
+    private void ApplyGraphicOverrides(Control control, UiOverride? customization, Func<Image?>? defaultImage, PhantomSvgDocument? defaultSvg)
     {
-        PhantomSvgDocument? svg = customization?.Svg;
+        PhantomSvgDocument? svg = customization?.Svg ?? defaultSvg;
         PhantomExtensionUiShapeDefinition? shape = customization?.Shape;
         _appliedUiVisuals.TryGetValue(control, out AppliedUiVisual? existing);
         if (svg is null && shape is null && existing is null)
@@ -1138,7 +1206,12 @@ public partial class MainForm
             return;
         }
 
-        int side = ScaleByDpi(control is Label ? 20 : 18);
+        int side = ScaleByDpi(control switch
+        {
+            Label => 20,
+            PillButton => 16,
+            _ => 18,
+        });
         var size = new Size(side, side);
         Color color = control.ForeColor;
         if (applied.OwnedImage is null || !ReferenceEquals(applied.Svg, svg) || applied.ImageSize != size || (svg.UsesCurrentColor && applied.ImageColor != color))
@@ -1220,6 +1293,11 @@ public partial class MainForm
                 applied.OriginalFlatStyle = null;
             }
 
+            if (control is PillButton pill)
+            {
+                pill.SuppressOwnShape = false;
+            }
+
             control.Invalidate();
             return;
         }
@@ -1235,6 +1313,11 @@ public partial class MainForm
             // The rectangular border would be cut off by the outline; the outline colour is drawn along the shape instead.
             button.FlatStyle = FlatStyle.Flat;
             button.FlatAppearance.BorderSize = 0;
+            if (button is PillButton pill)
+            {
+                // The extension's shape replaces the pill's own rounded outline.
+                pill.SuppressOwnShape = true;
+            }
         }
 
         bool changed = !ReferenceEquals(applied.Shape, shape);
