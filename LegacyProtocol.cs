@@ -197,7 +197,8 @@ internal sealed class LegacyProtocolPage : WebProtocolPage
         _browser.DownloadBlocked += OnDownloadBlocked;
         _browser.FindShortcutPressed += OnFindShortcutPressed;
         _browser.DocumentTitleChanged += OnDocumentTitleChanged;
-        _browser.CanGoBackChanged += OnCanGoBackChanged;
+        _browser.CanGoBackChanged += OnBackForwardChanged;
+        _browser.CanGoForwardChanged += OnBackForwardChanged;
 
         // In-process windows the engine opens (showModalDialog and anything else) are excluded from capture as they open.
         Host.SetUiThreadWindowGuard(this, enabled: true);
@@ -212,6 +213,8 @@ internal sealed class LegacyProtocolPage : WebProtocolPage
     public override string Title => _title;
 
     public override bool CanGoBack => !IsDisposed && _browser.CanGoBack;
+
+    public override bool CanGoForward => !IsDisposed && _browser.CanGoForward;
 
     public override Task InitializeAsync()
     {
@@ -246,6 +249,14 @@ internal sealed class LegacyProtocolPage : WebProtocolPage
         if (IsReady && _browser.CanGoBack)
         {
             _browser.GoBack();
+        }
+    }
+
+    public override void GoForward()
+    {
+        if (IsReady && _browser.CanGoForward)
+        {
+            _browser.GoForward();
         }
     }
 
@@ -457,7 +468,7 @@ internal sealed class LegacyProtocolPage : WebProtocolPage
         OnTitleChanged();
     }
 
-    private void OnCanGoBackChanged(object? sender, EventArgs e) => OnHistoryChanged();
+    private void OnBackForwardChanged(object? sender, EventArgs e) => OnHistoryChanged();
 
     private string SafeDocumentTitle()
     {
@@ -527,7 +538,8 @@ internal sealed class LegacyProtocolPage : WebProtocolPage
         _browser.DownloadBlocked -= OnDownloadBlocked;
         _browser.FindShortcutPressed -= OnFindShortcutPressed;
         _browser.DocumentTitleChanged -= OnDocumentTitleChanged;
-        _browser.CanGoBackChanged -= OnCanGoBackChanged;
+        _browser.CanGoBackChanged -= OnBackForwardChanged;
+        _browser.CanGoForwardChanged -= OnBackForwardChanged;
         try
         {
             _browser.Dispose();

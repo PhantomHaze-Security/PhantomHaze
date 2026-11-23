@@ -230,13 +230,14 @@ public partial class MainForm
     /// <summary>The pill-shaped buttons of the top bar (Logs, Web and extension buttons are coloured as views).</summary>
     private Button[] HeaderPillButtons =>
     [
-        _backButton, _goButton, _refreshButton, _historyButton, _newTabButton, _settingsButton, _extensionMenuOverflowButton,
+        _backButton, _forwardButton, _goButton, _refreshButton, _historyButton, _newTabButton, _settingsButton,
+        _extensionMenuOverflowButton,
     ];
 
     /// <summary>Buttons outside the top bar, which keep the theme's standard button colours.</summary>
     private Button[] ContentCommandButtons =>
     [
-        _historyClearButton, _findCloseButton, _updateBannerUpdateButton,
+        _historyClearButton, _findCloseButton, _updateBannerUpdateButton, _toggleButton, _resourceSaverDisableButton,
     ];
 
     /// <summary>
@@ -246,7 +247,7 @@ public partial class MainForm
     private ThemedPanel[] ThemeSurfaces =>
     [
         _menuBarPanel, _historyPanel, _contentHostPanel, _webViewHostPanel, _extensionPageHostPanel,
-        _webViewLoadingOverlayPanel,
+        _webViewLoadingOverlayPanel, _protectionStripPanel,
     ];
 
     private ToolStrip[] PopupMenus => [_disableProtectionMenu, _extensionMenuOverflowMenu, _extensionDropdownMenu, _updateBannerSnoozeMenu];
@@ -425,6 +426,7 @@ public partial class MainForm
 
         BackColor = palette.AppBack;
         _menuBarPanel.BackColor = palette.MenuBack;
+        _protectionStripPanel.BackColor = palette.AppBack;
         _contentHostPanel.BackColor = palette.AppBack;
         _webViewHostPanel.BackColor = palette.AppBack;
         _extensionPageHostPanel.BackColor = palette.AppBack;
@@ -454,6 +456,7 @@ public partial class MainForm
         ApplyGradientTransparency(palette.Gradient is not null);
         UpdateProtectionStatusVisual();
         ApplyThemeToUpdateBanner();
+        ApplyThemeToResourceSaverBanner();
         ApplyTextColors();
         if (hadGradient || palette.Gradient is not null)
         {
@@ -525,7 +528,8 @@ public partial class MainForm
         [
             _headerLayout, _headerLeftLayout, _addressBarPanel,
             _menuLayout, _menuLogoLayout, _extensionMenuButtonsPanel, _menuLogoLabel, _menuLogoPictureBox, _menuClockLabel,
-            _addressRootLayout, _addressStripLayout, _addressInputLayout, _tabsLayout, _tabsFlowPanel, _zoomLabel,
+            // (_addressInputLayout is always transparent, so the address pill's rounded ends show.)
+            _addressRootLayout, _addressStripLayout, _tabsLayout, _tabsFlowPanel, _zoomLabel,
             _historyLayout, _historyTitleLabel, _favoritesTitleLabel, _webViewLoadingLabel,
         ];
 
@@ -1467,7 +1471,7 @@ public partial class MainForm
                  {
                      _tabCloseFontRegular, _tabCloseFontCompact, _menuButtonFontRegular, _menuButtonFontBold, _menuTitleFont,
                      _tabTitleFont, _stripButtonFont, _favoriteButtonFont, _zoomLabelFont, _newTabButtonFont, _logFont,
-                     _settingsGlyphFont,
+                     _settingsGlyphFont, _protectionStatusFont, _navigationGlyphFont,
                  })
         {
             font.Dispose();

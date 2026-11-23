@@ -563,6 +563,8 @@ public partial class MainForm
         CoreWebView2Environment? oldEnvironment = DetachPageFromTab(oldPage);
         tab.Page = newPage;
         tab.Protocol = protocol;
+        // A new page renders until it is told otherwise.
+        tab.RenderingSuspended = false;
         tab.IsNavigationPending = false;
         tab.NavigationSequence++;
         OnWebView2PageRemoved(oldEnvironment);

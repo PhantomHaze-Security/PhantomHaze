@@ -198,6 +198,8 @@ internal sealed class HtmlRendererProtocolPage : WebProtocolPage
 
     public override bool CanGoBack => _historyIndex > 0;
 
+    public override bool CanGoForward => _historyIndex >= 0 && _historyIndex < _history.Count - 1;
+
     public override Task InitializeAsync()
     {
         if (Protocol.GetUnavailableReason() is string reason)
@@ -219,6 +221,17 @@ internal sealed class HtmlRendererProtocolPage : WebProtocolPage
         }
 
         _historyIndex--;
+        StartLoad(_history[_historyIndex], HistoryUpdate.ReplaceCurrent);
+    }
+
+    public override void GoForward()
+    {
+        if (!CanGoForward)
+        {
+            return;
+        }
+
+        _historyIndex++;
         StartLoad(_history[_historyIndex], HistoryUpdate.ReplaceCurrent);
     }
 

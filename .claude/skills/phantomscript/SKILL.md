@@ -377,7 +377,8 @@ log) rather than replaced by an unrelated fallback font.
 | `menu.settings`    | The Settings (gear) button      | ✓    | ✓       |         | ✓          | ✓          | ✓      | ✓    | ✓      | ✓        |
 | `address.bar`      | The address box                 |      | ✓       |         | ✓          | ✓          |        | ✓    |        |          |
 | `address.favorite` | The favourite (star) button     |      | ✓       | ✓       |            |            | ✓      | ✓    | ✓      | ✓        |
-| `address.back`     | The Back button                 | ✓    | ✓       | ✓       | ✓          | ✓          | ✓      | ✓    | ✓      | ✓        |
+| `address.back`     | The Back (`←`) button           | ✓    | ✓       | ✓       | ✓          | ✓          | ✓      | ✓    | ✓      | ✓        |
+| `address.forward`  | The Forward (`→`) button        | ✓    | ✓       | ✓       | ✓          | ✓          | ✓      | ✓    | ✓      | ✓        |
 | `address.go`       | The Go button                   | ✓    | ✓       | ✓       | ✓          | ✓          | ✓      | ✓    | ✓      | ✓        |
 | `address.refresh`  | The Refresh button              | ✓    | ✓       | ✓       | ✓          | ✓          | ✓      | ✓    | ✓      | ✓        |
 | `address.history`  | The History button              | ✓    | ✓       | ✓       | ✓          | ✓          | ✓      | ✓    | ✓      | ✓        |
@@ -390,8 +391,8 @@ Using a property an element does not support is an error when the file is import
 
 Two parts of PhantomHaze can never be changed by an extension:
 
-- **The protection banner and its ON/OFF switch.** They are not elements at all, so an extension can never make
-  PhantomHaze look protected from screen capture when it is not.
+- **The protection banners, their ON/OFF switch and the protection button.** They are not elements at all, so an
+  extension can never make PhantomHaze look protected from screen capture when it is not.
 - **The Settings button cannot be hidden** (it can be restyled), because Settings is where extensions are disabled and
   uninstalled.
 

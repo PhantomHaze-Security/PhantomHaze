@@ -34,7 +34,24 @@ public partial class MainForm : Form
     private sealed class AppSettings
     {
         public AppTheme Theme { get; set; } = AppTheme.Light;
+
+        /// <summary>
+        /// The setting of v1.3.5 and earlier ("Render web pages in the background"). It is now written as
+        /// BackgroundTabRenderSeconds == -1, so an older PhantomHaze reading this file still understands it.
+        /// </summary>
         public bool RenderWebViewInBackground { get; set; }
+
+        /// <summary>
+        /// How long a tab keeps rendering its page after it goes into the background, in seconds (-1: forever). Null in
+        /// files written before v1.3.6, where RenderWebViewInBackground decides.
+        /// </summary>
+        public int? BackgroundTabRenderSeconds { get; set; }
+
+        /// <summary>Resource saver: with more than 20 tabs open, background tabs stop rendering after 10 seconds.</summary>
+        public bool ResourceSaverEnabled { get; set; } = true;
+
+        /// <summary>The resource saver banner was closed with its X and is never shown again.</summary>
+        public bool ResourceSaverBannerDismissed { get; set; }
         public bool PersistHistoryAcrossSessions { get; set; }
         public int HistoryRetentionDays { get; set; } = 1;
 
@@ -69,6 +86,9 @@ public partial class MainForm : Form
             {
                 Theme = Theme,
                 RenderWebViewInBackground = RenderWebViewInBackground,
+                BackgroundTabRenderSeconds = BackgroundTabRenderSeconds,
+                ResourceSaverEnabled = ResourceSaverEnabled,
+                ResourceSaverBannerDismissed = ResourceSaverBannerDismissed,
                 PersistHistoryAcrossSessions = PersistHistoryAcrossSessions,
                 HistoryRetentionDays = HistoryRetentionDays,
                 PersistCookiesAcrossSessions = PersistCookiesAcrossSessions,
@@ -307,6 +327,15 @@ public partial class MainForm : Form
         /// <summary>The tab's close button was pressed and the tab is waiting for its cookies to be saved.</summary>
         public bool IsClosing { get; set; }
 
+        /// <summary>When the tab went into the background (null while it is shown); see ApplyBackgroundTabRendering.</summary>
+        public DateTime? BackgroundSinceUtc { get; set; }
+
+        /// <summary>The page was told to stop rendering because it was in the background for too long.</summary>
+        public bool RenderingSuspended { get; set; }
+
+        /// <summary>The page was suspended and has just been shown again, so it may take a moment to draw.</summary>
+        public bool ResumedFromSuspension { get; set; }
+
         // Incremented on every NavigationStarting so async work started for one document can detect that the
         // tab has moved on before touching the new document.
         public int NavigationSequence { get; set; }
@@ -332,8 +361,14 @@ public partial class MainForm : Form
     private readonly ToolTip _updateBannerToolTip = new();
     // Cancelled when the window closes, so a slow update check never touches a closed window.
     private readonly CancellationTokenSource _updateCheckCancellation = new();
-    // The protection status and switch. Deliberately not a ui.element target (see PhantomUiTargets).
+    // The protection status and switch of Web View. Deliberately not a ui.element target (see PhantomUiTargets).
     private readonly ProtectionBanner _protectionBanner = new();
+    // The Logs view and extension pages: the protection status across the window under the top bar, with the protection
+    // button below it (as in earlier versions). Not ui.element targets either.
+    private readonly ThemedPanel _protectionStripPanel = new();
+    private readonly ProtectionStatusBar _protectionStatusBar = new();
+    private readonly Button _toggleButton = new();
+    private readonly Font _protectionStatusFont = new("Segoe UI", 10, FontStyle.Bold);
     // The protection banner's tooltip (extension tooltips, and the Settings gear's, use _extensionUiToolTip).
     private readonly ToolTip _headerToolTip = new();
     private readonly PillButton _webViewToggleButton = new();
@@ -345,6 +380,7 @@ public partial class MainForm : Form
     private readonly TextBox _addressBarTextBox = new();
     private readonly PillButton _favoriteButton = new();
     private readonly PillButton _backButton = new();
+    private readonly PillButton _forwardButton = new();
     private readonly PillButton _goButton = new();
     private readonly PillButton _refreshButton = new();
     private readonly PillButton _historyButton = new();
@@ -386,6 +422,8 @@ public partial class MainForm : Form
     private readonly Font _newTabButtonFont = new("Segoe UI", 12, FontStyle.Bold);
     // The Settings gear; never replaced by the app font, which may not have the gear symbol.
     private readonly Font _settingsGlyphFont = new("Segoe UI Symbol", 13, FontStyle.Regular);
+    // The Back and Forward arrows; like the gear, never replaced by the app font.
+    private readonly Font _navigationGlyphFont = new("Segoe UI", 12, FontStyle.Bold);
     private readonly Font _logFont = new("Consolas", 9);
     private readonly string _logDirectory;
     private readonly string _fontCacheDirectory;
@@ -457,13 +495,17 @@ public partial class MainForm : Form
     private static readonly object TabCloseButtonTag = new();
 
     private const string DefaultHomeUrl = "https://www.google.com";
-    private const int DefaultBackButtonWidth = 64;
+    private const int DefaultBackButtonWidth = 46;
+    private const int DefaultForwardButtonWidth = 46;
+    private const string BackGlyph = "←";
+    private const string ForwardGlyph = "→";
     private const int DefaultGoButtonWidth = 56;
     private const int DefaultRefreshButtonWidth = 80;
     private const int DefaultHistoryButtonWidth = 80;
     private const int DefaultZoomLabelWidth = 96;
     private const int DefaultZoomSliderWidth = 185;
-    private const int CompactBackButtonWidth = 56;
+    private const int CompactBackButtonWidth = 40;
+    private const int CompactForwardButtonWidth = 40;
     private const int CompactGoButtonWidth = 48;
     private const int CompactRefreshButtonWidth = 70;
     private const int CompactHistoryButtonWidth = 70;
@@ -626,6 +668,7 @@ public partial class MainForm : Form
         _updateBannerUpdateButton.Padding = ScalePadding(10, 0, 10, 0);
         _updateBannerUpdateButton.Margin = ScalePadding(8, 0, 6, 0);
         _updateBannerSnoozeButton.Size = new Size(ScaleByDpi(30), ScaleByDpi(26));
+        ApplyResourceSaverBannerMetrics();
         _logsViewButton.MinimumSize = new Size(ScaleByDpi(84), ScaleByDpi(HeaderButtonHeight));
         _webViewToggleButton.MinimumSize = new Size(ScaleByDpi(84), ScaleByDpi(HeaderButtonHeight));
         // The gear is a circle; a longer text set by an extension makes it a pill.
@@ -674,6 +717,7 @@ public partial class MainForm : Form
         }
 
         _protectionBanner.MinimumSize = new Size(0, 0);
+        ApplyProtectionStripMetrics();
         UpdateHeaderLayout();
 
         if (_historyLayout is not null && _historyLayout.RowStyles.Count >= 5)
@@ -703,6 +747,7 @@ public partial class MainForm : Form
 
         Padding stripButtonMargin = ScalePadding(4, 5, 0, 5);
         _backButton.Margin = stripButtonMargin;
+        _forwardButton.Margin = stripButtonMargin;
         _goButton.Margin = stripButtonMargin;
         _refreshButton.Margin = stripButtonMargin;
         _historyButton.Margin = stripButtonMargin;
@@ -1086,6 +1131,16 @@ public partial class MainForm : Form
         {
             settings.CookieRetentionDays = 1;
         }
+
+        // Settings from before v1.3.6 keep their choice: rendering in the background was either on (forever) or off
+        // (now the default of one minute).
+        settings.BackgroundTabRenderSeconds ??= settings.RenderWebViewInBackground ? -1 : DefaultBackgroundTabRenderSeconds;
+        if (!BackgroundTabRenderOptions.Any(option => option.Value == settings.BackgroundTabRenderSeconds))
+        {
+            settings.BackgroundTabRenderSeconds = DefaultBackgroundTabRenderSeconds;
+        }
+
+        settings.RenderWebViewInBackground = settings.BackgroundTabRenderSeconds == -1;
 
         settings.WebViewProtocol = WebProtocolCatalog.NormalizeId(settings.WebViewProtocol);
 
@@ -2307,6 +2362,7 @@ public partial class MainForm : Form
     {
         BuildMenuBar();
         BuildUpdateBanner();
+        BuildResourceSaverBanner();
         BuildProtectionDisableMenu();
         ProtectPopupMenuFromCapture(_disableProtectionMenu);
         ProtectPopupMenuFromCapture(_extensionMenuOverflowMenu);
@@ -2348,8 +2404,12 @@ public partial class MainForm : Form
         };
 
         Controls.Add(_contentHostPanel);
-        // The top bar holds the menu, the Web View address and tab rows and the protection banner.
+        // Under the top bar, outside Web View: the protection status and button.
+        Controls.Add(_protectionStripPanel);
+        // The top bar holds the menu, the Web View address and tab rows and (in Web View) the protection banner.
         Controls.Add(_menuBarPanel);
+        // Above the top bar, below the update banner.
+        Controls.Add(_resourceSaverBannerPanel);
         // Docked last, so the update banner is the topmost strip of the window, above the top bar.
         Controls.Add(_updateBannerPanel);
 
@@ -2498,9 +2558,9 @@ public partial class MainForm : Form
     private const string SettingsGlyph = "⚙";
 
     /// <summary>
-    /// Assembles the top bar: the menu row and (in Web View) the address and tab rows on the left, and the protection
-    /// banner on the right. Outside Web View the banner moves under the menu row and is extended across the window
-    /// (see UpdateHeaderLayout), because the Logs view and extension pages do not need the space.
+    /// Assembles the top bar: the menu row and (in Web View) the address and tab rows on the left, and (in Web View) the
+    /// protection banner on the right. Outside Web View the protection status and button are shown across the window
+    /// under the top bar instead (see UpdateHeaderLayout).
     /// </summary>
     private void BuildHeaderLayout()
     {
@@ -2519,7 +2579,7 @@ public partial class MainForm : Form
 
         _headerLayout.Dock = DockStyle.Fill;
         _headerLayout.ColumnCount = 2;
-        _headerLayout.RowCount = 2;
+        _headerLayout.RowCount = 1;
         _headerLayout.Margin = new Padding(0);
         _headerLayout.Padding = new Padding(0);
         _headerLayout.AutoSize = true;
@@ -2527,10 +2587,8 @@ public partial class MainForm : Form
         _headerLayout.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100f));
         _headerLayout.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 0));
         _headerLayout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
-        _headerLayout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
         _headerLayout.Controls.Add(_headerLeftLayout, 0, 0);
-        _headerLayout.Controls.Add(_protectionBanner, 0, 1);
-        _headerLayout.SetColumnSpan(_protectionBanner, 2);
+        _headerLayout.Controls.Add(_protectionBanner, 1, 0);
 
         _menuBarPanel.Controls.Add(_headerLayout);
         UpdateHeaderLayout();
@@ -2538,7 +2596,8 @@ public partial class MainForm : Form
 
     /// <summary>
     /// Web View: the address and tab rows are shown and the protection banner is a compact card at the right of the top
-    /// bar. Logs and extension pages: the banner is extended across the window under the menu row.
+    /// bar. Logs and extension pages: the top bar only has the menu row, and the protection status and button are shown
+    /// across the window under it.
     /// </summary>
     private void UpdateHeaderLayout()
     {
@@ -2548,32 +2607,23 @@ public partial class MainForm : Form
         }
 
         bool webView = _webViewModeEnabled;
+        SuspendLayout();
         _menuBarPanel.SuspendLayout();
         _headerLayout.SuspendLayout();
         try
         {
             _addressBarPanel.Visible = webView;
             _headerLeftLayout.RowStyles[1].Height = webView ? AddressPanelHeight : 0;
-            _protectionBanner.Extended = !webView;
-            if (webView)
-            {
-                _headerLayout.SetCellPosition(_protectionBanner, new TableLayoutPanelCellPosition(1, 0));
-                _headerLayout.SetColumnSpan(_protectionBanner, 1);
-                _headerLayout.ColumnStyles[1].Width = ScaleByDpi(CompactBannerWidth) + ScaleByDpi(12);
-                _protectionBanner.Margin = ScalePadding(12, 0, 0, 0);
-            }
-            else
-            {
-                _headerLayout.SetCellPosition(_protectionBanner, new TableLayoutPanelCellPosition(0, 1));
-                _headerLayout.SetColumnSpan(_protectionBanner, 2);
-                _headerLayout.ColumnStyles[1].Width = 0;
-                _protectionBanner.Margin = ScalePadding(0, 10, 0, 0);
-            }
+            _protectionBanner.Visible = webView;
+            _protectionBanner.Margin = ScalePadding(12, 0, 0, 0);
+            _headerLayout.ColumnStyles[1].Width = webView ? ScaleByDpi(CompactBannerWidth) + ScaleByDpi(12) : 0;
+            _protectionStripPanel.Visible = !webView;
         }
         finally
         {
             _headerLayout.ResumeLayout(true);
             _menuBarPanel.ResumeLayout(true);
+            ResumeLayout(true);
         }
 
         _menuBarPanel.Invalidate(true);
@@ -2583,8 +2633,37 @@ public partial class MainForm : Form
     {
         _protectionBanner.Dock = DockStyle.Fill;
         _protectionBanner.TabIndex = 0;
-        _protectionBanner.ToggleRequested += (_, _) => OnProtectionButtonClick();
+        _protectionBanner.ToggleRequested += (_, _) => OnProtectionButtonClick(_protectionBanner);
+
+        // Outside Web View: the status banner across the window, with the protection button below it.
+        _protectionStatusBar.Dock = DockStyle.Top;
+        _protectionStatusBar.Font = _protectionStatusFont;
+        _toggleButton.Dock = DockStyle.Bottom;
+        _toggleButton.FlatStyle = FlatStyle.Flat;
+        _toggleButton.FlatAppearance.BorderSize = 1;
+        _toggleButton.UseMnemonic = false;
+        _toggleButton.Text = "Enable Protection";
+        _toggleButton.Click += (_, _) => OnProtectionButtonClick(_toggleButton);
+        _protectionStripPanel.Dock = DockStyle.Top;
+        _protectionStripPanel.Controls.Add(_toggleButton);
+        _protectionStripPanel.Controls.Add(_protectionStatusBar);
+        ApplyProtectionStripMetrics();
         UpdateProtectionStatusVisual();
+    }
+
+    // The protection strip of the Logs view (logical pixels): the status banner, the gap and the button.
+    private const int ProtectionStatusHeight = 34;
+    private const int ProtectionStripGap = 4;
+    private const int ProtectionButtonHeight = 36;
+
+    private void ApplyProtectionStripMetrics()
+    {
+        // Lined up with the rounded top bar above it.
+        _protectionStripPanel.Padding = ScalePadding(HeaderOuterMargin, 0, HeaderOuterMargin, HeaderOuterMargin);
+        _protectionStatusBar.Height = ScaleByDpi(ProtectionStatusHeight);
+        _toggleButton.Height = ScaleByDpi(ProtectionButtonHeight);
+        _protectionStripPanel.Height = _protectionStripPanel.Padding.Vertical + _protectionStatusBar.Height +
+                                       ScaleByDpi(ProtectionStripGap) + _toggleButton.Height;
     }
 
     /// <summary>Shows the computer's current time, including seconds. Never logged: it changes every second.</summary>
@@ -2995,11 +3074,11 @@ public partial class MainForm : Form
         rootLayout.RowStyles.Add(new RowStyle(SizeType.Absolute, ScaleByDpi(AddressRowHeight)));
         rootLayout.RowStyles.Add(new RowStyle(SizeType.Percent, 100f));
 
-        // Columns: address box (stretches) | Back | Go | Refresh | History.
+        // Columns: address box (stretches) | Back (←) | Forward (→) | Go | Refresh | History.
         _addressStripLayout = new TableLayoutPanel
         {
             Dock = DockStyle.Fill,
-            ColumnCount = 5,
+            ColumnCount = 6,
             RowCount = 1,
             Margin = new Padding(0),
             Padding = new Padding(0),
@@ -3008,6 +3087,7 @@ public partial class MainForm : Form
         stripLayout.RowStyles.Add(new RowStyle(SizeType.Absolute, ScaleByDpi(AddressRowHeight)));
         stripLayout.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100f));
         stripLayout.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, DefaultBackButtonWidth));
+        stripLayout.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, DefaultForwardButtonWidth));
         stripLayout.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, DefaultGoButtonWidth));
         stripLayout.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, DefaultRefreshButtonWidth));
         stripLayout.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, DefaultHistoryButtonWidth));
@@ -3023,6 +3103,9 @@ public partial class MainForm : Form
             Padding = ScalePadding(16, 0, 4, 0),
         };
         _addressInputLayout = addressInputLayout;
+        // It fills the whole pill, so a solid background would paint over the pill's rounded ends and make the address
+        // box look square: it always shows the pill through it instead.
+        addressInputLayout.BackColor = Color.Transparent;
         addressInputLayout.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100f));
         addressInputLayout.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, ScaleByDpi(34)));
         addressInputLayout.RowStyles.Add(new RowStyle(SizeType.Percent, 100f));
@@ -3060,11 +3143,22 @@ public partial class MainForm : Form
         addressInputLayout.Controls.Add(_favoriteButton, 1, 0);
         _addressPill.Controls.Add(addressInputLayout);
 
-        _backButton.Text = "Back";
+        // Back and Forward show arrows (their names are their tooltips, set in BuildUiTargetBindings).
         _backButton.Dock = DockStyle.Fill;
         _backButton.Enabled = false;
         ConfigureStripButton(_backButton);
+        _backButton.Text = BackGlyph;
+        _backButton.Font = _navigationGlyphFont;
+        _backButton.AccessibleName = "Back";
         _backButton.Click += (_, _) => GoBack();
+
+        _forwardButton.Dock = DockStyle.Fill;
+        _forwardButton.Enabled = false;
+        ConfigureStripButton(_forwardButton);
+        _forwardButton.Text = ForwardGlyph;
+        _forwardButton.Font = _navigationGlyphFont;
+        _forwardButton.AccessibleName = "Forward";
+        _forwardButton.Click += (_, _) => GoForward();
 
         _goButton.Text = "Go";
         _goButton.Dock = DockStyle.Fill;
@@ -3083,9 +3177,10 @@ public partial class MainForm : Form
 
         stripLayout.Controls.Add(_addressPill, 0, 0);
         stripLayout.Controls.Add(_backButton, 1, 0);
-        stripLayout.Controls.Add(_goButton, 2, 0);
-        stripLayout.Controls.Add(_refreshButton, 3, 0);
-        stripLayout.Controls.Add(_historyButton, 4, 0);
+        stripLayout.Controls.Add(_forwardButton, 2, 0);
+        stripLayout.Controls.Add(_goButton, 3, 0);
+        stripLayout.Controls.Add(_refreshButton, 4, 0);
+        stripLayout.Controls.Add(_historyButton, 5, 0);
 
         _zoomLabel.Text = "Zoom 100%";
         _zoomLabel.Dock = DockStyle.Fill;
@@ -3422,6 +3517,9 @@ public partial class MainForm : Form
         }
 
         Task minimumOverlayTask = Task.Delay(180);
+        // A page that had stopped rendering in the background takes a little longer to draw again.
+        bool wasSuspended = tab.ResumedFromSuspension;
+        tab.ResumedFromSuspension = false;
         bool mustWaitForNavigation = tab.IsNavigationPending || IsTabShowingPlaceholder(tab);
         if (mustWaitForNavigation)
         {
@@ -3431,7 +3529,7 @@ public partial class MainForm : Form
         }
         else
         {
-            int stabilizationDelay = _settings.RenderWebViewInBackground ? 75 : 220;
+            int stabilizationDelay = wasSuspended ? 220 : 75;
             await Task.WhenAll(minimumOverlayTask, Task.Delay(stabilizationDelay));
         }
 
@@ -3508,19 +3606,29 @@ public partial class MainForm : Form
 
     private bool IsLogsViewSelected => !_webViewModeEnabled && _activeExtensionPageKey is null;
 
+    /// <summary>
+    /// Shows the active tab's page (in Web View) and hides the others. Hidden tabs keep rendering for the time chosen
+    /// in Settings, then stop (see ApplyBackgroundTabRendering).
+    /// </summary>
     private void UpdateTabVisibilityAndRendering()
     {
+        DateTime now = DateTime.UtcNow;
         foreach (BrowserTab tab in _tabs)
         {
             bool isActiveTab = _webViewModeEnabled && ReferenceEquals(tab, _activeTab);
             tab.Page.View.Visible = isActiveTab;
-            if (!tab.Page.IsReady)
+            if (isActiveTab)
             {
-                continue;
+                tab.BackgroundSinceUtc = null;
             }
-
-            tab.Page.SetRenderingActive(isActiveTab || _settings.RenderWebViewInBackground);
+            else if (tab.BackgroundSinceUtc is null)
+            {
+                tab.BackgroundSinceUtc = now;
+                tab.ResumedFromSuspension = false;
+            }
         }
+
+        ApplyBackgroundTabRendering();
     }
 
     /// <summary>
@@ -3825,6 +3933,7 @@ public partial class MainForm : Form
             UpdateTabLayout();
             UpdateNavigationButtons();
             UpdateFavoriteButtonState();
+            ApplyBackgroundTabRendering();
 
             if (_webViewModeEnabled)
             {
@@ -4275,6 +4384,23 @@ public partial class MainForm : Form
         Log("Web back navigation requested.");
     }
 
+    private void GoForward()
+    {
+        if (_activeTab is null || !_activeTab.Page.IsReady)
+        {
+            Log("Forward navigation requested before Web View was initialized.");
+            return;
+        }
+
+        if (!_activeTab.Page.CanGoForward)
+        {
+            return;
+        }
+
+        _activeTab.Page.GoForward();
+        Log("Web forward navigation requested.");
+    }
+
     private void RefreshWebView()
     {
         if (_activeTab is null || !_activeTab.Page.IsReady)
@@ -4396,10 +4522,9 @@ public partial class MainForm : Form
 
     private void UpdateNavigationButtons()
     {
-        _backButton.Enabled = _webViewModeEnabled &&
-                              _activeTab is not null &&
-                              _activeTab.Page.IsReady &&
-                              _activeTab.Page.CanGoBack;
+        bool ready = _webViewModeEnabled && _activeTab is not null && _activeTab.Page.IsReady;
+        _backButton.Enabled = ready && _activeTab!.Page.CanGoBack;
+        _forwardButton.Enabled = ready && _activeTab!.Page.CanGoForward;
     }
 
     private void RefreshHistoryPanelItems()
@@ -4540,7 +4665,7 @@ public partial class MainForm : Form
             return;
         }
 
-        Log($"Web history state changed (Back: {tab.Page.CanGoBack}).");
+        Log($"Web history state changed (Back: {tab.Page.CanGoBack}, Forward: {tab.Page.CanGoForward}).");
         UpdateNavigationButtons();
     }
 
@@ -5360,6 +5485,7 @@ public partial class MainForm : Form
         _fontLoadCancellation?.Cancel();
         OnZoomLogTimerTick(this, EventArgs.Empty);
 
+        _backgroundRenderTimer.Stop();
         foreach (BrowserTab tab in _tabs.ToArray())
         {
             RemoveTabAndDispose(tab);
@@ -5403,8 +5529,10 @@ public partial class MainForm : Form
             _extensionUiToolTip.Dispose();
             _updateBannerToolTip.Dispose();
             _headerToolTip.Dispose();
+            _resourceSaverToolTip.Dispose();
             _updateBannerSnoozeMenu.Dispose();
             _clockTimer.Dispose();
+            _backgroundRenderTimer.Dispose();
             _rainbowTimer.Dispose();
             _cookieCheckTimer.Dispose();
             _zoomLogTimer.Dispose();
@@ -5517,13 +5645,22 @@ public partial class MainForm : Form
         UpdateProtectionStatusVisual();
     }
 
-    private void OnProtectionButtonClick()
+    /// <param name="source">The Web View banner's switch or the protection button of the other views.</param>
+    private void OnProtectionButtonClick(Control source)
     {
         if (_protectionEnabled)
         {
-            // The ON switch opens the menu of how long protection should be off for, right under the switch.
-            Rectangle toggle = _protectionBanner.ToggleBounds;
-            _disableProtectionMenu.Show(_protectionBanner, new Point(toggle.Left, toggle.Bottom + ScaleByDpi(2)));
+            // Opens the menu of how long protection should be off for, right under the switch or button.
+            if (ReferenceEquals(source, _protectionBanner))
+            {
+                Rectangle toggle = _protectionBanner.ToggleBounds;
+                _disableProtectionMenu.Show(_protectionBanner, new Point(toggle.Left, toggle.Bottom + ScaleByDpi(2)));
+            }
+            else
+            {
+                _disableProtectionMenu.Show(source, new Point(0, source.Height));
+            }
+
             return;
         }
 
@@ -5591,14 +5728,17 @@ public partial class MainForm : Form
     /// </summary>
     private void UpdateProtectionStatusVisual()
     {
+        // Web View's card has a title and a short line; the status banner of the other views has one sentence.
         string title;
         string subtitle;
         string? countdown = null;
+        string statusText;
         string tooltip;
         if (_protectionEnabled)
         {
             title = "Protection Enabled";
             subtitle = "All good over here!";
+            statusText = "Protection Enabled - This window is excluded from supported capture software.";
             tooltip = "This window is excluded from supported screen capture, recording and sharing software.";
         }
         else if (_protectionResumeAtUtc is not null)
@@ -5612,26 +5752,41 @@ public partial class MainForm : Form
             title = "Protection Disabled";
             subtitle = "Re-enables automatically in";
             countdown = FormatProtectionCountdown(remaining);
+            statusText = $"Protection Disabled - This window is visible to capture software. Auto re-enables in {countdown}.";
             tooltip = "This window is visible to capture software until protection turns back on.";
         }
         else if (_protectionEnableFailed)
         {
             title = "Protection Disabled";
             subtitle = "Windows did not allow capture protection. See the logs.";
+            statusText = "Protection Disabled - Windows did not allow capture protection, so this window is visible to capture software.";
             tooltip = "This window is visible to capture software: Windows refused to exclude it from capture.";
         }
         else
         {
             title = "Protection Disabled";
             subtitle = "You might wanna turn this back on...";
+            statusText = "Protection Disabled - This window is visible to capture software.";
             tooltip = "This window is visible to capture software.";
         }
 
-        _protectionBanner.DarkStyle = IsDarkTheme();
+        bool dark = IsDarkTheme();
+        _protectionBanner.DarkStyle = dark;
         _protectionBanner.SetStatus(_protectionEnabled, title, subtitle, countdown);
-        if (!string.Equals(_headerToolTip.GetToolTip(_protectionBanner), tooltip, StringComparison.Ordinal))
+        _protectionStatusBar.DarkStyle = dark;
+        _protectionStatusBar.SetStatus(_protectionEnabled, statusText);
+        string buttonText = _protectionEnabled ? "Disable Protection ▼" : "Enable Protection";
+        if (!string.Equals(_toggleButton.Text, buttonText, StringComparison.Ordinal))
         {
-            _headerToolTip.SetToolTip(_protectionBanner, tooltip);
+            _toggleButton.Text = buttonText;
+        }
+
+        foreach (Control status in new Control[] { _protectionBanner, _protectionStatusBar })
+        {
+            if (!string.Equals(_headerToolTip.GetToolTip(status), tooltip, StringComparison.Ordinal))
+            {
+                _headerToolTip.SetToolTip(status, tooltip);
+            }
         }
     }
 
@@ -5683,7 +5838,7 @@ public partial class MainForm : Form
 
     private void UpdateAddressStripLayout()
     {
-        if (_addressStripLayout is null || _addressStripLayout.ColumnStyles.Count < 5 ||
+        if (_addressStripLayout is null || _addressStripLayout.ColumnStyles.Count < 6 ||
             _tabsLayout is null || _tabsLayout.ColumnStyles.Count < 4)
         {
             return;
@@ -5692,6 +5847,7 @@ public partial class MainForm : Form
         int availableWidth = Math.Max(1, _addressBarPanel.ClientSize.Width - _addressBarPanel.Padding.Horizontal);
         int compactThreshold = ScaleByDpi(MinimumAddressInputWidth) +
                                ScaleByDpi(DefaultBackButtonWidth) +
+                               ScaleByDpi(DefaultForwardButtonWidth) +
                                ScaleByDpi(DefaultGoButtonWidth) +
                                ScaleByDpi(DefaultRefreshButtonWidth) +
                                ScaleByDpi(DefaultHistoryButtonWidth) +
@@ -5700,9 +5856,10 @@ public partial class MainForm : Form
         bool compact = availableWidth < compactThreshold;
 
         _addressStripLayout.ColumnStyles[1].Width = ScaleByDpi(compact ? CompactBackButtonWidth : DefaultBackButtonWidth);
-        _addressStripLayout.ColumnStyles[2].Width = ScaleByDpi(compact ? CompactGoButtonWidth : DefaultGoButtonWidth);
-        _addressStripLayout.ColumnStyles[3].Width = ScaleByDpi(compact ? CompactRefreshButtonWidth : DefaultRefreshButtonWidth);
-        _addressStripLayout.ColumnStyles[4].Width = ScaleByDpi(compact ? CompactHistoryButtonWidth : DefaultHistoryButtonWidth);
+        _addressStripLayout.ColumnStyles[2].Width = ScaleByDpi(compact ? CompactForwardButtonWidth : DefaultForwardButtonWidth);
+        _addressStripLayout.ColumnStyles[3].Width = ScaleByDpi(compact ? CompactGoButtonWidth : DefaultGoButtonWidth);
+        _addressStripLayout.ColumnStyles[4].Width = ScaleByDpi(compact ? CompactRefreshButtonWidth : DefaultRefreshButtonWidth);
+        _addressStripLayout.ColumnStyles[5].Width = ScaleByDpi(compact ? CompactHistoryButtonWidth : DefaultHistoryButtonWidth);
 
         // The zoom controls share the tab row with the tabs.
         _tabsLayout.ColumnStyles[2].Width = ScaleByDpi(DefaultZoomLabelWidth);
@@ -6045,13 +6202,13 @@ public partial class MainForm : Form
         {
             Dock = DockStyle.Fill,
             ColumnCount = 2,
-            RowCount = 11,
+            RowCount = 12,
             AutoScroll = true,
             Padding = ScalePadding(12, 12, 12, 12),
         };
         generalLayout.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, ScaleByDpi(250)));
         generalLayout.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100f));
-        for (int generalRow = 0; generalRow < 5; generalRow++)
+        for (int generalRow = 0; generalRow < 6; generalRow++)
         {
             generalLayout.RowStyles.Add(new RowStyle(SizeType.Absolute, ScaleByDpi(36)));
         }
@@ -6063,12 +6220,26 @@ public partial class MainForm : Form
         generalLayout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
         generalLayout.RowStyles.Add(new RowStyle(SizeType.Percent, 100f));
 
-        var renderInBackgroundCheckBox = new CheckBox
+        // How long a tab keeps rendering after it goes into the background (replaces "Render web pages in the
+        // background": Forever is that setting turned on).
+        var backgroundRenderComboBox = new ComboBox
         {
-            Text = "Render web pages in the background",
             Dock = DockStyle.Fill,
-            Checked = draftSettings.RenderWebViewInBackground,
+            DropDownStyle = ComboBoxStyle.DropDownList,
+            AccessibleName = "Render background tabs for",
+        };
+        backgroundRenderComboBox.Items.AddRange(BackgroundTabRenderOptions);
+        backgroundRenderComboBox.SelectedItem =
+            BackgroundTabRenderOptions.FirstOrDefault(option => option.Value == draftSettings.BackgroundTabRenderSeconds) ??
+            BackgroundTabRenderOptions.First(option => option.Value == DefaultBackgroundTabRenderSeconds);
+
+        var resourceSaverCheckBox = new CheckBox
+        {
+            Text = $"Resource saver: save resources when more than {ResourceSaverTabThreshold} tabs are open",
+            Dock = DockStyle.Fill,
+            Checked = draftSettings.ResourceSaverEnabled,
             TextAlign = ContentAlignment.MiddleLeft,
+            AccessibleDescription = $"With more than {ResourceSaverTabThreshold} tabs open, background tabs stop rendering after {ResourceSaverRenderSeconds} seconds.",
         };
 
         var persistHistoryCheckBox = new CheckBox
@@ -6273,33 +6444,36 @@ public partial class MainForm : Form
         UpdateProtocolDescription();
 
         // The theme moved to the Appearance tab, together with the text colour and font.
-        generalLayout.Controls.Add(renderInBackgroundCheckBox, 0, 0);
-        generalLayout.SetColumnSpan(renderInBackgroundCheckBox, 2);
+        generalLayout.Controls.Add(BuildSettingsLabel("Render background tabs for"), 0, 0);
+        generalLayout.Controls.Add(backgroundRenderComboBox, 1, 0);
 
-        generalLayout.Controls.Add(persistHistoryCheckBox, 0, 1);
+        generalLayout.Controls.Add(resourceSaverCheckBox, 0, 1);
+        generalLayout.SetColumnSpan(resourceSaverCheckBox, 2);
+
+        generalLayout.Controls.Add(persistHistoryCheckBox, 0, 2);
         generalLayout.SetColumnSpan(persistHistoryCheckBox, 2);
 
-        generalLayout.Controls.Add(BuildSettingsLabel("Saved history retention"), 0, 2);
-        generalLayout.Controls.Add(retentionComboBox, 1, 2);
+        generalLayout.Controls.Add(BuildSettingsLabel("Saved history retention"), 0, 3);
+        generalLayout.Controls.Add(retentionComboBox, 1, 3);
 
-        generalLayout.Controls.Add(persistCookiesCheckBox, 0, 3);
+        generalLayout.Controls.Add(persistCookiesCheckBox, 0, 4);
         generalLayout.SetColumnSpan(persistCookiesCheckBox, 2);
 
-        generalLayout.Controls.Add(BuildSettingsLabel("Saved cookie retention"), 0, 4);
-        generalLayout.Controls.Add(cookieRetentionLayout, 1, 4);
+        generalLayout.Controls.Add(BuildSettingsLabel("Saved cookie retention"), 0, 5);
+        generalLayout.Controls.Add(cookieRetentionLayout, 1, 5);
 
-        generalLayout.Controls.Add(cookieNoteLabel, 1, 5);
+        generalLayout.Controls.Add(cookieNoteLabel, 1, 6);
 
-        generalLayout.Controls.Add(BuildSettingsLabel("Default search engine"), 0, 6);
-        generalLayout.Controls.Add(searchEngineComboBox, 1, 6);
+        generalLayout.Controls.Add(BuildSettingsLabel("Default search engine"), 0, 7);
+        generalLayout.Controls.Add(searchEngineComboBox, 1, 7);
 
-        generalLayout.Controls.Add(BuildSettingsLabel("Web View starting page"), 0, 7);
-        generalLayout.Controls.Add(startPageTextBox, 1, 7);
+        generalLayout.Controls.Add(BuildSettingsLabel("Web View starting page"), 0, 8);
+        generalLayout.Controls.Add(startPageTextBox, 1, 8);
 
-        generalLayout.Controls.Add(BuildSettingsLabel("Web View protocol"), 0, 8);
-        generalLayout.Controls.Add(protocolComboBox, 1, 8);
+        generalLayout.Controls.Add(BuildSettingsLabel("Web View protocol"), 0, 9);
+        generalLayout.Controls.Add(protocolComboBox, 1, 9);
 
-        generalLayout.Controls.Add(protocolDescriptionLabel, 1, 9);
+        generalLayout.Controls.Add(protocolDescriptionLabel, 1, 10);
 
         generalTab.Controls.Add(generalLayout);
 
@@ -6924,7 +7098,13 @@ public partial class MainForm : Form
         }
 
         appearanceTab.ApplyTo?.Invoke(draftSettings);
-        draftSettings.RenderWebViewInBackground = renderInBackgroundCheckBox.Checked;
+        if (backgroundRenderComboBox.SelectedItem is OptionItem<int> backgroundRenderOption)
+        {
+            // RenderWebViewInBackground follows it in NormalizeSettings.
+            draftSettings.BackgroundTabRenderSeconds = backgroundRenderOption.Value;
+        }
+
+        draftSettings.ResourceSaverEnabled = resourceSaverCheckBox.Checked;
         draftSettings.PersistHistoryAcrossSessions = persistHistoryCheckBox.Checked;
 
         if (retentionComboBox.SelectedItem is OptionItem<int> retentionOption)

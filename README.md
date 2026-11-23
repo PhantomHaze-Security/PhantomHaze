@@ -25,7 +25,7 @@
 
 ###  Stealth Capture Protection
 Leverages native Windows `WDA_EXCLUDEFROMCAPTURE` API to block screen recorders, screenshot utilities, and desktop-sharing apps from capturing your window.
-The protection banner shows the real protection state at a glance: green with an **ON** switch while you are protected, red with **OFF** while you are not. Click **ON** to turn protection off for a while (from 5 minutes to 1 day, or until you turn it back on); a live countdown shows when it will automatically resume.
+The protection banner shows the real protection state at a glance: green while you are protected, red while you are not. In Web View it is a card beside the address bar with an **ON**/**OFF** switch; in the Logs view it runs across the window with the **Disable Protection** button below it. Turn protection off for a while (from 5 minutes to 1 day, or until you turn it back on) and a live countdown shows when it will automatically resume.
 
 ###  True Ephemeral Privacy
 * **Zero Session Footprint:** Web history and session cookies are stored strictly in memory and wiped automatically the moment you close the app.
@@ -34,7 +34,8 @@ The protection banner shows the real protection state at a glance: green with an
 * **Logs You Control:** Logs (including the addresses of pages you open) are kept in `%LOCALAPPDATA%\PhantomHaze\logs`, so the Master Log covers everything since installation. Cookie names and values are never logged, and **Settings -> About -> Delete all logs** removes them at any time.
 
 ###  Modern Browser Suite
-* **Tabbed Navigation:** Clean tab interface with live site favicons and title updates.
+* **Tabbed Navigation:** Clean tab interface with live site favicons and title updates, plus Back (`←`) and Forward (`→`) buttons.
+* **Background Tabs & Resource Saver:** Tabs you are not looking at keep running for the time you choose in **Settings -> General -> Render background tabs for** (1 minute by default, from 10 seconds to forever), then pause until you open them again. With more than 20 tabs open, the resource saver pauses them after 10 seconds instead, so PhantomHaze stays responsive (it can be turned off from its banner or in Settings).
 * **In-Page Search (`Ctrl+F`):** Fast search panel with real-time match highlighting.
 * **Web View Protocols:** Choose how Web View loads pages in **Settings -> General -> Web View protocol** (see [Web View protocols](#-web-view-protocols)).
 * **Live Status Logging:** Instant visual feedback whenever protection is active or toggled.
@@ -182,12 +183,14 @@ Derive a class from `WebProtocolPage`. Create its control in the constructor (wi
 `Visible = false`) and return it from `View`. Then implement:
 
 * `InitializeAsync()`: prepares the page; throw a `WebProtocolUnavailableException` when it cannot be used.
-* `IsReady`, `CurrentUrl` (the address shown in the address bar), `Title` and `CanGoBack`.
-* `Navigate(url)` (always an `http://` or `https://` address), `GoBack()` and `Reload()`.
+* `IsReady`, `CurrentUrl` (the address shown in the address bar), `Title`, `CanGoBack` and `CanGoForward`.
+* `Navigate(url)` (always an `http://` or `https://` address), `GoBack()`, `GoForward()` and `Reload()`.
 * Report what happens by calling `OnNavigationStarting`, `OnNavigationCompleted`, `OnSourceChanged`, `OnTitleChanged`,
   `OnHistoryChanged`, `OnNewWindowRequested` and `OnFindRequested` (`Ctrl+F` pressed inside the page).
-* Optional, to match `Features`: `SetZoom`, `FindAsync`, `ExecuteScriptAsync`, `GetDeclaredFaviconUrlAsync`,
-  `SetRenderingActive` and `DocumentUrl`.
+* Optional, to match `Features`: `SetZoom`, `FindAsync`, `ExecuteScriptAsync`, `GetDeclaredFaviconUrlAsync` and
+  `DocumentUrl`.
+* Optional: `SetRenderingActive(false)` is called when a tab has been in the background for the time chosen in
+  Settings (or by the resource saver); pause the page there if the engine can, and continue on `SetRenderingActive(true)`.
 * `Dispose(bool disposing)`: stop downloads and release the control.
 
 ### 3. Register it
@@ -220,7 +223,7 @@ These keep PhantomHaze protected from screen capture and private, whatever the p
 
 ### Test it
 
-* Open pages, go Back, Refresh, open and close tabs, and click links that open a new window (`target="_blank"`).
+* Open pages, go Back and Forward, Refresh, open and close tabs, and click links that open a new window (`target="_blank"`).
 * Try history, favourites and, if supported, zoom and `Ctrl+F`.
 * Switch to and from the protocol in Settings while tabs are open.
 * Add an extension with a `web.block` rule and check that matching pages and images are blocked.

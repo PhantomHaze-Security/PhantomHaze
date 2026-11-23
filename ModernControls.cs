@@ -335,10 +335,10 @@ internal class PillPanel : Panel
 }
 
 /// <summary>
-/// The protection banner: a green or red card with the protection status and an ON/OFF switch. In Web View it is a
-/// compact card beside the address bar; in the other views it is extended across the window. It is drawn here instead of
-/// being built from standard controls, and it is deliberately not something extensions can customise (it is not a
-/// ui.element target): an extension must never be able to make PhantomHaze look protected when it is not.
+/// The protection banner of Web View: a green or red card beside the address bar with the protection status and an
+/// ON/OFF switch. (The Logs view and extension pages show a <see cref="ProtectionStatusBar"/> instead.) It is drawn here
+/// instead of being built from standard controls, and it is deliberately not something extensions can customise (it is
+/// not a ui.element target): an extension must never be able to make PhantomHaze look protected when it is not.
 /// </summary>
 internal sealed class ProtectionBanner : Control
 {
@@ -357,7 +357,6 @@ internal sealed class ProtectionBanner : Control
     private string _subtitle = string.Empty;
     private string? _countdown;
     private bool _protectionOn;
-    private bool _extended;
     private bool _darkStyle;
     private bool _hovered;
     private bool _pressed;
@@ -384,21 +383,6 @@ internal sealed class ProtectionBanner : Control
         {
             UpdateToggleBounds();
             return _toggleBounds;
-        }
-    }
-
-    /// <summary>True: a wide card across the window (Logs and extension pages). False: the compact card in Web View.</summary>
-    [DefaultValue(false)]
-    public bool Extended
-    {
-        get => _extended;
-        set
-        {
-            if (_extended != value)
-            {
-                _extended = value;
-                Invalidate();
-            }
         }
     }
 
@@ -512,15 +496,6 @@ internal sealed class ProtectionBanner : Control
             return;
         }
 
-        if (_extended)
-        {
-            int paddingX = Scale(16);
-            int height = Math.Min(Scale(40), Math.Max(Scale(20), client.Height - Scale(20)));
-            int width = Math.Min(Scale(150), Math.Max(Scale(90), client.Width / 3));
-            _toggleBounds = new Rectangle(client.Right - paddingX - width, client.Y + ((client.Height - height) / 2), width, height);
-            return;
-        }
-
         int padding = Scale(10);
         int toggleHeight = Math.Min(Scale(32), Math.Max(Scale(18), (client.Height - (padding * 2)) / 3));
         _toggleBounds = new Rectangle(client.X + padding, client.Bottom - padding - toggleHeight, Math.Max(1, client.Width - (padding * 2)), toggleHeight);
@@ -563,14 +538,7 @@ internal sealed class ProtectionBanner : Control
             graphics.SmoothingMode = previous;
         }
 
-        if (_extended)
-        {
-            DrawExtendedText(graphics, client, text);
-        }
-        else
-        {
-            DrawCompactText(graphics, client, text);
-        }
+        DrawCompactText(graphics, client, text);
     }
 
     private void DrawCompactText(Graphics graphics, Rectangle client, Color text)
@@ -626,42 +594,6 @@ internal sealed class ProtectionBanner : Control
         }
     }
 
-    private void DrawExtendedText(Graphics graphics, Rectangle client, Color text)
-    {
-        int paddingX = Scale(20);
-        int right = _toggleBounds.Left - Scale(16);
-        var area = new Rectangle(client.X + paddingX, client.Y + Scale(8), right - (client.X + paddingX), client.Height - Scale(16));
-        if (area.Width <= 0 || area.Height <= 0)
-        {
-            return;
-        }
-
-        const TextFormatFlags line = TextFormatFlags.Left | TextFormatFlags.SingleLine | TextFormatFlags.NoPrefix | TextFormatFlags.EndEllipsis;
-        Font titleFont = GetFont(13f, FontStyle.Bold);
-        Font subtitleFont = GetFont(9.75f, FontStyle.Regular);
-        Font countdownFont = GetFont(9.75f, FontStyle.Bold);
-        int gap = Scale(2);
-        Size titleSize = TextRenderer.MeasureText(graphics, _title, titleFont, new Size(area.Width, int.MaxValue), line);
-        Size subtitleSize = TextRenderer.MeasureText(graphics, _subtitle.Length > 0 ? _subtitle : " ", subtitleFont, new Size(area.Width, int.MaxValue), line);
-        int total = titleSize.Height + gap + subtitleSize.Height;
-        int y = area.Y + Math.Max(0, (area.Height - total) / 2);
-
-        TextRenderer.DrawText(graphics, _title, titleFont, new Rectangle(area.X, y, area.Width, titleSize.Height), text, line);
-        y += titleSize.Height + gap;
-        if (_subtitle.Length == 0)
-        {
-            return;
-        }
-
-        int subtitleWidth = Math.Min(area.Width, TextRenderer.MeasureText(graphics, _subtitle, subtitleFont, new Size(int.MaxValue, subtitleSize.Height), line).Width);
-        TextRenderer.DrawText(graphics, _subtitle, subtitleFont, new Rectangle(area.X, y, subtitleWidth, subtitleSize.Height), text, line);
-        if (_countdown is not null && subtitleWidth < area.Width)
-        {
-            int countdownLeft = area.X + subtitleWidth + Scale(4);
-            TextRenderer.DrawText(graphics, _countdown, countdownFont, new Rectangle(countdownLeft, y, Math.Max(1, area.Right - countdownLeft), subtitleSize.Height), text, line);
-        }
-    }
-
     private void DrawToggle(Graphics graphics, Color card)
     {
         Rectangle track = _toggleBounds;
@@ -711,7 +643,7 @@ internal sealed class ProtectionBanner : Control
         }
 
         // "ON" with a small arrow (it opens the menu of how long to turn protection off for), or "OFF".
-        Font knobFont = GetFont(_extended ? 11f : 10f, FontStyle.Bold);
+        Font knobFont = GetFont(10f, FontStyle.Bold);
         string label = _protectionOn ? "ON" : "OFF";
         const TextFormatFlags flags = TextFormatFlags.SingleLine | TextFormatFlags.NoPrefix | TextFormatFlags.NoPadding | TextFormatFlags.VerticalCenter | TextFormatFlags.Left;
         Size labelSize = TextRenderer.MeasureText(graphics, label, knobFont, new Size(int.MaxValue, knob.Height), flags);
@@ -807,10 +739,127 @@ internal sealed class ProtectionBanner : Control
 
     // The banner fills its cell of the top bar, so this only sets its smallest useful size. (Returning the proposed width
     // would be unsafe: layouts ask with int.MaxValue when the width is unconstrained.)
-    public override Size GetPreferredSize(Size proposedSize)
+    public override Size GetPreferredSize(Size proposedSize) => new(Scale(204), Scale(132));
+}
+
+/// <summary>
+/// The protection status of the Logs view and extension pages: a rounded green or red banner across the window, under
+/// the top bar, with one line of text (the protection button is below it, as in earlier versions). Like
+/// <see cref="ProtectionBanner"/> it is drawn here and is deliberately not something extensions can customise.
+/// </summary>
+internal sealed class ProtectionStatusBar : Control
+{
+    // The colours of the status banner of earlier versions.
+    private static readonly Color LightEnabled = Color.LightGreen;
+    private static readonly Color LightDisabled = Color.LightSalmon;
+    private static readonly Color DarkEnabled = Color.FromArgb(58, 123, 85);
+    private static readonly Color DarkDisabled = Color.FromArgb(133, 76, 73);
+
+    private bool _protectionOn;
+    private bool _darkStyle;
+
+    public ProtectionStatusBar()
     {
-        return _extended
-            ? new Size(Scale(320), Scale(84))
-            : new Size(Scale(204), Scale(132));
+        SetStyle(
+            ControlStyles.UserPaint | ControlStyles.AllPaintingInWmPaint | ControlStyles.OptimizedDoubleBuffer |
+            ControlStyles.ResizeRedraw,
+            true);
+        SetStyle(ControlStyles.Selectable, false);
+        TabStop = false;
+        AccessibleRole = AccessibleRole.StaticText;
+    }
+
+    /// <summary>Darker greens and reds with white text, for dark themes.</summary>
+    [DefaultValue(false)]
+    public bool DarkStyle
+    {
+        get => _darkStyle;
+        set
+        {
+            if (_darkStyle != value)
+            {
+                _darkStyle = value;
+                Invalidate();
+            }
+        }
+    }
+
+    public void SetStatus(bool protectionOn, string text)
+    {
+        if (_protectionOn == protectionOn && string.Equals(Text, text, StringComparison.Ordinal))
+        {
+            return;
+        }
+
+        _protectionOn = protectionOn;
+        Text = text;
+        AccessibleName = text;
+        Invalidate();
+    }
+
+    private int Scale(int logicalPixels)
+    {
+        int dpi = DeviceDpi > 0 ? DeviceDpi : 96;
+        return Math.Max(1, (int)Math.Round(logicalPixels * (dpi / 96.0)));
+    }
+
+    protected override void OnTextChanged(EventArgs e)
+    {
+        base.OnTextChanged(e);
+        Invalidate();
+    }
+
+    protected override void OnFontChanged(EventArgs e)
+    {
+        base.OnFontChanged(e);
+        Invalidate();
+    }
+
+    protected override void OnPaintBackground(PaintEventArgs e)
+    {
+        RoundedControlPainting.PaintParentBackground(this, e, InvokePaintBackground, InvokePaint);
+    }
+
+    protected override void OnPaint(PaintEventArgs e)
+    {
+        Rectangle client = ClientRectangle;
+        if (client.Width <= 4 || client.Height <= 4)
+        {
+            return;
+        }
+
+        Color fill = _protectionOn
+            ? (_darkStyle ? DarkEnabled : LightEnabled)
+            : (_darkStyle ? DarkDisabled : LightDisabled);
+        Color text = _darkStyle ? Color.White : Color.Black;
+        Graphics graphics = e.Graphics;
+        SmoothingMode previous = graphics.SmoothingMode;
+        graphics.SmoothingMode = SmoothingMode.AntiAlias;
+        try
+        {
+            using GraphicsPath path = RoundedControlPainting.CreatePillPath(client, Scale(12));
+            using (var brush = new SolidBrush(fill))
+            {
+                graphics.FillPath(brush, path);
+            }
+
+            using var pen = new Pen(RoundedControlPainting.Blend(fill, Color.Black, 0.22));
+            graphics.DrawPath(pen, path);
+        }
+        finally
+        {
+            graphics.SmoothingMode = previous;
+        }
+
+        int paddingX = Scale(14);
+        var textBounds = new Rectangle(client.X + paddingX, client.Y, Math.Max(1, client.Width - (paddingX * 2)), client.Height);
+        TextRenderer.DrawText(
+            graphics,
+            Text,
+            Font,
+            textBounds,
+            text,
+            TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter | TextFormatFlags.SingleLine |
+            TextFormatFlags.EndEllipsis | TextFormatFlags.NoPrefix);
     }
 }

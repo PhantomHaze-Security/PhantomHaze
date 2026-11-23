@@ -259,8 +259,8 @@ internal sealed record PhantomUiTargetInfo(string Name, string Description, Phan
 
 /// <summary>
 /// The built-in controls extensions may customise with ui.element, ui.svg and ui.shape, and what each one allows.
-/// The protection banner (with its ON/OFF switch) is deliberately not listed: an extension must never be able to make
-/// PhantomHaze look protected when it is not. The Settings button can be restyled but never hidden, so an
+/// The protection banners (with their ON/OFF switch) and the protection button are deliberately not listed: an
+/// extension must never be able to make PhantomHaze look protected when it is not. The Settings button can be restyled but never hidden, so an
 /// extension can never lock the user out of the place where it is disabled or uninstalled.
 /// </summary>
 internal static class PhantomUiTargets
@@ -295,7 +295,8 @@ internal static class PhantomUiTargets
         new("address.favorite", "The favourite (star) button",
             PhantomUiCapabilities.Tooltip | PhantomUiCapabilities.Visible | PhantomUiCapabilities.Border |
             PhantomUiCapabilities.Font | PhantomUiCapabilities.Svg | PhantomUiCapabilities.Shape),
-        new("address.back", "The Back button", ButtonLike),
+        new("address.back", "The Back (←) button", ButtonLike),
+        new("address.forward", "The Forward (→) button", ButtonLike),
         new("address.go", "The Go button", ButtonLike),
         new("address.refresh", "The Refresh button", ButtonLike),
         new("address.history", "The History button", ButtonLike),

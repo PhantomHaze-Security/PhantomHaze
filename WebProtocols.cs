@@ -185,6 +185,8 @@ internal abstract class WebProtocolPage : IDisposable
 
     public abstract bool CanGoBack { get; }
 
+    public abstract bool CanGoForward { get; }
+
     public bool IsDisposed { get; private set; }
 
     /// <summary>Prepares the page. Throws (for example <see cref="WebProtocolUnavailableException"/>) when it cannot be used.</summary>
@@ -194,6 +196,8 @@ internal abstract class WebProtocolPage : IDisposable
     public abstract void Navigate(string url);
 
     public abstract void GoBack();
+
+    public abstract void GoForward();
 
     public abstract void Reload();
 
@@ -231,7 +235,7 @@ internal abstract class WebProtocolPage : IDisposable
 
     public event EventHandler? TitleChanged;
 
-    /// <summary>Back became available or unavailable.</summary>
+    /// <summary>Back or Forward became available or unavailable.</summary>
     public event EventHandler? HistoryChanged;
 
     /// <summary>The page wants a new window; PhantomHaze opens the address in a new protected tab instead.</summary>
@@ -605,11 +609,15 @@ internal sealed class TemplateWebProtocolPage : WebProtocolPage
 
     public override bool CanGoBack => _inner.CanGoBack;
 
+    public override bool CanGoForward => _inner.CanGoForward;
+
     public override Task InitializeAsync() => _inner.InitializeAsync();
 
     public override void Navigate(string url) => _inner.Navigate(_template.BuildAddress(url));
 
     public override void GoBack() => _inner.GoBack();
+
+    public override void GoForward() => _inner.GoForward();
 
     public override void Reload() => _inner.Reload();
 

@@ -700,7 +700,13 @@ public partial class MainForm
         // This one inherits the window's font; MapFont(Font) is that same font unless an app font is in use.
         Bind("address.bar", _addressBarTextBox, font: () => MapFont(Font));
         Bind("address.favorite", _favoriteButton, font: () => MapFont(_favoriteButtonFont));
-        Bind("address.back", _backButton, text: () => "Back", font: () => MapFont(_stripButtonFont));
+        // The arrows keep their own font (an app font may not have them); text an extension sets uses the strip font.
+        Bind("address.back", _backButton, text: () => BackGlyph,
+             font: () => _backButton.Text == BackGlyph ? _navigationGlyphFont : MapFont(_stripButtonFont),
+             tooltip: () => "Back");
+        Bind("address.forward", _forwardButton, text: () => ForwardGlyph,
+             font: () => _forwardButton.Text == ForwardGlyph ? _navigationGlyphFont : MapFont(_stripButtonFont),
+             tooltip: () => "Forward");
         Bind("address.go", _goButton, text: () => "Go", font: () => MapFont(_stripButtonFont));
         Bind("address.refresh", _refreshButton, text: () => "Refresh", font: () => MapFont(_stripButtonFont));
         Bind("address.history", _historyButton, text: () => "History", font: () => MapFont(_stripButtonFont));

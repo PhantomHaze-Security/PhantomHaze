@@ -96,6 +96,8 @@ internal sealed class WebView2ProtocolPage : WebProtocolPage
 
     public override bool CanGoBack => Core?.CanGoBack == true;
 
+    public override bool CanGoForward => Core?.CanGoForward == true;
+
     public override async Task InitializeAsync()
     {
         CoreWebView2Environment environment = await Host.GetWebView2EnvironmentAsync(_proxyServer);
@@ -160,6 +162,14 @@ internal sealed class WebView2ProtocolPage : WebProtocolPage
         if (Core is CoreWebView2 core && core.CanGoBack)
         {
             core.GoBack();
+        }
+    }
+
+    public override void GoForward()
+    {
+        if (Core is CoreWebView2 core && core.CanGoForward)
+        {
+            core.GoForward();
         }
     }
 
