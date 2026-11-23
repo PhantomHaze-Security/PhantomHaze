@@ -297,9 +297,9 @@ internal static class PhantomUiTargets
             PhantomUiCapabilities.Font | PhantomUiCapabilities.Svg | PhantomUiCapabilities.Shape),
         new("address.back", "The Back (←) button", ButtonLike),
         new("address.forward", "The Forward (→) button", ButtonLike),
-        new("address.go", "The Go button", ButtonLike),
-        new("address.refresh", "The Refresh button", ButtonLike),
-        new("address.history", "The History button", ButtonLike),
+        new("address.go", "The Go (⏎) button", ButtonLike),
+        new("address.refresh", "The Refresh (⟳) button", ButtonLike),
+        new("address.history", "The History (🕘) button", ButtonLike),
         new("address.zoom", "The zoom percentage label",
             PhantomUiCapabilities.Tooltip | PhantomUiCapabilities.Visible | PhantomUiCapabilities.Background |
             PhantomUiCapabilities.Foreground | PhantomUiCapabilities.Font),

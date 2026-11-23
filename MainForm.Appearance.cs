@@ -1471,7 +1471,7 @@ public partial class MainForm
                  {
                      _tabCloseFontRegular, _tabCloseFontCompact, _menuButtonFontRegular, _menuButtonFontBold, _menuTitleFont,
                      _tabTitleFont, _stripButtonFont, _favoriteButtonFont, _zoomLabelFont, _newTabButtonFont, _logFont,
-                     _settingsGlyphFont, _protectionStatusFont, _navigationGlyphFont,
+                     _settingsGlyphFont, _protectionStatusFont, _navigationGlyphFont, _stripGlyphFont,
                  })
         {
             font.Dispose();

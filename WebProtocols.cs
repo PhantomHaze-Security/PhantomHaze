@@ -221,7 +221,13 @@ internal abstract class WebProtocolPage : IDisposable
     /// </summary>
     public virtual Task<string?> ExecuteScriptAsync(string script) => Task.FromResult<string?>(null);
 
-    /// <summary>Tells a hidden page whether it should keep rendering (Settings -> Render web pages in the background).</summary>
+    /// <summary>True when <see cref="SetRenderingActive"/> really pauses the page (paused tabs show 💤).</summary>
+    public virtual bool CanPauseRendering => false;
+
+    /// <summary>
+    /// Tells a hidden page whether it should keep rendering (Settings -> General -> Render background tabs for, and the
+    /// resource saver). Only called when <see cref="CanPauseRendering"/> is true.
+    /// </summary>
     public virtual void SetRenderingActive(bool active)
     {
     }
@@ -628,6 +634,8 @@ internal sealed class TemplateWebProtocolPage : WebProtocolPage
     public override Task<string?> GetDeclaredFaviconUrlAsync() => _inner.GetDeclaredFaviconUrlAsync();
 
     public override Task<string?> ExecuteScriptAsync(string script) => _inner.ExecuteScriptAsync(script);
+
+    public override bool CanPauseRendering => _inner.CanPauseRendering;
 
     public override void SetRenderingActive(bool active) => _inner.SetRenderingActive(active);
 

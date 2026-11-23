@@ -379,9 +379,9 @@ log) rather than replaced by an unrelated fallback font.
 | `address.favorite` | The favourite (star) button     |      | ✓       | ✓       |            |            | ✓      | ✓    | ✓      | ✓        |
 | `address.back`     | The Back (`←`) button           | ✓    | ✓       | ✓       | ✓          | ✓          | ✓      | ✓    | ✓      | ✓        |
 | `address.forward`  | The Forward (`→`) button        | ✓    | ✓       | ✓       | ✓          | ✓          | ✓      | ✓    | ✓      | ✓        |
-| `address.go`       | The Go button                   | ✓    | ✓       | ✓       | ✓          | ✓          | ✓      | ✓    | ✓      | ✓        |
-| `address.refresh`  | The Refresh button              | ✓    | ✓       | ✓       | ✓          | ✓          | ✓      | ✓    | ✓      | ✓        |
-| `address.history`  | The History button              | ✓    | ✓       | ✓       | ✓          | ✓          | ✓      | ✓    | ✓      | ✓        |
+| `address.go`       | The Go (`⏎`) button             | ✓    | ✓       | ✓       | ✓          | ✓          | ✓      | ✓    | ✓      | ✓        |
+| `address.refresh`  | The Refresh (`⟳`) button        | ✓    | ✓       | ✓       | ✓          | ✓          | ✓      | ✓    | ✓      | ✓        |
+| `address.history`  | The History (`🕘`) button       | ✓    | ✓       | ✓       | ✓          | ✓          | ✓      | ✓    | ✓      | ✓        |
 | `address.zoom`     | The zoom percentage             |      | ✓       | ✓       | ✓          | ✓          |        | ✓    |        |          |
 | `tabs.new`         | The new tab (+) button          | ✓    | ✓       | ✓       | ✓          | ✓          | ✓      | ✓    | ✓      | ✓        |
 | `log.panel`        | The log panel                   |      |         |         | ✓          | ✓          |        | ✓    |        |          |

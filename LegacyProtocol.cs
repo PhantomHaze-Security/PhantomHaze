@@ -756,6 +756,27 @@ internal sealed class PhantomLegacyBrowser : WebBrowser
                 return true;
             }
 
+            // Back and forward are handled here, so they never run twice (here and in PhantomHaze's own shortcuts).
+            if ((modifiers == Keys.Alt && key == Keys.Left) || (modifiers == Keys.None && key == Keys.BrowserBack))
+            {
+                if (CanGoBack)
+                {
+                    GoBack();
+                }
+
+                return true;
+            }
+
+            if ((modifiers == Keys.Alt && key == Keys.Right) || (modifiers == Keys.None && key == Keys.BrowserForward))
+            {
+                if (CanGoForward)
+                {
+                    GoForward();
+                }
+
+                return true;
+            }
+
             if (OpensEngineWindow(key, modifiers))
             {
                 return true;

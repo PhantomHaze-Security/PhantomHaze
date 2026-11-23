@@ -367,7 +367,7 @@ public partial class MainForm : Form
     // button below it (as in earlier versions). Not ui.element targets either.
     private readonly ThemedPanel _protectionStripPanel = new();
     private readonly ProtectionStatusBar _protectionStatusBar = new();
-    private readonly Button _toggleButton = new();
+    private readonly PillButton _toggleButton = new();
     private readonly Font _protectionStatusFont = new("Segoe UI", 10, FontStyle.Bold);
     // The protection banner's tooltip (extension tooltips, and the Settings gear's, use _extensionUiToolTip).
     private readonly ToolTip _headerToolTip = new();
@@ -422,8 +422,10 @@ public partial class MainForm : Form
     private readonly Font _newTabButtonFont = new("Segoe UI", 12, FontStyle.Bold);
     // The Settings gear; never replaced by the app font, which may not have the gear symbol.
     private readonly Font _settingsGlyphFont = new("Segoe UI Symbol", 13, FontStyle.Regular);
-    // The Back and Forward arrows; like the gear, never replaced by the app font.
+    // The Back and Forward arrows and the Go, Refresh and History icons; like the gear, never replaced by the app font
+    // (which may not have these symbols).
     private readonly Font _navigationGlyphFont = new("Segoe UI", 12, FontStyle.Bold);
+    private readonly Font _stripGlyphFont = new("Segoe UI Symbol", 12, FontStyle.Regular);
     private readonly Font _logFont = new("Consolas", 9);
     private readonly string _logDirectory;
     private readonly string _fontCacheDirectory;
@@ -495,20 +497,24 @@ public partial class MainForm : Form
     private static readonly object TabCloseButtonTag = new();
 
     private const string DefaultHomeUrl = "https://www.google.com";
+    // The address row's buttons are icons (their names are their tooltips).
     private const int DefaultBackButtonWidth = 46;
     private const int DefaultForwardButtonWidth = 46;
     private const string BackGlyph = "←";
     private const string ForwardGlyph = "→";
-    private const int DefaultGoButtonWidth = 56;
-    private const int DefaultRefreshButtonWidth = 80;
-    private const int DefaultHistoryButtonWidth = 80;
+    private const string GoGlyph = "⏎";
+    private const string RefreshGlyph = "⟳";
+    private const string HistoryGlyph = "🕘";
+    private const int DefaultGoButtonWidth = 46;
+    private const int DefaultRefreshButtonWidth = 46;
+    private const int DefaultHistoryButtonWidth = 46;
     private const int DefaultZoomLabelWidth = 96;
     private const int DefaultZoomSliderWidth = 185;
     private const int CompactBackButtonWidth = 40;
     private const int CompactForwardButtonWidth = 40;
-    private const int CompactGoButtonWidth = 48;
-    private const int CompactRefreshButtonWidth = 70;
-    private const int CompactHistoryButtonWidth = 70;
+    private const int CompactGoButtonWidth = 40;
+    private const int CompactRefreshButtonWidth = 40;
+    private const int CompactHistoryButtonWidth = 40;
     private const int CompactZoomSliderWidth = 135;
     private const int MinimumAddressInputWidth = 180;
     private static readonly Image DefaultTabIcon = SystemIcons.Application.ToBitmap();
@@ -2655,6 +2661,7 @@ public partial class MainForm : Form
     private const int ProtectionStatusHeight = 34;
     private const int ProtectionStripGap = 4;
     private const int ProtectionButtonHeight = 36;
+    private const int ProtectionStatusCornerRadius = 12;
 
     private void ApplyProtectionStripMetrics()
     {
@@ -2662,6 +2669,8 @@ public partial class MainForm : Form
         _protectionStripPanel.Padding = ScalePadding(HeaderOuterMargin, 0, HeaderOuterMargin, HeaderOuterMargin);
         _protectionStatusBar.Height = ScaleByDpi(ProtectionStatusHeight);
         _toggleButton.Height = ScaleByDpi(ProtectionButtonHeight);
+        // As rounded as the status banner above it.
+        _toggleButton.CornerRadius = ScaleByDpi(ProtectionStatusCornerRadius);
         _protectionStripPanel.Height = _protectionStripPanel.Padding.Vertical + _protectionStatusBar.Height +
                                        ScaleByDpi(ProtectionStripGap) + _toggleButton.Height;
     }
@@ -3143,7 +3152,7 @@ public partial class MainForm : Form
         addressInputLayout.Controls.Add(_favoriteButton, 1, 0);
         _addressPill.Controls.Add(addressInputLayout);
 
-        // Back and Forward show arrows (their names are their tooltips, set in BuildUiTargetBindings).
+        // The buttons show arrows and icons (their names are their tooltips, set in BuildUiTargetBindings).
         _backButton.Dock = DockStyle.Fill;
         _backButton.Enabled = false;
         ConfigureStripButton(_backButton);
@@ -3160,19 +3169,25 @@ public partial class MainForm : Form
         _forwardButton.AccessibleName = "Forward";
         _forwardButton.Click += (_, _) => GoForward();
 
-        _goButton.Text = "Go";
         _goButton.Dock = DockStyle.Fill;
         ConfigureStripButton(_goButton);
+        _goButton.Text = GoGlyph;
+        _goButton.Font = _stripGlyphFont;
+        _goButton.AccessibleName = "Go";
         _goButton.Click += (_, _) => NavigateToAddressBarUrl();
 
-        _refreshButton.Text = "Refresh";
         _refreshButton.Dock = DockStyle.Fill;
         ConfigureStripButton(_refreshButton);
+        _refreshButton.Text = RefreshGlyph;
+        _refreshButton.Font = _stripGlyphFont;
+        _refreshButton.AccessibleName = "Refresh";
         _refreshButton.Click += (_, _) => RefreshWebView();
 
-        _historyButton.Text = "History";
         _historyButton.Dock = DockStyle.Fill;
         ConfigureStripButton(_historyButton);
+        _historyButton.Text = HistoryGlyph;
+        _historyButton.Font = _stripGlyphFont;
+        _historyButton.AccessibleName = "History";
         _historyButton.Click += (_, _) => ToggleHistoryPanel();
 
         stripLayout.Controls.Add(_addressPill, 0, 0);
@@ -3763,6 +3778,8 @@ public partial class MainForm : Form
             Margin = new Padding(0),
             Cursor = Cursors.Hand,
         };
+        // A paused background tab shows 💤 instead of its icon.
+        faviconBox.Paint += OnTabFaviconPaint;
 
         var closePill = new PillButton
         {
@@ -5584,6 +5601,30 @@ public partial class MainForm : Form
                 Thread.Sleep(120);
             }
         }
+    }
+
+    /// <summary>
+    /// Alt+Left / Alt+Right (and the keyboard's Back / Forward keys) go back and forward in Web View. WebView2 passes these
+    /// keys here as accelerator keys, so they are handled once; the Legacy engine handles them itself.
+    /// </summary>
+    protected override bool ProcessCmdKey(ref Message msg, Keys keyData)
+    {
+        if (_webViewModeEnabled && _activeTab is not null)
+        {
+            if (keyData is (Keys.Alt | Keys.Left) or Keys.BrowserBack)
+            {
+                GoBack();
+                return true;
+            }
+
+            if (keyData is (Keys.Alt | Keys.Right) or Keys.BrowserForward)
+            {
+                GoForward();
+                return true;
+            }
+        }
+
+        return base.ProcessCmdKey(ref msg, keyData);
     }
 
     private void OnMainFormKeyDown(object? sender, KeyEventArgs e)

@@ -244,6 +244,8 @@ internal sealed class WebView2ProtocolPage : WebProtocolPage
         return Core is CoreWebView2 core ? await core.ExecuteScriptAsync(script) : null;
     }
 
+    public override bool CanPauseRendering => true;
+
     public override void SetRenderingActive(bool active)
     {
         if (Core is not CoreWebView2 core)

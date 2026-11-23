@@ -34,8 +34,8 @@ The protection banner shows the real protection state at a glance: green while y
 * **Logs You Control:** Logs (including the addresses of pages you open) are kept in `%LOCALAPPDATA%\PhantomHaze\logs`, so the Master Log covers everything since installation. Cookie names and values are never logged, and **Settings -> About -> Delete all logs** removes them at any time.
 
 ###  Modern Browser Suite
-* **Tabbed Navigation:** Clean tab interface with live site favicons and title updates, plus Back (`←`) and Forward (`→`) buttons.
-* **Background Tabs & Resource Saver:** Tabs you are not looking at keep running for the time you choose in **Settings -> General -> Render background tabs for** (1 minute by default, from 10 seconds to forever), then pause until you open them again. With more than 20 tabs open, the resource saver pauses them after 10 seconds instead, so PhantomHaze stays responsive (it can be turned off from its banner or in Settings).
+* **Tabbed Navigation:** Clean tab interface with live site favicons and title updates, plus Back (`←`), Forward (`→`), Go (`⏎`), Refresh (`⟳`) and History (`🕘`) buttons. `Alt+←` and `Alt+→` go back and forward.
+* **Background Tabs & Resource Saver:** Tabs you are not looking at keep running for the time you choose in **Settings -> General -> Render background tabs for** (1 minute by default, from 10 seconds to forever), then pause until you open them again; a paused tab shows 💤 instead of its icon. With more than 20 tabs open, the resource saver pauses them after 10 seconds instead, so PhantomHaze stays responsive (it can be turned off from its banner or in Settings).
 * **In-Page Search (`Ctrl+F`):** Fast search panel with real-time match highlighting.
 * **Web View Protocols:** Choose how Web View loads pages in **Settings -> General -> Web View protocol** (see [Web View protocols](#-web-view-protocols)).
 * **Live Status Logging:** Instant visual feedback whenever protection is active or toggled.
@@ -189,8 +189,9 @@ Derive a class from `WebProtocolPage`. Create its control in the constructor (wi
   `OnHistoryChanged`, `OnNewWindowRequested` and `OnFindRequested` (`Ctrl+F` pressed inside the page).
 * Optional, to match `Features`: `SetZoom`, `FindAsync`, `ExecuteScriptAsync`, `GetDeclaredFaviconUrlAsync` and
   `DocumentUrl`.
-* Optional: `SetRenderingActive(false)` is called when a tab has been in the background for the time chosen in
-  Settings (or by the resource saver); pause the page there if the engine can, and continue on `SetRenderingActive(true)`.
+* Optional: if the engine can pause a page, return `true` from `CanPauseRendering`. `SetRenderingActive(false)` is then
+  called when a tab has been in the background for the time chosen in Settings (or by the resource saver), and
+  `SetRenderingActive(true)` when it should continue; paused tabs show 💤.
 * `Dispose(bool disposing)`: stop downloads and release the control.
 
 ### 3. Register it

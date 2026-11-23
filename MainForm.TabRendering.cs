@@ -80,7 +80,7 @@ public partial class MainForm
         int stopped = 0;
         foreach (BrowserTab tab in _tabs)
         {
-            if (!tab.Page.IsReady)
+            if (!tab.Page.IsReady || !tab.Page.CanPauseRendering)
             {
                 continue;
             }
@@ -109,6 +109,7 @@ public partial class MainForm
 
             tab.RenderingSuspended = !render;
             tab.Page.SetRenderingActive(render);
+            tab.FaviconBox.Invalidate();
             if (!render)
             {
                 stopped++;
@@ -127,6 +128,44 @@ public partial class MainForm
             _backgroundRenderTimer.Interval = (int)Math.Clamp(wait.TotalMilliseconds + 50, 250, int.MaxValue);
             _backgroundRenderTimer.Start();
         }
+    }
+
+    private const string PausedTabGlyph = "💤";
+
+    /// <summary>
+    /// Draws 💤 over the icon of a tab whose page has stopped rendering in the background (the icon comes back as soon as
+    /// the tab renders again). Windows draws emoji in one colour here, so it is drawn in a blue that suits the tab.
+    /// </summary>
+    private static void OnTabFaviconPaint(object? sender, PaintEventArgs e)
+    {
+        if (sender is not PictureBox { Tag: BrowserTab { RenderingSuspended: true } } faviconBox)
+        {
+            return;
+        }
+
+        Rectangle bounds = faviconBox.ClientRectangle;
+        if (bounds.Width <= 2 || bounds.Height <= 2)
+        {
+            return;
+        }
+
+        Color back = faviconBox.BackColor.A == 255 ? faviconBox.BackColor : (faviconBox.Parent?.BackColor ?? SystemColors.Control);
+        using (var brush = new SolidBrush(back))
+        {
+            e.Graphics.FillRectangle(brush, bounds);
+        }
+
+        Color glyph = IsDarkColor(back) ? Color.FromArgb(147, 197, 253) : Color.FromArgb(37, 99, 235);
+        float size = Math.Max(6f, Math.Min(bounds.Width, bounds.Height) * 0.85f);
+        using var font = new Font("Segoe UI Emoji", size, FontStyle.Regular, GraphicsUnit.Pixel);
+        TextRenderer.DrawText(
+            e.Graphics,
+            PausedTabGlyph,
+            font,
+            bounds,
+            glyph,
+            TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter | TextFormatFlags.SingleLine |
+            TextFormatFlags.NoPadding | TextFormatFlags.NoPrefix);
     }
 
     /// <summary>Logs when the resource saver starts or stops, and shows or hides its banner.</summary>

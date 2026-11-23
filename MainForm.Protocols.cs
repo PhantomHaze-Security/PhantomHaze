@@ -565,6 +565,7 @@ public partial class MainForm
         tab.Protocol = protocol;
         // A new page renders until it is told otherwise.
         tab.RenderingSuspended = false;
+        tab.FaviconBox.Invalidate();
         tab.IsNavigationPending = false;
         tab.NavigationSequence++;
         OnWebView2PageRemoved(oldEnvironment);

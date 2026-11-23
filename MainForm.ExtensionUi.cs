@@ -707,9 +707,15 @@ public partial class MainForm
         Bind("address.forward", _forwardButton, text: () => ForwardGlyph,
              font: () => _forwardButton.Text == ForwardGlyph ? _navigationGlyphFont : MapFont(_stripButtonFont),
              tooltip: () => "Forward");
-        Bind("address.go", _goButton, text: () => "Go", font: () => MapFont(_stripButtonFont));
-        Bind("address.refresh", _refreshButton, text: () => "Refresh", font: () => MapFont(_stripButtonFont));
-        Bind("address.history", _historyButton, text: () => "History", font: () => MapFont(_stripButtonFont));
+        Bind("address.go", _goButton, text: () => GoGlyph,
+             font: () => _goButton.Text == GoGlyph ? _stripGlyphFont : MapFont(_stripButtonFont),
+             tooltip: () => "Go");
+        Bind("address.refresh", _refreshButton, text: () => RefreshGlyph,
+             font: () => _refreshButton.Text == RefreshGlyph ? _stripGlyphFont : MapFont(_stripButtonFont),
+             tooltip: () => "Refresh");
+        Bind("address.history", _historyButton, text: () => HistoryGlyph,
+             font: () => _historyButton.Text == HistoryGlyph ? _stripGlyphFont : MapFont(_stripButtonFont),
+             tooltip: () => "History");
         Bind("address.zoom", _zoomLabel, font: () => MapFont(_zoomLabelFont));
         Bind("tabs.new", _newTabButton, text: () => "+", font: () => MapFont(_newTabButtonFont));
         Bind("log.panel", _logBox, font: () => MapFont(_logFont));
