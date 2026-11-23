@@ -143,6 +143,33 @@ internal sealed class PhantomExtensionPageDefinition
     public string Html { get; init; } = string.Empty;
 }
 
+/// <summary>The built-in engine an extension's Web View protocol (protocol.add) shows its pages with.</summary>
+internal enum PhantomExtensionProtocolEngine
+{
+    WebView2,
+    HtmlRenderer,
+    Legacy,
+}
+
+/// <summary>
+/// A Web View protocol an extension adds (protocol.add, optionally protocol.proxy): it appears in Settings -> General ->
+/// Web View protocol and loads pages through an address template and/or a proxy server.
+/// </summary>
+internal sealed class PhantomExtensionProtocolDefinition
+{
+    public string Id { get; init; } = string.Empty;
+    public string Name { get; init; } = string.Empty;
+    public PhantomExtensionProtocolEngine Engine { get; init; }
+
+    /// <summary>The address loaded for a page, with {{url}} or {{url.raw}} (and possibly {{setting.*}} placeholders).</summary>
+    public string AddressTemplate { get; init; } = "{{url}}";
+
+    /// <summary>A proxy server (http://, socks4:// or socks5://host:port) every request goes through, or null.</summary>
+    public string? ProxyServer { get; set; }
+
+    public int LineNumber { get; init; }
+}
+
 /// <summary>A property of a built-in or extension-owned control that ui.element can change.</summary>
 internal enum PhantomUiProperty
 {
@@ -471,6 +498,10 @@ internal sealed class PhantomExtensionDefinition
     public List<PhantomExtensionMenuItemDefinition> MenuItems { get; } = new();
 
     public List<PhantomExtensionPageDefinition> Pages { get; } = new();
+
+    /// <summary>Web View protocols (protocol.add) in declaration order.</summary>
+    public List<PhantomExtensionProtocolDefinition> Protocols { get; } = new();
+
     public List<PhantomExtensionUiEditDefinition> UiEdits { get; } = new();
     public List<PhantomExtensionUiSvgDefinition> UiSvgs { get; } = new();
     public List<PhantomExtensionUiShapeDefinition> UiShapes { get; } = new();
@@ -513,6 +544,7 @@ internal static class PhextParser
         var seenElements = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         var seenScripts = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         var seenBlocks = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        var seenProtocols = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         var dropdownsById = new Dictionary<string, PhantomExtensionMenuItemDefinition>(StringComparer.OrdinalIgnoreCase);
         // Checked once the whole file is read, because pages and ui.html may be declared after the lines using them.
         var pendingActionChecks = new List<(PhantomExtensionActionDefinition Action, int LineNumber)>();
@@ -831,6 +863,57 @@ internal static class PhextParser
                     });
                     break;
                 }
+                case "protocol.add":
+                {
+                    RequireArgCount(args, 5, lineNumber);
+                    string id = ValidateIdentifier(args[1], lineNumber, "protocol id");
+                    EnsureUnique(seenProtocols, id, lineNumber, "protocol id");
+                    if (definition.Protocols.Count >= MaximumProtocols)
+                    {
+                        throw new PhextParseException(lineNumber, $"An extension can add at most {MaximumProtocols} protocols.");
+                    }
+
+                    string name = args[2].Trim();
+                    string template = args[4].Trim();
+                    ValidateProtocolAddressTemplate(template, lineNumber);
+                    definition.Protocols.Add(new PhantomExtensionProtocolDefinition
+                    {
+                        Id = id,
+                        Name = name.Length == 0 ? id : name,
+                        Engine = ParseProtocolEngine(args[3], lineNumber),
+                        AddressTemplate = template,
+                        LineNumber = lineNumber,
+                    });
+                    break;
+                }
+                case "protocol.proxy":
+                {
+                    RequireArgCount(args, 3, lineNumber);
+                    string id = ValidateIdentifier(args[1], lineNumber, "protocol id");
+                    PhantomExtensionProtocolDefinition? protocol = definition.Protocols.FirstOrDefault(candidate =>
+                        candidate.Id.Equals(id, StringComparison.OrdinalIgnoreCase));
+                    if (protocol is null)
+                    {
+                        throw new PhextParseException(
+                            lineNumber,
+                            $"protocol.proxy refers to the protocol '{id}', which is not declared above it. Declare it first with protocol.add.");
+                    }
+
+                    if (protocol.ProxyServer is not null)
+                    {
+                        throw new PhextParseException(lineNumber, $"The protocol '{id}' already has a proxy server.");
+                    }
+
+                    if (protocol.Engine == PhantomExtensionProtocolEngine.Legacy)
+                    {
+                        throw new PhextParseException(
+                            lineNumber,
+                            "protocol.proxy cannot be used with the legacy engine: Internet Explorer's network settings are shared with Windows. Use webview2 or htmlrenderer.");
+                    }
+
+                    protocol.ProxyServer = ParseProxyServer(args[2], lineNumber);
+                    break;
+                }
                 case "app.startpage":
                     RequireArgCount(args, 2, lineNumber);
                     definition.StartPageOverride = args[1].Trim();
@@ -959,6 +1042,29 @@ internal static class PhextParser
             }
         }
 
+        // Settings may be declared after the protocols that use them, so placeholders are checked once the file is read.
+        foreach (PhantomExtensionProtocolDefinition protocol in definition.Protocols)
+        {
+            foreach (Match placeholder in TemplatePlaceholderRegex.Matches(protocol.AddressTemplate))
+            {
+                string inner = placeholder.Groups["inner"].Value.Trim();
+                bool known = inner.Equals("url", StringComparison.OrdinalIgnoreCase) ||
+                             inner.Equals("url.raw", StringComparison.OrdinalIgnoreCase) ||
+                             inner.Equals("extension.id", StringComparison.OrdinalIgnoreCase) ||
+                             inner.Equals("extension.name", StringComparison.OrdinalIgnoreCase) ||
+                             inner.Equals("extension.version", StringComparison.OrdinalIgnoreCase) ||
+                             (inner.StartsWith("setting.", StringComparison.OrdinalIgnoreCase) &&
+                              seenSettings.Contains(inner["setting.".Length..]));
+                if (!known)
+                {
+                    throw new PhextParseException(
+                        protocol.LineNumber,
+                        $"The address of the protocol '{protocol.Id}' uses the placeholder '{placeholder.Value}', which this file does not define. " +
+                        "Use {{url}}, {{url.raw}}, {{extension.id}}, {{extension.name}}, {{extension.version}} or {{setting.<key>}} for a declared setting.");
+                }
+            }
+        }
+
         foreach ((string target, PhantomUiCapabilities required, string what, int targetLine) in pendingTargetChecks)
         {
             PhantomUiCapabilities allowed;
@@ -977,7 +1083,7 @@ internal static class PhextParser
             {
                 throw new PhextParseException(
                     targetLine,
-                    $"Unknown UI element '{target}'. Use a built-in element (listed in PHEXT_GUIDE.md) or the id of one of " +
+                    $"Unknown UI element '{target}'. Use a built-in element (listed in the PhantomScript guide) or the id of one of " +
                     "this extension's app.button, menu.button, menu.dropdown or app.page controls.");
             }
 
@@ -998,6 +1104,138 @@ internal static class PhextParser
     }
 
     private const int MaximumDropdownOptions = 50;
+    private const int MaximumProtocols = 10;
+
+    private static readonly Regex TemplatePlaceholderRegex = new(
+        @"\{\{(?<inner>[^{}]{0,80})\}\}",
+        RegexOptions.CultureInvariant | RegexOptions.Compiled);
+
+    private static PhantomExtensionProtocolEngine ParseProtocolEngine(string value, int lineNumber)
+    {
+        return value.Trim().ToLowerInvariant() switch
+        {
+            "webview2" => PhantomExtensionProtocolEngine.WebView2,
+            "htmlrenderer" or "html-renderer" => PhantomExtensionProtocolEngine.HtmlRenderer,
+            "legacy" => PhantomExtensionProtocolEngine.Legacy,
+            _ => throw new PhextParseException(lineNumber, $"Unknown protocol engine '{value}'. Use webview2, htmlrenderer or legacy."),
+        };
+    }
+
+    /// <summary>
+    /// Finds the page-address placeholder of a protocol address ({{url}} or {{url.raw}}, any letter case): the first one
+    /// and how many there are.
+    /// </summary>
+    internal static (int Index, int Length, bool Raw)? FindProtocolUrlPlaceholder(string template, out int count)
+    {
+        count = 0;
+        (int Index, int Length, bool Raw)? first = null;
+        int position = 0;
+        while (position < template.Length)
+        {
+            int index = template.IndexOf("{{url", position, StringComparison.OrdinalIgnoreCase);
+            if (index < 0)
+            {
+                break;
+            }
+
+            if (string.Compare(template, index, "{{url}}", 0, 7, StringComparison.OrdinalIgnoreCase) == 0)
+            {
+                count++;
+                first ??= (index, 7, false);
+                position = index + 7;
+            }
+            else if (string.Compare(template, index, "{{url.raw}}", 0, 11, StringComparison.OrdinalIgnoreCase) == 0)
+            {
+                count++;
+                first ??= (index, 11, true);
+                position = index + 11;
+            }
+            else
+            {
+                position = index + 5;
+            }
+        }
+
+        return first;
+    }
+
+    /// <summary>
+    /// A protocol address is either just the page address ("{{url}}") or an http(s) address whose scheme and server are
+    /// written out, so neither a page address nor a setting can ever change which server is contacted.
+    /// </summary>
+    private static void ValidateProtocolAddressTemplate(string template, int lineNumber)
+    {
+        const string usage =
+            "Use an address that contains {{url}} (the page address, percent-encoded) or {{url.raw}} once, for example " +
+            "\"https://gateway.example/fetch?url={{url}}\", or just \"{{url}}\" to load pages directly.";
+
+        (int Index, int Length, bool Raw)? placeholder = FindProtocolUrlPlaceholder(template, out int count);
+        if (placeholder is null || count != 1)
+        {
+            throw new PhextParseException(lineNumber, $"The protocol address '{template}' is invalid. {usage}");
+        }
+
+        if (placeholder.Value.Length == template.Length)
+        {
+            return;
+        }
+
+        int schemeEnd = template.IndexOf("://", StringComparison.Ordinal);
+        bool web = template.StartsWith("https://", StringComparison.OrdinalIgnoreCase) ||
+                   template.StartsWith("http://", StringComparison.OrdinalIgnoreCase);
+        int hostEnd = schemeEnd < 0 ? -1 : template.IndexOfAny(new[] { '/', '?', '#' }, schemeEnd + 3);
+        string host = schemeEnd < 0 ? string.Empty : (hostEnd < 0 ? template[(schemeEnd + 3)..] : template[(schemeEnd + 3)..hostEnd]);
+        if (!web || host.Length == 0 || host.Contains("{{", StringComparison.Ordinal))
+        {
+            throw new PhextParseException(
+                lineNumber,
+                $"The protocol address '{template}' must start with http:// or https:// and the server name, written out (placeholders can only be used after it). {usage}");
+        }
+
+        string sample = TemplatePlaceholderRegex.Replace(template, match =>
+            match.Groups["inner"].Value.Trim().ToLowerInvariant() switch
+            {
+                "url" => Uri.EscapeDataString("https://example.com/"),
+                "url.raw" => "https://example.com/",
+                _ => "x",
+            });
+        if (!Uri.TryCreate(sample, UriKind.Absolute, out Uri? sampleUri) ||
+            (sampleUri.Scheme != Uri.UriSchemeHttp && sampleUri.Scheme != Uri.UriSchemeHttps))
+        {
+            throw new PhextParseException(lineNumber, $"The protocol address '{template}' is not a valid web address. {usage}");
+        }
+    }
+
+    /// <summary>Checks a proxy server and returns it as scheme://host:port.</summary>
+    private static string ParseProxyServer(string value, int lineNumber)
+    {
+        string proxy = value.Trim();
+        string error =
+            $"'{value}' is not a valid proxy server. Use http://host:port, socks4://host:port or socks5://host:port " +
+            "(with the port, and without a user name or password).";
+        if (proxy.Any(character => char.IsWhiteSpace(character) || character is '"' or '\'' or ',' or ';' or '\\') ||
+            !Uri.TryCreate(proxy, UriKind.Absolute, out Uri? uri) ||
+            uri.Scheme is not ("http" or "socks4" or "socks5") ||
+            !string.IsNullOrEmpty(uri.UserInfo) ||
+            uri.Host.Length == 0 ||
+            uri.PathAndQuery is not ("/" or "") ||
+            uri.Fragment.Length > 0)
+        {
+            throw new PhextParseException(lineNumber, error);
+        }
+
+        // The port must be written out: programs disagree about the default port of a proxy.
+        string authority = proxy[(proxy.IndexOf("://", StringComparison.Ordinal) + 3)..].TrimEnd('/');
+        int portSeparator = authority.LastIndexOf(':');
+        if (portSeparator < 0 || authority.EndsWith(']') ||
+            !int.TryParse(authority[(portSeparator + 1)..], NumberStyles.None, CultureInfo.InvariantCulture, out int port) ||
+            port is < 1 or > 65535)
+        {
+            throw new PhextParseException(lineNumber, error);
+        }
+
+        return $"{uri.Scheme}://{uri.Host}:{port.ToString(CultureInfo.InvariantCulture)}";
+    }
 
     /// <summary>An id for an extension's own control. Built-in element names are reserved so ui.* targets stay unambiguous.</summary>
     private static string ValidateElementId(string value, int lineNumber, string label)
@@ -1457,7 +1695,7 @@ internal static class PhantomExtensionPatternMatcher
 
     /// <summary>
     /// Case-insensitive wildcard match ('*' = any run of characters) of a URL against an extension URL pattern.
-    /// Patterns written as scheme://host/path (the form used throughout PHEXT_GUIDE.md) are matched part by
+    /// Patterns written as scheme://host/path (the form used throughout the PhantomScript guide) are matched part by
     /// part, so a wildcard in the scheme or host can never reach into the rest of the URL: before this,
     /// "https://*.github.com/*" also matched "https://evil.example/?a.github.com/" and ran the extension's
     /// script there. A host written as "*.example.org" matches example.org itself and all of its subdomains.
