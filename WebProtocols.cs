@@ -94,6 +94,12 @@ internal abstract class WebProtocol
     /// <summary>Why the protocol cannot be used on this PC, or null when it can. Should be quick: Settings calls it.</summary>
     public virtual string? GetUnavailableReason() => null;
 
+    /// <summary>
+    /// False when pages are loaded through another server (a gateway address or a proxy server). PhantomHaze itself then
+    /// never contacts the sites shown (for example to download their icons), so it never goes around that server.
+    /// </summary>
+    public virtual bool LoadsPagesDirectly => true;
+
     public abstract WebProtocolPage CreatePage(IWebProtocolHost host);
 
     public override string ToString() => DisplayName;
@@ -526,6 +532,8 @@ internal sealed class ExtensionWebProtocol : WebProtocol
     }
 
     public override string Signature => $"{Id}|{_engine.Id}|{_resolvedTemplate}|{Definition.ProxyServer}";
+
+    public override bool LoadsPagesDirectly => _template is { IsDirect: true } && Definition.ProxyServer is null;
 
     public override string? GetUnavailableReason()
     {

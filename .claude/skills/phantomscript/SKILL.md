@@ -84,7 +84,7 @@ HTML
 ## Example: a page, a menu and a new look
 
 This extension adds its own page (shown like **Logs** and **Web View**), a search button and a **Tools** dropdown to
-the menu bar, and restyles the menu bar - including an SVG gear in a pill-shaped Settings button.
+the menu bar, and restyles the menu bar - including a new SVG gear for the Settings button.
 
 ```text
 meta.name "Focus Tools"
@@ -173,8 +173,9 @@ ui.element dashboard text "Dashboard"
 
 ### Menu bar
 
-Extensions can add buttons and dropdown menus to the top menu bar. They appear between **Web View** and the clock,
-in the order the file declares them; buttons that do not fit are listed under the `»` button.
+Extensions can add buttons and dropdown menus to the top menu bar. They appear between the **Web** button and the
+clock, in the order the file declares them; buttons that do not fit are listed under the `»` button. Like PhantomHaze's
+own buttons they are pills, with a coloured ring so they can always be told apart from PhantomHaze's own.
 
 - `menu.button <id> "<label>" <action> "<value>"`
   - A button that runs one [action](#actions) when it is clicked.
@@ -207,12 +208,59 @@ the file. `menu.button`, `menu.dropdown` and `app.page` ids cannot use the name 
 
 - `app.page <id> "<label>" <<TAG ... TAG`
   - Gives the extension its own page in the main window. A button with the label appears in the menu bar next to
-    **Logs** and **Web View**; clicking it shows the page in place of the log panel or the web pages, and the button
+    **Logs** and **Web**; clicking it shows the page in place of the log panel or the web pages, and the button
     is highlighted like the other views while the page is shown. A page keeps its state while another view is shown.
   - The block is HTML. A fragment is wrapped in a page that follows the app's theme, text colour and font; a complete
     document (containing `<html`) is used as written.
   - Like extension windows, a page only ever shows the extension's own content: web links the user clicks open in a
     new PhantomHaze tab, and `web.block` rules apply to everything the page loads.
+
+### Web View protocols
+
+A protocol is the way Web View loads pages (**Settings -> General -> Web View protocol**). Extensions can add their own,
+built on one of PhantomHaze's engines - for example to load every page through a server or a proxy.
+
+- `protocol.add <id> "<name>" <engine> "<address>"`
+  - Adds a protocol to Settings, listed as *Name (from Extension name)*. An extension can add up to 10.
+  - `<engine>` is what loads and draws the pages: `webview2`, `htmlrenderer` or `legacy` (the same engines as the
+    built-in protocols of the same names).
+  - `<address>` is where each page is loaded from. It contains `{{url}}` (the page address, percent-encoded) or
+    `{{url.raw}}` (the page address as it is) exactly once:
+    - `"{{url}}"` loads pages directly (useful together with `protocol.proxy`).
+    - `"https://gateway.example/fetch?url={{url}}"` loads every page through that server. The address must start with
+      `http://` or `https://` and the server name, written out: placeholders can only come after it, so neither a page
+      address nor a setting can ever change which server is contacted.
+  - `{{extension.*}}` and `{{setting.<key>}}` placeholders can be used after the server name (their values are
+    percent-encoded). Write placeholders without spaces inside the braces.
+- `protocol.proxy <id> "<proxy>"`
+  - Sends every request of a protocol declared above it with `protocol.add` through a proxy server:
+    `http://host:port`, `socks4://host:port` or `socks5://host:port`. The port is required; a user name or password is
+    not allowed. With `http` and `socks5` proxies, site names are looked up by the proxy, never by this PC.
+  - Not available with the `legacy` engine, whose network settings are shared with Windows.
+
+How extension protocols behave:
+
+- The address bar, history and favourites show the page's own address, not the gateway's. Addresses typed in the
+  address bar, opened from history or favourites, or opened in a new tab go through the address template; links clicked
+  inside a page are left to the page and its server.
+- With a gateway address or a proxy, PhantomHaze itself never contacts the sites shown (tabs show the default icon
+  instead of the site's).
+- A `webview2` protocol with a proxy has its own cookie store, which is never saved.
+- When the extension is turned off or uninstalled, Web View uses WebView2; the user's choice comes back with the
+  extension.
+
+```text
+meta.name "Gateway Browsing"
+meta.id "gateway.browsing"
+meta.version "1.0.0"
+
+setting.text accessKey "Access key" "demo"
+
+protocol.add gateway "Gateway" webview2 "https://gateway.example/fetch?key={{setting.accessKey}}&url={{url}}"
+
+protocol.add lightproxy "Light pages through my proxy" htmlrenderer "{{url}}"
+protocol.proxy lightproxy "socks5://127.0.0.1:1080"
+```
 
 ### Web View / website modifications
 
@@ -221,6 +269,16 @@ the file. `menu.button`, `menu.dropdown` and `app.page` ids cannot use the name 
 - `web.block <id> "<urlPattern>"`
   - Blocks matching requests: pages, their iframes, workers (including service and shared workers), favicons, the
     app font download and anything an extension window or page loads.
+
+Which rules apply depends on the [Web View protocol](#web-view-protocols) the user chose in Settings:
+
+| Protocol      | `web.script` | `web.css` | `web.block`                                                        |
+| :------------ | :----------: | :-------: | :----------------------------------------------------------------- |
+| WebView2      | ✓            | ✓         | Everything listed above.                                           |
+| HTMLRenderer  |              | ✓         | Pages, redirects, images and stylesheets (pages never run scripts). |
+| Legacy        |              |           | Pages and frames (not the images and scripts inside them).         |
+
+An extension protocol (`protocol.add`) works like the engine it uses.
 
 `urlPattern` uses `*` wildcards (any run of characters, case-insensitive), for example:
 - `"*"` (all pages)
@@ -310,13 +368,13 @@ log) rather than replaced by an unrelated fallback font.
 
 | Element            | What it is                      | text | tooltip | visible | background | foreground | border | font | ui.svg | ui.shape |
 | :----------------- | :------------------------------ | :--: | :-----: | :-----: | :--------: | :--------: | :----: | :--: | :----: | :------: |
-| `menu.bar`         | The top menu bar                |      |         |         | ✓          |            |        |      |        |          |
+| `menu.bar`         | The top bar (its rounded shape) |      |         |         | ✓          |            |        |      |        |          |
 | `menu.logo`        | The PhantomHaze logo            |      | ✓       | ✓       | ✓          |            |        |      | ✓      | ✓        |
 | `menu.title`       | The PhantomHaze name            | ✓    | ✓       | ✓       | ✓          | ✓          |        | ✓    | ✓      | ✓        |
 | `menu.logs`        | The Logs button                 | ✓    | ✓       | ✓       | ✓          | ✓          | ✓      | ✓    | ✓      | ✓        |
-| `menu.webview`     | The Web View button             | ✓    | ✓       | ✓       | ✓          | ✓          | ✓      | ✓    | ✓      | ✓        |
+| `menu.webview`     | The Web (Web View) button       | ✓    | ✓       | ✓       | ✓          | ✓          | ✓      | ✓    | ✓      | ✓        |
 | `menu.clock`       | The clock left of Settings      |      | ✓       | ✓       | ✓          | ✓          |        | ✓    |        | ✓        |
-| `menu.settings`    | The Settings button             | ✓    | ✓       |         | ✓          | ✓          | ✓      | ✓    | ✓      | ✓        |
+| `menu.settings`    | The Settings (gear) button      | ✓    | ✓       |         | ✓          | ✓          | ✓      | ✓    | ✓      | ✓        |
 | `address.bar`      | The address box                 |      | ✓       |         | ✓          | ✓          |        | ✓    |        |          |
 | `address.favorite` | The favourite (star) button     |      | ✓       | ✓       |            |            | ✓      | ✓    | ✓      | ✓        |
 | `address.back`     | The Back button                 | ✓    | ✓       | ✓       | ✓          | ✓          | ✓      | ✓    | ✓      | ✓        |
@@ -332,7 +390,7 @@ Using a property an element does not support is an error when the file is import
 
 Two parts of PhantomHaze can never be changed by an extension:
 
-- **The protection banner and the protection button.** They are not elements at all, so an extension can never make
+- **The protection banner and its ON/OFF switch.** They are not elements at all, so an extension can never make
   PhantomHaze look protected from screen capture when it is not.
 - **The Settings button cannot be hidden** (it can be restyled), because Settings is where extensions are disabled and
   uninstalled.
@@ -359,7 +417,8 @@ Most icon sets (for example Feather, Lucide, Heroicons, Material Symbols) work a
 ## Placeholders
 
 You can use placeholders in `app.button` messages, `app.log` messages, `web.script`, `web.css`, `ui.html`, `app.page`,
-the values of `menu.button` / `menu.option` actions, and `ui.element` `text` and `tooltip` values:
+the values of `menu.button` / `menu.option` actions, `ui.element` `text` and `tooltip` values, and `protocol.add`
+addresses:
 
 - `{{extension.id}}`
 - `{{extension.name}}`
@@ -372,7 +431,7 @@ Inserted values are encoded for the place they are used in:
   `node.textContent = "{{setting.bannerText}}";`. Quotes or other special characters in a setting can no longer break
   (or inject code into) your script. To use a setting as a number or boolean, read `phantomHazeExtension.settings`.
 - `ui.html` and `app.page`: values are HTML-encoded, so they are displayed as text rather than interpreted as markup.
-- `url` actions: values are percent-encoded, so a setting can be used in a query string
+- `url` actions and `protocol.add` addresses: values are percent-encoded, so a setting can be used in a query string
   (`https://duckduckgo.com/?q={{setting.query}}`) but can never change which site is opened.
 - `web.css`, `app.button`, `app.log`, `message` and `log` actions, and `ui.element` `text`/`tooltip`: values are
   inserted as-is.

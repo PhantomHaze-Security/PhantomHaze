@@ -121,25 +121,28 @@ internal static class NativeMethods
                new string(buffer, 0, length).Equals(StandardDialogClassName, StringComparison.Ordinal);
     }
 
+    private const int HCBT_CREATEWND = 3;
+
     /// <summary>
-    /// A CBT hook on the current (UI) thread that reports every window activated on it, before the window is first
-    /// drawn. The Legacy Web View protocol uses it: the Internet Explorer engine runs on the UI thread and can open
-    /// windows of its own (showModalDialog, sign-in prompts), which must be excluded from capture like the app's windows.
+    /// A CBT hook on the current (UI) thread that reports every window created or activated on it, before the window is
+    /// first drawn. The Legacy Web View protocol uses it: the Internet Explorer engine runs on the UI thread and can open
+    /// windows of its own (showModalDialog and sign-in prompts, which are activated, and tooltips and drop-down lists,
+    /// which never are), and they must be excluded from capture like the app's windows.
     /// </summary>
-    public sealed class ThreadActivationHook : IDisposable
+    public sealed class ThreadWindowHook : IDisposable
     {
         private readonly CbtHookProc _callback;
         private IntPtr _hook;
 
-        internal ThreadActivationHook(Action<IntPtr> onActivated)
+        internal ThreadWindowHook(Action<IntPtr> onWindow)
         {
             _callback = (nCode, wParam, lParam) =>
             {
-                if (nCode == HCBT_ACTIVATE)
+                if (nCode is HCBT_CREATEWND or HCBT_ACTIVATE)
                 {
                     try
                     {
-                        onActivated(wParam);
+                        onWindow(wParam);
                     }
                     catch
                     {
@@ -168,7 +171,7 @@ internal static class NativeMethods
         }
     }
 
-    public static ThreadActivationHook InstallThreadActivationHook(Action<IntPtr> onActivated) => new(onActivated);
+    public static ThreadWindowHook InstallThreadWindowHook(Action<IntPtr> onWindow) => new(onWindow);
 
     [DllImport("user32.dll")]
     [return: MarshalAs(UnmanagedType.Bool)]

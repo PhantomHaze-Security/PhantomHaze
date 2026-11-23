@@ -226,6 +226,15 @@ public partial class MainForm
         }
     }
 
+    /// <summary>True when <paramref name="tab"/> is the only open tab of the shared WebView2 session.</summary>
+    private bool IsLastSharedWebView2Tab(BrowserTab tab)
+    {
+        static bool IsSharedWebView2(BrowserTab candidate) =>
+            candidate.Page.InnermostPage is WebView2ProtocolPage { UsesIsolatedEnvironment: false, Core: not null };
+
+        return IsSharedWebView2(tab) && !_tabs.Any(other => !ReferenceEquals(other, tab) && IsSharedWebView2(other));
+    }
+
     private void DeleteSavedCookiesFile()
     {
         _savedCookieTimes = null;

@@ -259,8 +259,8 @@ internal sealed record PhantomUiTargetInfo(string Name, string Description, Phan
 
 /// <summary>
 /// The built-in controls extensions may customise with ui.element, ui.svg and ui.shape, and what each one allows.
-/// The protection banner and the protection button are deliberately not listed: an extension must never be able to
-/// make PhantomHaze look protected when it is not. The Settings button can be restyled but never hidden, so an
+/// The protection banner (with its ON/OFF switch) is deliberately not listed: an extension must never be able to make
+/// PhantomHaze look protected when it is not. The Settings button can be restyled but never hidden, so an
 /// extension can never lock the user out of the place where it is disabled or uninstalled.
 /// </summary>
 internal static class PhantomUiTargets
@@ -275,7 +275,7 @@ internal static class PhantomUiTargets
 
     public static IReadOnlyList<PhantomUiTargetInfo> BuiltIn { get; } =
     [
-        new("menu.bar", "The top menu bar", PhantomUiCapabilities.Background),
+        new("menu.bar", "The top bar (its rounded shape)", PhantomUiCapabilities.Background),
         new("menu.logo", "The PhantomHaze logo in the menu bar",
             PhantomUiCapabilities.Tooltip | PhantomUiCapabilities.Visible | PhantomUiCapabilities.Background |
             PhantomUiCapabilities.Svg | PhantomUiCapabilities.Shape),
@@ -284,11 +284,11 @@ internal static class PhantomUiTargets
             PhantomUiCapabilities.Background | PhantomUiCapabilities.Foreground | PhantomUiCapabilities.Font |
             PhantomUiCapabilities.Svg | PhantomUiCapabilities.Shape),
         new("menu.logs", "The Logs button", ButtonLike),
-        new("menu.webview", "The Web View button", ButtonLike),
+        new("menu.webview", "The Web button (Web View)", ButtonLike),
         new("menu.clock", "The clock to the left of Settings",
             PhantomUiCapabilities.Tooltip | PhantomUiCapabilities.Visible | PhantomUiCapabilities.Background |
             PhantomUiCapabilities.Foreground | PhantomUiCapabilities.Font | PhantomUiCapabilities.Shape),
-        new("menu.settings", "The Settings button (it can be restyled but never hidden)", ButtonLike & ~PhantomUiCapabilities.Visible),
+        new("menu.settings", "The Settings (gear) button (it can be restyled but never hidden)", ButtonLike & ~PhantomUiCapabilities.Visible),
         new("address.bar", "The address box",
             PhantomUiCapabilities.Tooltip | PhantomUiCapabilities.Background | PhantomUiCapabilities.Foreground |
             PhantomUiCapabilities.Font),

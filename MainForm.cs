@@ -304,6 +304,9 @@ public partial class MainForm : Form
         public int ZoomPercent { get; set; }
         public bool IsNavigationPending { get; set; }
 
+        /// <summary>The tab's close button was pressed and the tab is waiting for its cookies to be saved.</summary>
+        public bool IsClosing { get; set; }
+
         // Incremented on every NavigationStarting so async work started for one document can detect that the
         // tab has moved on before touching the new document.
         public int NavigationSequence { get; set; }
@@ -331,7 +334,7 @@ public partial class MainForm : Form
     private readonly CancellationTokenSource _updateCheckCancellation = new();
     // The protection status and switch. Deliberately not a ui.element target (see PhantomUiTargets).
     private readonly ProtectionBanner _protectionBanner = new();
-    // Tooltips of built-in controls (the Settings gear, the protection banner); extension tooltips use their own.
+    // The protection banner's tooltip (extension tooltips, and the Settings gear's, use _extensionUiToolTip).
     private readonly ToolTip _headerToolTip = new();
     private readonly PillButton _webViewToggleButton = new();
     private readonly PillButton _settingsButton = new();
@@ -601,6 +604,9 @@ public partial class MainForm : Form
     private const int CompactBannerWidth = 212;
 
     private int AddressPanelHeight => ScaleByDpi(AddressRowHeight + TabsRowHeight);
+
+    /// <summary>The width of the ring around the pills extensions add to the top bar.</summary>
+    private int ExtensionPillRingWidth => Math.Max(1, ScaleByDpi(2));
 
     private void ApplyDpiAwareMetrics()
     {
@@ -1738,18 +1744,27 @@ public partial class MainForm : Form
         Color buttonTextColor = ResolveTextColor(_palette.ButtonText);
         Color buttonBackColor = ResolveSurfaceBack(_palette.ButtonBack, buttonTextColor);
         Color buttonBorderColor = _palette.ButtonBorder;
+        Color pillTextColor = ResolveTextColor(_palette.PillText);
+        Color pillBackColor = ResolveSurfaceBack(_palette.PillBack, pillTextColor);
 
         foreach (Button button in _extensionMenuButtonsPanel.Controls.OfType<Button>())
         {
-            // Page buttons are view switchers and are coloured with Logs and Web View (UpdateWebViewToggleVisual).
-            if (button.Tag is not ExtensionMenuEntry { Kind: ExtensionMenuEntryKind.Page })
+            if (button.Tag is not ExtensionMenuEntry entry)
             {
-                button.BackColor = buttonBackColor;
-                button.ForeColor = buttonTextColor;
+                // The overflow (») button is PhantomHaze's own pill (ApplyTheme).
+                continue;
             }
 
-            button.FlatAppearance.BorderColor = buttonBorderColor;
-            button.FlatAppearance.BorderSize = 1;
+            // Page buttons are view switchers and are coloured with Logs and Web (UpdateWebViewToggleVisual).
+            if (entry.Kind != ExtensionMenuEntryKind.Page)
+            {
+                button.BackColor = pillBackColor;
+                button.ForeColor = pillTextColor;
+            }
+
+            // Pills that extensions add have a coloured ring, so they are never mistaken for PhantomHaze's own buttons.
+            button.FlatAppearance.BorderColor = _palette.ExtensionOutline;
+            button.FlatAppearance.BorderSize = ExtensionPillRingWidth;
         }
 
         foreach (Button button in _extensionLauncherPanel.Controls.OfType<Button>())
@@ -2455,8 +2470,8 @@ public partial class MainForm : Form
         _settingsButton.Margin = new Padding(0);
         _settingsButton.UseMnemonic = false;
         _settingsButton.AccessibleName = "Settings";
+        // Its "Settings" tooltip is set with the extension customisations (BuildUiTargetBindings), so it never shows twice.
         _settingsButton.Click += (_, _) => OpenSettingsWindow();
-        _headerToolTip.SetToolTip(_settingsButton, "Settings");
 
         // A live clock (with seconds) from the computer's clock, to the left of Settings.
         _menuClockLabel.AutoSize = true;
@@ -3663,7 +3678,8 @@ public partial class MainForm : Form
             Dock = DockStyle.Fill,
             AutoEllipsis = true,
             Text = "New Tab",
-            TextAlign = ContentAlignment.MiddleLeft,
+            // Centred between the icon and the X, as in the v1.3.6 design (long titles fill the space and end in "...").
+            TextAlign = ContentAlignment.MiddleCenter,
             Font = _tabTitleFont,
             UseMnemonic = false,
             Padding = new Padding(6, 0, 0, 0),
@@ -3775,8 +3791,28 @@ public partial class MainForm : Form
 
     private async Task CloseTabAsync(BrowserTab tab)
     {
+        if (!_tabs.Contains(tab) || tab.IsClosing)
+        {
+            return;
+        }
+
+        // The session's cookies live in the WebView2 browser process, which ends with the last WebView2 tab, so they are
+        // saved first (with Settings -> Save cookies across sessions on).
+        if (_settings.PersistCookiesAcrossSessions && IsLastSharedWebView2Tab(tab))
+        {
+            tab.IsClosing = true;
+            try
+            {
+                await SaveCookiesNowAsync().WaitAsync(TimeSpan.FromSeconds(3));
+            }
+            catch (TimeoutException)
+            {
+                Log("The cookies could not be saved in time; the last save is kept.");
+            }
+        }
+
         int closingIndex = _tabs.IndexOf(tab);
-        if (closingIndex < 0)
+        if (closingIndex < 0 || IsDisposed)
         {
             return;
         }
@@ -4577,6 +4613,14 @@ public partial class MainForm : Form
     {
         if (!_tabs.Contains(tab) || !tab.Page.IsReady)
         {
+            return;
+        }
+
+        // Icons are downloaded by PhantomHaze itself, which would contact the site directly and go around the gateway or
+        // proxy server an extension protocol loads pages through. Those tabs keep the default icon.
+        if (!tab.Protocol.LoadsPagesDirectly)
+        {
+            SetTabFavicon(tab, DefaultTabIcon, ownsImage: false);
             return;
         }
 

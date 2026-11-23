@@ -388,6 +388,7 @@ internal sealed class ProtectionBanner : Control
     }
 
     /// <summary>True: a wide card across the window (Logs and extension pages). False: the compact card in Web View.</summary>
+    [DefaultValue(false)]
     public bool Extended
     {
         get => _extended;
@@ -402,6 +403,7 @@ internal sealed class ProtectionBanner : Control
     }
 
     /// <summary>Darker greens and reds with white text, for dark themes.</summary>
+    [DefaultValue(false)]
     public bool DarkStyle
     {
         get => _darkStyle;
@@ -803,10 +805,12 @@ internal sealed class ProtectionBanner : Control
         Invalidate();
     }
 
+    // The banner fills its cell of the top bar, so this only sets its smallest useful size. (Returning the proposed width
+    // would be unsafe: layouts ask with int.MaxValue when the width is unconstrained.)
     public override Size GetPreferredSize(Size proposedSize)
     {
         return _extended
-            ? new Size(Math.Max(Scale(320), proposedSize.Width), Scale(84))
+            ? new Size(Scale(320), Scale(84))
             : new Size(Scale(204), Scale(132));
     }
 }

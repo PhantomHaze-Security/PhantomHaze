@@ -62,7 +62,7 @@ public partial class MainForm
     // The Legacy protocol: every window the Internet Explorer engine opens on the UI thread is excluded from capture.
     private readonly HashSet<object> _uiThreadWindowGuardOwners = new(ReferenceEqualityComparer.Instance);
     private readonly HashSet<IntPtr> _guardedUiThreadWindows = new();
-    private NativeMethods.ThreadActivationHook? _uiThreadWindowGuard;
+    private NativeMethods.ThreadWindowHook? _uiThreadWindowGuard;
 
     private ProtocolHost ProtocolHostInstance => _protocolHost ??= new ProtocolHost(this);
 
@@ -630,7 +630,7 @@ public partial class MainForm
         {
             if (_uiThreadWindowGuardOwners.Add(owner) && _uiThreadWindowGuard is null && !IsDisposed)
             {
-                _uiThreadWindowGuard = NativeMethods.InstallThreadActivationHook(OnUiThreadWindowActivated);
+                _uiThreadWindowGuard = NativeMethods.InstallThreadWindowHook(OnUiThreadWindowOpening);
                 if (!_uiThreadWindowGuard.IsInstalled)
                 {
                     Log("ALERT: windows the Legacy protocol's Internet Explorer engine opens could not be protected from capture.");
@@ -649,10 +649,11 @@ public partial class MainForm
     }
 
     /// <summary>
-    /// Called (inside the activation hook, before the window is first drawn) for every window activated on the UI thread
+    /// Called (inside the hook, before the window is first drawn) for every window created or activated on the UI thread
     /// while a Legacy page exists. The app's own windows are protected already; anything else gets the same protection.
+    /// A window is handled again when it is activated, in case Windows did not accept the setting while it was created.
     /// </summary>
-    private void OnUiThreadWindowActivated(IntPtr window)
+    private void OnUiThreadWindowOpening(IntPtr window)
     {
         if (IsDisposed || !IsHandleCreated || window == Handle || !NativeMethods.IsTopLevelWindow(window))
         {
@@ -667,6 +668,12 @@ public partial class MainForm
         if (_openSystemDialogWindows.Contains(window))
         {
             return;
+        }
+
+        if (_guardedUiThreadWindows.Count > 256)
+        {
+            // Closed windows are forgotten now and then (tooltips and menus come and go all the time).
+            _guardedUiThreadWindows.RemoveWhere(existing => !NativeMethods.IsExistingWindow(existing));
         }
 
         _guardedUiThreadWindows.Add(window);

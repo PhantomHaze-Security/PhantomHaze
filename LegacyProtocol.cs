@@ -21,7 +21,8 @@ internal sealed class LegacyWebProtocol : WebProtocol
     public override string Description =>
         "The Internet Explorer engine built into Windows (the legacy WebBrowser control), without WebView2. It runs " +
         "JavaScript, but many modern sites no longer support Internet Explorer. Pages can be kept in the Windows internet " +
-        "cache like any Internet Explorer page; cookies only last until PhantomHaze closes.";
+        "cache like any Internet Explorer page; cookies only last until PhantomHaze closes. Extensions' web.block rules " +
+        "apply to pages and frames (not to the images and scripts inside them); web.script and web.css do not run.";
 
     public override WebProtocolFeatures Features =>
         WebProtocolFeatures.Zoom | WebProtocolFeatures.FindInPage | WebProtocolFeatures.JavaScript;
@@ -627,6 +628,8 @@ internal sealed class PhantomLegacyBrowser : WebBrowser
     private AxHost.ConnectionPointCookie? _eventCookie;
 
     /// <summary>Returns why an address may not be opened, or null when it may.</summary>
+    [System.ComponentModel.Browsable(false)]
+    [System.ComponentModel.DesignerSerializationVisibility(System.ComponentModel.DesignerSerializationVisibility.Hidden)]
     public Func<string, string?>? NavigationFilter { get; set; }
 
     /// <summary>True while PhantomHaze receives the engine's own events (top-level navigation, new windows, downloads).</summary>

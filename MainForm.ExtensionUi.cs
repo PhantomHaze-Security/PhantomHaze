@@ -64,6 +64,9 @@ public partial class MainForm
 
         public Func<Font>? DefaultFont { get; init; }
         public Func<Image?>? DefaultImage { get; init; }
+
+        /// <summary>The normal tooltip of a control that shows only a symbol (the Settings gear).</summary>
+        public Func<string>? DefaultTooltip { get; init; }
     }
 
     /// <summary>The combined customisations of one control (later extensions win, property by property).</summary>
@@ -170,7 +173,7 @@ public partial class MainForm
             }
 
             ConfigureMenuButton(_extensionMenuOverflowButton, "»");
-            _extensionMenuOverflowButton.MinimumSize = new Size(ScaleByDpi(40), 0);
+            _extensionMenuOverflowButton.MinimumSize = new Size(ScaleByDpi(44), ScaleByDpi(HeaderButtonHeight));
             _extensionMenuOverflowButton.Visible = false;
             _extensionMenuButtonsPanel.Controls.Add(_extensionMenuOverflowButton);
         }
@@ -185,9 +188,9 @@ public partial class MainForm
 
     private void AddExtensionMenuButton(ExtensionMenuEntry entry)
     {
-        var button = new Button();
+        var button = new PillButton();
         ConfigureMenuButton(button, GetDefaultExtensionButtonText(entry));
-        button.MinimumSize = new Size(ScaleByDpi(64), 0);
+        button.MinimumSize = new Size(ScaleByDpi(64), ScaleByDpi(HeaderButtonHeight));
         // Labels come from extensions: show '&' literally instead of turning it into a mnemonic.
         button.UseMnemonic = false;
         button.AccessibleName = string.IsNullOrWhiteSpace(entry.Label) ? entry.ElementId : entry.Label;
@@ -661,7 +664,7 @@ public partial class MainForm
 
     private void BuildUiTargetBindings()
     {
-        void Bind(string name, Control control, Func<string>? text = null, Func<Font>? font = null, Func<Image?>? image = null)
+        void Bind(string name, Control control, Func<string>? text = null, Func<Font>? font = null, Func<Image?>? image = null, Func<string>? tooltip = null)
         {
             PhantomUiCapabilities capabilities = PhantomUiTargets.TryGetBuiltIn(name, out PhantomUiTargetInfo info)
                 ? info.Capabilities
@@ -671,6 +674,7 @@ public partial class MainForm
                 DefaultText = text,
                 DefaultFont = font,
                 DefaultImage = image,
+                DefaultTooltip = tooltip,
             };
 
             if (font is not null)
@@ -686,10 +690,14 @@ public partial class MainForm
         Bind("menu.logo", _menuLogoPictureBox, image: () => _defaultLogoImage);
         Bind("menu.title", _menuLogoLabel, text: () => "PhantomHaze", font: () => MapFont(_menuTitleFont));
         Bind("menu.logs", _logsViewButton, text: () => "Logs", font: () => MapFont(IsLogsViewSelected ? _menuButtonFontBold : _menuButtonFontRegular));
-        Bind("menu.webview", _webViewToggleButton, text: () => "Web View", font: () => MapFont(_webViewModeEnabled ? _menuButtonFontBold : _menuButtonFontRegular));
+        Bind("menu.webview", _webViewToggleButton, text: () => "Web", font: () => MapFont(_webViewModeEnabled ? _menuButtonFontBold : _menuButtonFontRegular));
         Bind("menu.clock", _menuClockLabel, font: () => MapFont(_menuButtonFontRegular));
-        // These two inherit the window's font; MapFont(Font) is that same font unless an app font is in use.
-        Bind("menu.settings", _settingsButton, text: () => "Settings", font: () => MapFont(Font));
+        // The gear keeps its symbol font (an app font may not have the symbol); text an extension sets uses the
+        // window's font. The text is applied before the font, so the check sees the text being shown.
+        Bind("menu.settings", _settingsButton, text: () => SettingsGlyph,
+             font: () => _settingsButton.Text == SettingsGlyph ? _settingsGlyphFont : MapFont(Font),
+             tooltip: () => "Settings");
+        // This one inherits the window's font; MapFont(Font) is that same font unless an app font is in use.
         Bind("address.bar", _addressBarTextBox, font: () => MapFont(Font));
         Bind("address.favorite", _favoriteButton, font: () => MapFont(_favoriteButtonFont));
         Bind("address.back", _backButton, text: () => "Back", font: () => MapFont(_stripButtonFont));
@@ -882,7 +890,7 @@ public partial class MainForm
         }
 
         // A control that shows only an icon is still labelled when hovered.
-        string? tooltip = customization?.Tooltip;
+        string? tooltip = customization?.Tooltip ?? binding.DefaultTooltip?.Invoke();
         if (tooltip is null && customization?.Svg is not null && customization.Text is null)
         {
             tooltip = binding.DefaultText?.Invoke() ?? control.AccessibleName;

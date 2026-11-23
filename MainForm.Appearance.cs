@@ -460,6 +460,11 @@ public partial class MainForm
             // Colour changes repaint solid themes by themselves; a gradient is painted across several surfaces.
             InvalidateThemeSurfaces();
         }
+        else
+        {
+            // The top bar shows the window colour around its rounded shape, which its own colour change does not cover.
+            _menuBarPanel.Invalidate(false);
+        }
     }
 
     /// <summary>Applies the text colour everywhere. Runs every half second in Rainbow mode, so it never logs.</summary>
@@ -478,22 +483,34 @@ public partial class MainForm
             label.ForeColor = text;
         }
 
-        foreach (Control input in new Control[] { _addressBarTextBox, _historyListBox, _favoritesListBox, _findTextBox })
+        foreach (Control input in new Control[] { _historyListBox, _favoritesListBox, _findTextBox })
         {
             input.BackColor = inputBack;
             input.ForeColor = inputText;
         }
 
+        // The address box is one of the top bar's pills (the pill around it follows the text box's colour).
+        Color pillText = ResolveTextColor(palette.PillText);
+        Color pillBack = ResolveSurfaceBack(palette.PillBack, pillText);
+        _addressBarTextBox.BackColor = pillBack;
+        _addressBarTextBox.ForeColor = pillText;
+
         _logBox.BackColor = ResolveSurfaceBack(palette.LogBack, logText);
         _logBox.ForeColor = logText;
 
-        foreach (Button button in CommandButtons)
+        foreach (Button button in HeaderPillButtons)
+        {
+            button.BackColor = pillBack;
+            button.ForeColor = pillText;
+        }
+
+        foreach (Button button in ContentCommandButtons)
         {
             button.BackColor = buttonBack;
             button.ForeColor = buttonText;
         }
 
-        _historyButton.BackColor = _historyPanel.Visible ? GetHistoryButtonActiveBackColor() : buttonBack;
+        _historyButton.BackColor = _historyPanel.Visible ? GetHistoryButtonActiveBackColor() : pillBack;
 
         UpdateTabHeaderVisuals();
         UpdateFavoriteButtonState();
@@ -503,8 +520,10 @@ public partial class MainForm
 
     private void ApplyGradientTransparency(bool gradient)
     {
+        // The top bar's containers show the bar's shaded gradient (PaintHeaderBackground) through them.
         Control?[] containers =
         [
+            _headerLayout, _headerLeftLayout, _addressBarPanel,
             _menuLayout, _menuLogoLayout, _extensionMenuButtonsPanel, _menuLogoLabel, _menuLogoPictureBox, _menuClockLabel,
             _addressRootLayout, _addressStripLayout, _addressInputLayout, _tabsLayout, _tabsFlowPanel, _zoomLabel,
             _historyLayout, _historyTitleLabel, _favoritesTitleLabel, _webViewLoadingLabel,
@@ -559,7 +578,13 @@ public partial class MainForm
     /// </summary>
     private bool PaintThemeGradient(Control surface, PaintEventArgs e)
     {
-        if (_palette.Gradient is not ThemeGradient gradient || _surfacesWithBackgroundOverride.Contains(surface))
+        return !_surfacesWithBackgroundOverride.Contains(surface) && PaintWindowGradient(surface, e.Graphics);
+    }
+
+    /// <summary>Fills <paramref name="surface"/> with its part of the window-wide gradient; false for themes without one.</summary>
+    private bool PaintWindowGradient(Control surface, Graphics graphics)
+    {
+        if (_palette.Gradient is not ThemeGradient gradient)
         {
             return false;
         }
@@ -572,9 +597,63 @@ public partial class MainForm
 
         Point origin = ReferenceEquals(surface, this) ? Point.Empty : surface.PointToClient(PointToScreen(Point.Empty));
         using var brush = new LinearGradientBrush(new Rectangle(origin, windowSize), gradient.Start, gradient.End, gradient.Mode);
-        e.Graphics.FillRectangle(brush, surface.ClientRectangle);
+        graphics.FillRectangle(brush, surface.ClientRectangle);
         return true;
     }
+
+    /// <summary>
+    /// Paints the top bar: the window background (colour or gradient) with the bar's rounded shape on it, filled with
+    /// the menu bar colour (or an extension's menu.bar background). In gradient themes the shape shows the gradient,
+    /// shaded the way the menu bar colour is derived from a solid theme colour.
+    /// </summary>
+    private bool PaintHeaderBackground(Control surface, PaintEventArgs e)
+    {
+        Graphics graphics = e.Graphics;
+        Rectangle bounds = surface.ClientRectangle;
+        if (bounds.Width <= 0 || bounds.Height <= 0)
+        {
+            return true;
+        }
+
+        if (!PaintWindowGradient(surface, graphics))
+        {
+            using var windowBrush = new SolidBrush(BackColor);
+            graphics.FillRectangle(windowBrush, bounds);
+        }
+
+        int margin = ScaleByDpi(HeaderOuterMargin);
+        var shape = new RectangleF(margin, margin, bounds.Width - (margin * 2f), bounds.Height - (margin * 2f));
+        if (shape.Width <= 2 || shape.Height <= 2)
+        {
+            return true;
+        }
+
+        Color fill = surface.BackColor;
+        if (_palette.Gradient is ThemeGradient gradient && !_surfacesWithBackgroundOverride.Contains(surface))
+        {
+            fill = IsDarkColor(Blend(gradient.Start, gradient.End, 0.5))
+                ? Color.FromArgb(HeaderGradientShadeAlpha, Color.White)
+                : Color.FromArgb(HeaderGradientShadeAlpha, Color.Black);
+        }
+
+        SmoothingMode previousSmoothing = graphics.SmoothingMode;
+        graphics.SmoothingMode = SmoothingMode.AntiAlias;
+        try
+        {
+            using GraphicsPath path = PhantomShapeGeometry.CreateRoundedRectangle(shape, ScaleByDpi(HeaderCornerRadius));
+            using var brush = new SolidBrush(fill);
+            graphics.FillPath(brush, path);
+        }
+        finally
+        {
+            graphics.SmoothingMode = previousSmoothing;
+        }
+
+        return true;
+    }
+
+    // How strongly the top bar shades a gradient (0-255): about the same step as the menu bar colour of a solid theme.
+    private const int HeaderGradientShadeAlpha = 44;
 
     private void InvalidateThemeSurfaces()
     {
@@ -1388,6 +1467,7 @@ public partial class MainForm
                  {
                      _tabCloseFontRegular, _tabCloseFontCompact, _menuButtonFontRegular, _menuButtonFontBold, _menuTitleFont,
                      _tabTitleFont, _stripButtonFont, _favoriteButtonFont, _zoomLabelFont, _newTabButtonFont, _logFont,
+                     _settingsGlyphFont,
                  })
         {
             font.Dispose();
