@@ -1,0 +1,66 @@
+diff --git a/MainForm.cs b/MainForm.cs
+--- a/MainForm.cs
++++ b/MainForm.cs
+@@ -1767,10 +1767,9 @@ public partial class MainForm : Form
+         if (state.FallbackBox is { IsDisposed: false } fallbackBox)
+         {
+             fallbackBox.BackColor = _palette.FallbackBack;
+             fallbackBox.ForeColor = _palette.FallbackText;
+             string fallbackText = $"Extension UI fallback for '{extension.Definition.Name}'\n\n" +
+-                                  "The extension UI could not be displayed with WebView2.\n\n" +
+-                                  ResolveExtensionPlaceholders(extension.Definition.Ui.Html, extension);
++                                  "The extension UI could not be displayed with WebView2.";
+             if (!string.Equals(fallbackText, state.RenderedContent, StringComparison.Ordinal))
+             {
+                 fallbackBox.Text = fallbackText;
+                 state.RenderedContent = fallbackText;
+@@ -1939,7 +1938,7 @@ public partial class MainForm : Form
+     private string BuildExtensionHtmlDocument(LoadedExtension extension, string html, string title)
+     {
+         // Placeholder values are user-entered text, not markup, so they are HTML-encoded here.
+         string resolvedHtml = ResolveExtensionPlaceholders(html, extension, PhantomExtensionPlaceholderContext.Html);
+-        if (html.Contains("<html", StringComparison.OrdinalIgnoreCase))
++        if (IsCompleteHtmlDocument(html))
+         {
+             return resolvedHtml;
+         }
+@@ -1990,6 +1989,25 @@ public partial class MainForm : Form
+ </html>
+ """;
+     }
++
++    private static bool IsCompleteHtmlDocument(string html)
++    {
++        if (string.IsNullOrWhiteSpace(html))
++        {
++            return false;
++        }
++
++        int htmlIndex = html.IndexOf("<html", StringComparison.OrdinalIgnoreCase);
++        if (htmlIndex < 0)
++        {
++            return false;
++        }
++
++        string prefix = html[..htmlIndex].Trim();
++        return prefix.Length == 0 ||
++               prefix.StartsWith("<!doctype", StringComparison.OrdinalIgnoreCase) ||
++               prefix.StartsWith("<?xml", StringComparison.OrdinalIgnoreCase);
++    }
+ 
+     private void LoadHistory()
+diff --git a/MainForm.ExtensionUi.cs b/MainForm.ExtensionUi.cs
+--- a/MainForm.ExtensionUi.cs
++++ b/MainForm.ExtensionUi.cs
+@@ -542,8 +542,7 @@ public partial class MainForm
+         {
+             fallbackBox.BackColor = _palette.FallbackBack;
+             fallbackBox.ForeColor = _palette.FallbackText;
+             string text = $"{state.Page.Label} ({state.Extension.Definition.Name})\n\n" +
+-                          "This page could not be displayed with WebView2.\n\n" +
+-                          ResolveExtensionPlaceholders(state.Page.Html, state.Extension);
++                          "This page could not be displayed with WebView2.";
+             if (!string.Equals(text, state.RenderedContent, StringComparison.Ordinal))
+             {
+                 fallbackBox.Text = text;
+                 state.RenderedContent = text;
