@@ -58,5 +58,3 @@ You may not transfer or sublicense this Agreement without written permission. If
 This Agreement is governed by the laws of the NSW Government of Australia, subject to mandatory rights that apply to you.
 
 Contact: support@tyco.it.com
-
-> Template only • Replace bracketed fields and obtain legal advice before release.
