@@ -231,7 +231,7 @@ public partial class MainForm
     private Button[] HeaderPillButtons =>
     [
         _backButton, _forwardButton, _goButton, _refreshButton, _historyButton, _newTabButton, _settingsButton,
-        _extensionMenuOverflowButton,
+        _extensionMenuOverflowButton, _topBarRevealButton,
     ];
 
     /// <summary>Buttons outside the top bar, which keep the theme's standard button colours.</summary>
@@ -1424,6 +1424,45 @@ public partial class MainForm
             RefreshPreview();
         };
 
+        // Top bar style (MainForm.TopBar.cs).
+        var topBarComboBox = new ComboBox { DropDownStyle = ComboBoxStyle.DropDownList, Width = ScaleByDpi(220), AccessibleName = "Top bar" };
+        OptionItem<TopBarStyle>[] topBarOptions =
+        [
+            new(TopBarStyle.Comfortable, "Comfortable (default)"),
+            new(TopBarStyle.Comfy, "Comfy"),
+            new(TopBarStyle.Compact, "Compact"),
+            new(TopBarStyle.Simple, "Simple"),
+        ];
+        topBarComboBox.Items.AddRange(topBarOptions);
+        topBarComboBox.SelectedItem = topBarOptions.FirstOrDefault(option => option.Value == draft.TopBarStyle) ?? topBarOptions[0];
+        AddRow("Top bar", topBarComboBox);
+        var topBarDescriptionLabel = new Label
+        {
+            AutoSize = true,
+            MaximumSize = new Size(ScaleByDpi(420), 0),
+            UseMnemonic = false,
+        };
+        AddRow(null, topBarDescriptionLabel);
+
+        void UpdateTopBarDescription()
+        {
+            TopBarStyle selected = topBarComboBox.SelectedItem is OptionItem<TopBarStyle> option ? option.Value : TopBarStyle.Comfortable;
+            topBarDescriptionLabel.Text = selected switch
+            {
+                TopBarStyle.Comfy => "Every control stays, closer together and a little smaller, to save space.",
+                TopBarStyle.Compact =>
+                    "Only Logs, Web and extension buttons. The ▾ button at the right shows the protection and Web View controls and " +
+                    "Settings; its dot is green while protection is on and red while it is off.",
+                TopBarStyle.Simple =>
+                    "An ON/OFF protection switch next to Settings, and in Web View only Back, Forward, the address box and small " +
+                    "tabs, in one row. Ctrl+T (or a double-click next to the tabs) opens a tab, F5 reloads, Ctrl+H shows the history.",
+                _ => "The full top bar, with every control.",
+            };
+        }
+
+        topBarComboBox.SelectedIndexChanged += (_, _) => UpdateTopBarDescription();
+        UpdateTopBarDescription();
+
         UpdateRowVisibility();
         initializing = false;
         page.Controls.Add(layout);
@@ -1454,6 +1493,10 @@ public partial class MainForm
                 settings.CustomFontUrl = fontText.Length > 0 && GoogleFontLoader.TryNormalizeFontUrl(fontText, out string cssUrl, out _)
                     ? cssUrl
                     : string.Empty;
+                if (topBarComboBox.SelectedItem is OptionItem<TopBarStyle> topBarOption)
+                {
+                    settings.TopBarStyle = topBarOption.Value;
+                }
             },
         };
     }

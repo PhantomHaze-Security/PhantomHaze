@@ -514,25 +514,13 @@ public partial class MainForm : Form
     private static readonly object TabCloseButtonTag = new();
 
     private const string DefaultHomeUrl = "https://www.google.com";
-    // The address row's buttons are icons (their names are their tooltips).
-    private const int DefaultBackButtonWidth = 46;
-    private const int DefaultForwardButtonWidth = 46;
+    // The address row's buttons are icons (their names are their tooltips). Their widths depend on the top bar's
+    // style (MainForm.TopBar.cs).
     private const string BackGlyph = "←";
     private const string ForwardGlyph = "→";
     private const string GoGlyph = "⏎";
     private const string RefreshGlyph = "⟳";
     private const string HistoryGlyph = "🕘";
-    private const int DefaultGoButtonWidth = 46;
-    private const int DefaultRefreshButtonWidth = 46;
-    private const int DefaultHistoryButtonWidth = 46;
-    private const int DefaultZoomLabelWidth = 96;
-    private const int DefaultZoomSliderWidth = 185;
-    private const int CompactBackButtonWidth = 40;
-    private const int CompactForwardButtonWidth = 40;
-    private const int CompactGoButtonWidth = 40;
-    private const int CompactRefreshButtonWidth = 40;
-    private const int CompactHistoryButtonWidth = 40;
-    private const int CompactZoomSliderWidth = 135;
     private const int MinimumAddressInputWidth = 180;
     private static readonly Image DefaultTabIcon = SystemIcons.Application.ToBitmap();
     private static readonly int[] ValidHistoryRetentionDays = new[] { 1, 7, 14, 30, 80, -1 };
@@ -659,15 +647,8 @@ public partial class MainForm : Form
             ScaleByDpi(bottom));
     }
 
-    // The rounded top bar (logical pixels): the margin around it, its corner radius and the padding inside it.
-    private const int HeaderOuterMargin = 8;
-    private const int HeaderCornerRadius = 26;
-    private const int HeaderInnerPadding = 12;
-    private const int HeaderButtonHeight = 36;
-    private const int AddressRowHeight = 46;
-    private const int TabsRowHeight = 42;
-    private const int CompactBannerWidth = 212;
-
+    // The rounded top bar's sizes (the margin around it, its corner radius, the padding inside it, its rows) depend on
+    // its style: see TopBarMetrics in MainForm.TopBar.cs.
     private int AddressPanelHeight => ScaleByDpi(AddressRowHeight + TabsRowHeight);
 
     /// <summary>The width of the ring around the pills extensions add to the top bar.</summary>
@@ -692,17 +673,19 @@ public partial class MainForm : Form
         _updateBannerUpdateButton.Margin = ScalePadding(8, 0, 6, 0);
         _updateBannerSnoozeButton.Size = new Size(ScaleByDpi(30), ScaleByDpi(26));
         ApplyResourceSaverBannerMetrics();
-        _logsViewButton.MinimumSize = new Size(ScaleByDpi(84), ScaleByDpi(HeaderButtonHeight));
-        _webViewToggleButton.MinimumSize = new Size(ScaleByDpi(84), ScaleByDpi(HeaderButtonHeight));
+        TopBarMetrics metrics = CurrentTopBarMetrics;
+        _logsViewButton.MinimumSize = new Size(ScaleByDpi(metrics.MenuButtonMinWidth), ScaleByDpi(HeaderButtonHeight));
+        _webViewToggleButton.MinimumSize = new Size(ScaleByDpi(metrics.MenuButtonMinWidth), ScaleByDpi(HeaderButtonHeight));
         // The gear is a circle; a longer text set by an extension makes it a pill.
         _settingsButton.MinimumSize = new Size(ScaleByDpi(HeaderButtonHeight), ScaleByDpi(HeaderButtonHeight));
-        Padding menuButtonPadding = ScalePadding(16, 4, 16, 4);
+        Padding menuButtonPadding = ScalePadding(metrics.MenuButtonPaddingX, metrics.MenuButtonPaddingY, metrics.MenuButtonPaddingX, metrics.MenuButtonPaddingY);
         _logsViewButton.Padding = menuButtonPadding;
         _webViewToggleButton.Padding = menuButtonPadding;
         _settingsButton.Padding = ScalePadding(2, 0, 2, 0);
-        _logsViewButton.Margin = ScalePadding(0, 0, 8, 0);
-        _webViewToggleButton.Margin = ScalePadding(0, 0, 8, 0);
+        _logsViewButton.Margin = ScalePadding(0, 0, metrics.MenuButtonGap, 0);
+        _webViewToggleButton.Margin = ScalePadding(0, 0, metrics.MenuButtonGap, 0);
         _settingsButton.Margin = new Padding(0);
+        ApplyTopBarStyleControlMetrics();
         _menuClockLabel.Margin = ScalePadding(6, 0, 10, 0);
         UpdateClockMinimumWidth();
 
@@ -716,7 +699,8 @@ public partial class MainForm : Form
             _addressInputLayout.Padding = ScalePadding(16, 0, 4, 0);
             if (_addressInputLayout.ColumnStyles.Count > 1)
             {
-                _addressInputLayout.ColumnStyles[1].Width = ScaleByDpi(34);
+                // The favourite star's column (Simple leaves the star out).
+                _addressInputLayout.ColumnStyles[1].Width = _topBarStyleHiddenControls.Contains(_favoriteButton) ? 0 : ScaleByDpi(34);
             }
         }
 
@@ -730,14 +714,12 @@ public partial class MainForm : Form
             _addressStripLayout.RowStyles[0].Height = ScaleByDpi(AddressRowHeight);
         }
 
-        if (_tabsLayout is not null)
+        if (_tabsLayout is not null && _tabsLayout.ColumnStyles.Count > 1)
         {
-            _tabsLayout.Margin = new Padding(0);
-            if (_tabsLayout.ColumnStyles.Count > 1)
-            {
-                _tabsLayout.ColumnStyles[1].Width = ScaleByDpi(44);
-            }
+            _tabsLayout.ColumnStyles[1].Width = NewTabColumnWidth;
         }
+
+        _zoomSlider.Margin = ScalePadding(3, CurrentTopBarStyle == TopBarStyle.Comfortable ? 8 : 4, 3, 2);
 
         _protectionBanner.MinimumSize = new Size(0, 0);
         ApplyProtectionStripMetrics();
@@ -2455,7 +2437,8 @@ public partial class MainForm : Form
         BuildUiTargetBindings();
         // Taken before any custom font is applied, so the default fonts can always be restored.
         RegisterOriginalFonts(this);
-        ApplyDpiAwareMetrics();
+        // Applies the sizes too (ApplyDpiAwareMetrics).
+        ApplyTopBarStyle();
         ApplyTheme();
         UpdateWebViewToggleVisual();
         UpdateResponsiveLayout();
@@ -2473,11 +2456,12 @@ public partial class MainForm : Form
         // Extension buttons live in the stretching column (where the spacer used to be), so however many buttons
         // extensions add, the built-in controls - Settings in particular - always keep their space. Buttons that
         // do not fit are moved into an overflow (») menu by UpdateExtensionMenuOverflow.
-        // Columns: logo | Logs | Web | extension pages and buttons (stretches) | clock | Settings gear.
+        // Columns: logo | Logs | Web | extension pages and buttons (stretches) | clock | protection switch (Simple) |
+        // Settings gear | drop-down button (Compact). See MainForm.TopBar.cs for the styles.
         var menuLayout = new TableLayoutPanel
         {
             Dock = DockStyle.Fill,
-            ColumnCount = 6,
+            ColumnCount = 8,
             RowCount = 1,
             Margin = new Padding(0),
             Padding = new Padding(0),
@@ -2490,6 +2474,8 @@ public partial class MainForm : Form
         menuLayout.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
         menuLayout.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
         menuLayout.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100f));
+        menuLayout.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
+        menuLayout.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
         menuLayout.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
         menuLayout.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
 
@@ -2581,8 +2567,12 @@ public partial class MainForm : Form
         menuLayout.Controls.Add(_logsViewButton, 1, 0);
         menuLayout.Controls.Add(_webViewToggleButton, 2, 0);
         menuLayout.Controls.Add(_extensionMenuButtonsPanel, 3, 0);
+        ConfigureTopBarStyleControls();
+
         menuLayout.Controls.Add(_menuClockLabel, 4, 0);
-        menuLayout.Controls.Add(_settingsButton, 5, 0);
+        menuLayout.Controls.Add(_protectionSwitch, 5, 0);
+        menuLayout.Controls.Add(_settingsButton, 6, 0);
+        menuLayout.Controls.Add(_topBarRevealButton, 7, 0);
     }
 
     /// <summary>The gear symbol shown on the Settings button.</summary>
@@ -2637,18 +2627,27 @@ public partial class MainForm : Form
             return;
         }
 
+        // Compact shows these parts only after its drop-down button is used; Simple has the protection switch instead of the
+        // banner and the strip (MainForm.TopBar.cs).
         bool webView = _webViewModeEnabled;
+        TopBarStyle style = CurrentTopBarStyle;
+        bool collapsed = IsTopBarCollapsed;
+        bool showAddress = webView && !collapsed;
+        bool showBanner = webView && !collapsed && style != TopBarStyle.Simple;
+        bool showStrip = !webView && !collapsed && style != TopBarStyle.Simple;
+        int bannerGap = style == TopBarStyle.Comfortable ? 12 : 8;
         SuspendLayout();
         _menuBarPanel.SuspendLayout();
         _headerLayout.SuspendLayout();
         try
         {
-            _addressBarPanel.Visible = webView;
-            _headerLeftLayout.RowStyles[1].Height = webView ? AddressPanelHeight : 0;
-            _protectionBanner.Visible = webView;
-            _protectionBanner.Margin = ScalePadding(12, 0, 0, 0);
-            _headerLayout.ColumnStyles[1].Width = webView ? ScaleByDpi(CompactBannerWidth) + ScaleByDpi(12) : 0;
-            _protectionStripPanel.Visible = !webView;
+            _addressBarPanel.Visible = showAddress;
+            _headerLeftLayout.RowStyles[1].Height = showAddress ? AddressPanelHeight : 0;
+            _protectionBanner.Visible = showBanner;
+            _protectionBanner.Margin = ScalePadding(bannerGap, 0, 0, 0);
+            _headerLayout.ColumnStyles[1].Width = showBanner ? ScaleByDpi(CompactBannerWidth) + ScaleByDpi(bannerGap) : 0;
+            _protectionStripPanel.Visible = showStrip;
+            UpdateTopBarRevealButton();
         }
         finally
         {
@@ -2682,10 +2681,8 @@ public partial class MainForm : Form
         UpdateProtectionStatusVisual();
     }
 
-    // The protection strip of the Logs view (logical pixels): the status banner, the gap and the button.
-    private const int ProtectionStatusHeight = 34;
-    private const int ProtectionStripGap = 4;
-    private const int ProtectionButtonHeight = 36;
+    // The protection strip of the Logs view: the status banner, the gap and the button (their heights depend on the top
+    // bar's style, see TopBarMetrics).
     private const int ProtectionStatusCornerRadius = 12;
 
     private void ApplyProtectionStripMetrics()
@@ -2745,9 +2742,10 @@ public partial class MainForm : Form
         button.AutoSizeMode = AutoSizeMode.GrowAndShrink;
         button.Dock = DockStyle.None;
         button.Anchor = AnchorStyles.Left;
-        button.MinimumSize = new Size(ScaleByDpi(84), ScaleByDpi(HeaderButtonHeight));
-        button.Padding = ScalePadding(16, 4, 16, 4);
-        button.Margin = ScalePadding(0, 0, 8, 0);
+        TopBarMetrics metrics = CurrentTopBarMetrics;
+        button.MinimumSize = new Size(ScaleByDpi(metrics.MenuButtonMinWidth), ScaleByDpi(HeaderButtonHeight));
+        button.Padding = ScalePadding(metrics.MenuButtonPaddingX, metrics.MenuButtonPaddingY, metrics.MenuButtonPaddingX, metrics.MenuButtonPaddingY);
+        button.Margin = ScalePadding(0, 0, metrics.MenuButtonGap, 0);
         button.FlatStyle = FlatStyle.Flat;
         button.FlatAppearance.BorderSize = 0;
     }
@@ -3098,15 +3096,19 @@ public partial class MainForm : Form
             UpdateAddressStripLayout();
         };
 
+        // Rows: the address strip, then the tabs. The second column is only used by the Simple top bar, which puts the
+        // tabs beside the address strip (ArrangeAddressRows).
         _addressRootLayout = new TableLayoutPanel
         {
             Dock = DockStyle.Fill,
-            ColumnCount = 1,
+            ColumnCount = 2,
             RowCount = 2,
             Margin = new Padding(0),
             Padding = new Padding(0),
         };
         TableLayoutPanel rootLayout = _addressRootLayout;
+        rootLayout.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100f));
+        rootLayout.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 0));
         rootLayout.RowStyles.Add(new RowStyle(SizeType.Absolute, ScaleByDpi(AddressRowHeight)));
         rootLayout.RowStyles.Add(new RowStyle(SizeType.Percent, 100f));
 
@@ -3121,12 +3123,12 @@ public partial class MainForm : Form
         };
         TableLayoutPanel stripLayout = _addressStripLayout;
         stripLayout.RowStyles.Add(new RowStyle(SizeType.Absolute, ScaleByDpi(AddressRowHeight)));
+        // (UpdateAddressStripLayout sets the widths, and the order for the Simple top bar.)
         stripLayout.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100f));
-        stripLayout.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, DefaultBackButtonWidth));
-        stripLayout.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, DefaultForwardButtonWidth));
-        stripLayout.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, DefaultGoButtonWidth));
-        stripLayout.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, DefaultRefreshButtonWidth));
-        stripLayout.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, DefaultHistoryButtonWidth));
+        for (int stripColumn = 1; stripColumn < 6; stripColumn++)
+        {
+            stripLayout.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, ScaleByDpi(CurrentTopBarMetrics.StripButtonWidth)));
+        }
 
         // The address box is a pill; the text box inside it has no border of its own and follows the pill's colour.
         _addressPill.Dock = DockStyle.Fill;
@@ -3251,8 +3253,8 @@ public partial class MainForm : Form
         TableLayoutPanel tabsLayout = _tabsLayout;
         tabsLayout.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100f));
         tabsLayout.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, ScaleByDpi(44)));
-        tabsLayout.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, DefaultZoomLabelWidth));
-        tabsLayout.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, DefaultZoomSliderWidth));
+        tabsLayout.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, ScaleByDpi(CurrentTopBarMetrics.ZoomLabelWidth)));
+        tabsLayout.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, ScaleByDpi(CurrentTopBarMetrics.ZoomSliderWidth)));
         tabsLayout.RowStyles.Add(new RowStyle(SizeType.Percent, 100f));
 
         _tabsFlowPanel.Dock = DockStyle.Fill;
@@ -3262,6 +3264,15 @@ public partial class MainForm : Form
         _tabsFlowPanel.Margin = new Padding(0);
         _tabsFlowPanel.Padding = new Padding(0);
         _tabsFlowPanel.SizeChanged += (_, _) => UpdateTabLayout();
+
+        // A double-click next to the tabs opens a new one (the only way with the mouse in the Simple top bar).
+        _tabsFlowPanel.MouseDoubleClick += async (_, e) =>
+        {
+            if (e.Button == MouseButtons.Left)
+            {
+                await CreateTabAsync(GetConfiguredStartPage(), activate: true);
+            }
+        };
 
         _newTabButton.Text = "+";
         _newTabButton.Anchor = AnchorStyles.None;
@@ -3283,6 +3294,8 @@ public partial class MainForm : Form
 
         rootLayout.Controls.Add(stripLayout, 0, 0);
         rootLayout.Controls.Add(tabsLayout, 0, 1);
+        rootLayout.SetColumnSpan(stripLayout, 2);
+        rootLayout.SetColumnSpan(tabsLayout, 2);
 
         _addressBarPanel.Controls.Add(rootLayout);
         UpdateAddressStripLayout();
@@ -4082,11 +4095,14 @@ public partial class MainForm : Form
         int totalGap = (_tabs.Count - 1) * scaledTabGap;
         int available = Math.Max(1, _tabsFlowPanel.ClientSize.Width - totalGap);
         int rawWidth = Math.Max(1, available / _tabs.Count);
-        bool compact = rawWidth < ScaleByDpi(130);
+        TopBarMetrics metrics = CurrentTopBarMetrics;
+        bool compact = rawWidth < ScaleByDpi(metrics.TabMinWidth);
         int targetWidth = compact
             ? Math.Max(minimumCompactTabWidth, rawWidth)
-            : Math.Clamp(rawWidth, ScaleByDpi(130), ScaleByDpi(230));
-        int tabHeight = ScaleByDpi(compact ? 30 : 34);
+            : Math.Clamp(rawWidth, ScaleByDpi(metrics.TabMinWidth), ScaleByDpi(metrics.TabMaxWidth));
+        int tabHeight = ScaleByDpi(compact ? metrics.NarrowTabHeight : metrics.TabHeight);
+        int tabPadding = metrics.TabHeight >= 34 ? 5 : metrics.TabHeight >= 28 ? 4 : 3;
+        int iconSize = metrics.TabHeight >= 28 ? 16 : 14;
         int topMargin = Math.Max(0, (_tabsFlowPanel.ClientSize.Height - tabHeight) / 2);
 
         for (int i = 0; i < _tabs.Count; i++)
@@ -4101,7 +4117,7 @@ public partial class MainForm : Form
                 int closeWidth = Math.Clamp(targetWidth / 2, compactCloseWidthMinimum, compactCloseWidthMinimum + 4);
                 int iconWidth = Math.Clamp(targetWidth - closeWidth - ScaleByDpi(14), ScaleByDpi(8), ScaleByDpi(14));
 
-                tab.HeaderPanel.Padding = ScalePadding(7, 4, 3, 4);
+                tab.HeaderPanel.Padding = ScalePadding(7, Math.Min(4, tabPadding), 3, Math.Min(4, tabPadding));
                 tab.TitleLabel.Visible = false;
                 tab.CloseButton.Width = closeWidth;
                 tab.CloseButton.Font = MapFont(_tabCloseFontCompact);
@@ -4110,12 +4126,12 @@ public partial class MainForm : Form
             }
             else
             {
-                tab.HeaderPanel.Padding = ScalePadding(10, 5, 5, 5);
+                tab.HeaderPanel.Padding = ScalePadding(10, tabPadding, 5, tabPadding);
                 tab.TitleLabel.Visible = true;
                 tab.CloseButton.Width = regularCloseWidth;
                 tab.CloseButton.Font = MapFont(_tabCloseFontRegular);
-                tab.FaviconBox.Width = ScaleByDpi(16);
-                tab.FaviconBox.Height = ScaleByDpi(16);
+                tab.FaviconBox.Width = ScaleByDpi(iconSize);
+                tab.FaviconBox.Height = ScaleByDpi(iconSize);
             }
         }
     }
@@ -5667,6 +5683,12 @@ public partial class MainForm : Form
             }
         }
 
+        // Ctrl+L, Ctrl+T, Ctrl+W, F5, Ctrl+H...: they also reach what a top bar style leaves out (MainForm.TopBar.cs).
+        if (HandleTopBarShortcut(keyData))
+        {
+            return true;
+        }
+
         return base.ProcessCmdKey(ref msg, keyData);
     }
 
@@ -5857,6 +5879,14 @@ public partial class MainForm : Form
         bool dark = IsDarkTheme();
         _protectionBanner.DarkStyle = dark;
         _protectionBanner.SetStatus(_protectionEnabled, title, subtitle, countdown);
+        _protectionSwitch.DarkStyle = dark;
+        _protectionSwitch.SetStatus(_protectionEnabled, countdown is null ? $"{title}. {subtitle}" : $"{title}. {subtitle} {countdown}");
+        if (!string.Equals(_headerToolTip.GetToolTip(_protectionSwitch), statusText, StringComparison.Ordinal))
+        {
+            _headerToolTip.SetToolTip(_protectionSwitch, statusText);
+        }
+
+        UpdateTopBarRevealButton();
         _protectionStatusBar.DarkStyle = dark;
         _protectionStatusBar.SetStatus(_protectionEnabled, statusText);
         string buttonText = _protectionEnabled ? "Disable Protection ▼" : "Enable Protection";
@@ -5920,6 +5950,9 @@ public partial class MainForm : Form
         PositionExtensionLauncherPanel();
     }
 
+    /// <summary>The width of the new tab (+) column of the tab row (0 when the style leaves the button out).</summary>
+    private int NewTabColumnWidth => _topBarStyleHiddenControls.Contains(_newTabButton) ? 0 : ScaleByDpi(CurrentTopBarMetrics.StripButtonWidth - 2);
+
     private void UpdateAddressStripLayout()
     {
         if (_addressStripLayout is null || _addressStripLayout.ColumnStyles.Count < 6 ||
@@ -5928,26 +5961,51 @@ public partial class MainForm : Form
             return;
         }
 
+        TopBarMetrics metrics = CurrentTopBarMetrics;
+        bool simple = CurrentTopBarStyle == TopBarStyle.Simple;
         int availableWidth = Math.Max(1, _addressBarPanel.ClientSize.Width - _addressBarPanel.Padding.Horizontal);
-        int compactThreshold = ScaleByDpi(MinimumAddressInputWidth) +
-                               ScaleByDpi(DefaultBackButtonWidth) +
-                               ScaleByDpi(DefaultForwardButtonWidth) +
-                               ScaleByDpi(DefaultGoButtonWidth) +
-                               ScaleByDpi(DefaultRefreshButtonWidth) +
-                               ScaleByDpi(DefaultHistoryButtonWidth) +
-                               ScaleByDpi(160);
-
+        int compactThreshold = ScaleByDpi(MinimumAddressInputWidth) + (5 * ScaleByDpi(metrics.StripButtonWidth)) + ScaleByDpi(160);
         bool compact = availableWidth < compactThreshold;
+        int buttonWidth = ScaleByDpi(compact ? metrics.NarrowStripButtonWidth : metrics.StripButtonWidth);
 
-        _addressStripLayout.ColumnStyles[1].Width = ScaleByDpi(compact ? CompactBackButtonWidth : DefaultBackButtonWidth);
-        _addressStripLayout.ColumnStyles[2].Width = ScaleByDpi(compact ? CompactForwardButtonWidth : DefaultForwardButtonWidth);
-        _addressStripLayout.ColumnStyles[3].Width = ScaleByDpi(compact ? CompactGoButtonWidth : DefaultGoButtonWidth);
-        _addressStripLayout.ColumnStyles[4].Width = ScaleByDpi(compact ? CompactRefreshButtonWidth : DefaultRefreshButtonWidth);
-        _addressStripLayout.ColumnStyles[5].Width = ScaleByDpi(compact ? CompactHistoryButtonWidth : DefaultHistoryButtonWidth);
+        // Which column holds what: the Simple top bar puts Back and Forward before the address box and leaves out Go,
+        // Refresh and History (their columns get no width).
+        Control[] order = simple
+            ? [_backButton, _forwardButton, _addressPill, _goButton, _refreshButton, _historyButton]
+            : [_addressPill, _backButton, _forwardButton, _goButton, _refreshButton, _historyButton];
+        _addressStripLayout.SuspendLayout();
+        try
+        {
+            for (int column = 0; column < order.Length; column++)
+            {
+                Control control = order[column];
+                if (_addressStripLayout.GetColumn(control) != column)
+                {
+                    _addressStripLayout.SetColumn(control, column);
+                }
 
-        // The zoom controls share the tab row with the tabs.
-        _tabsLayout.ColumnStyles[2].Width = ScaleByDpi(DefaultZoomLabelWidth);
-        _tabsLayout.ColumnStyles[3].Width = ScaleByDpi(compact ? CompactZoomSliderWidth : DefaultZoomSliderWidth);
+                ColumnStyle style = _addressStripLayout.ColumnStyles[column];
+                if (ReferenceEquals(control, _addressPill))
+                {
+                    style.SizeType = SizeType.Percent;
+                    style.Width = 100f;
+                }
+                else
+                {
+                    style.SizeType = SizeType.Absolute;
+                    style.Width = _topBarStyleHiddenControls.Contains(control) ? 0 : buttonWidth;
+                }
+            }
+        }
+        finally
+        {
+            _addressStripLayout.ResumeLayout(true);
+        }
+
+        // The tab row: tabs | new tab | zoom label | zoom slider (the Simple top bar: only the tabs).
+        _tabsLayout.ColumnStyles[1].Width = NewTabColumnWidth;
+        _tabsLayout.ColumnStyles[2].Width = simple ? 0 : ScaleByDpi(metrics.ZoomLabelWidth);
+        _tabsLayout.ColumnStyles[3].Width = simple ? 0 : ScaleByDpi(compact ? metrics.NarrowZoomSliderWidth : metrics.ZoomSliderWidth);
 
         _zoomLabel.TextAlign = compact ? ContentAlignment.MiddleLeft : ContentAlignment.MiddleCenter;
         _zoomLabel.Margin = compact
@@ -7413,6 +7471,7 @@ public partial class MainForm : Form
             .ToHashSet(StringComparer.OrdinalIgnoreCase);
         var updated = new HashSet<string>(newOrUpdatedExtensionIds, StringComparer.OrdinalIgnoreCase);
         string previousFontUrl = _settings.CustomFontUrl;
+        TopBarStyle previousTopBarStyle = _settings.TopBarStyle;
         bool cookiesWereSaved = _settings.PersistCookiesAcrossSessions;
         int previousCookieRetention = _settings.CookieRetentionDays;
 
@@ -7449,6 +7508,12 @@ public partial class MainForm : Form
         _addressBarTextBox.PlaceholderText = NormalizeStartPage(GetEffectiveStartPage());
         RefreshHistoryPanelItems();
         UpdateTabVisibilityAndRendering();
+        if (previousTopBarStyle != _settings.TopBarStyle)
+        {
+            ApplyTopBarStyle();
+            Log($"Top bar style: {_settings.TopBarStyle}.");
+        }
+
         ApplyTheme();
         UpdateRainbowTimer();
         if (!string.Equals(previousFontUrl, _settings.CustomFontUrl, StringComparison.Ordinal) ||

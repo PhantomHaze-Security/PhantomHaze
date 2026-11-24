@@ -737,9 +737,13 @@ internal sealed class ProtectionBanner : Control
         Invalidate();
     }
 
+    /// <summary>The height the banner asks for, in logical pixels (smaller in the top bar's tighter styles).</summary>
+    [DefaultValue(132)]
+    public int PreferredHeightLogical { get; set; } = 132;
+
     // The banner fills its cell of the top bar, so this only sets its smallest useful size. (Returning the proposed width
     // would be unsafe: layouts ask with int.MaxValue when the width is unconstrained.)
-    public override Size GetPreferredSize(Size proposedSize) => new(Scale(204), Scale(132));
+    public override Size GetPreferredSize(Size proposedSize) => new(Scale(Math.Min(204, PreferredHeightLogical * 2)), Scale(PreferredHeightLogical));
 }
 
 /// <summary>
@@ -861,5 +865,315 @@ internal sealed class ProtectionStatusBar : Control
             text,
             TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter | TextFormatFlags.SingleLine |
             TextFormatFlags.EndEllipsis | TextFormatFlags.NoPrefix);
+    }
+}
+
+/// <summary>
+/// The protection switch of the Simple top bar: a small ON/OFF switch, green or red, next to the Settings button. While
+/// protection is on, clicking it opens the menu of how long to turn protection off for (its arrow says so); while it is
+/// off, clicking turns protection back on. Like <see cref="ProtectionBanner"/> it is drawn here and is deliberately not
+/// something extensions can customise.
+/// </summary>
+internal sealed class ProtectionSwitch : Control
+{
+    private static readonly Color LightOn = Color.FromArgb(0, 191, 99);
+    private static readonly Color LightOff = Color.FromArgb(204, 0, 0);
+    private static readonly Color DarkOn = Color.FromArgb(22, 134, 77);
+    private static readonly Color DarkOff = Color.FromArgb(158, 30, 30);
+    private static readonly Color KnobColor = Color.FromArgb(245, 245, 245);
+
+    private Font? _labelFont;
+    private Font? _labelFontFor;
+    private bool _protectionOn = true;
+    private bool _darkStyle;
+    private bool _hovered;
+    private bool _pressed;
+
+    public ProtectionSwitch()
+    {
+        SetStyle(
+            ControlStyles.UserPaint | ControlStyles.AllPaintingInWmPaint | ControlStyles.OptimizedDoubleBuffer |
+            ControlStyles.ResizeRedraw | ControlStyles.Selectable | ControlStyles.SupportsTransparentBackColor,
+            true);
+        TabStop = true;
+        Cursor = Cursors.Hand;
+        AccessibleRole = AccessibleRole.ButtonDropDown;
+        AccessibleName = "Protection: on";
+    }
+
+    /// <summary>Raised when the switch is clicked or Space/Enter is pressed on it.</summary>
+    public event EventHandler? ToggleRequested;
+
+    /// <summary>Darker greens and reds, for dark themes.</summary>
+    [DefaultValue(false)]
+    public bool DarkStyle
+    {
+        get => _darkStyle;
+        set
+        {
+            if (_darkStyle != value)
+            {
+                _darkStyle = value;
+                Invalidate();
+            }
+        }
+    }
+
+    public void SetStatus(bool protectionOn, string accessibleName)
+    {
+        if (_protectionOn == protectionOn && string.Equals(AccessibleName, accessibleName, StringComparison.Ordinal))
+        {
+            return;
+        }
+
+        _protectionOn = protectionOn;
+        AccessibleName = accessibleName;
+        AccessibleRole = protectionOn ? AccessibleRole.ButtonDropDown : AccessibleRole.PushButton;
+        AccessibleDescription = protectionOn
+            ? "Protection switch: on. Press to choose how long to turn protection off."
+            : "Protection switch: off. Press to turn protection back on.";
+        Invalidate();
+    }
+
+    private int Scale(int logicalPixels)
+    {
+        int dpi = DeviceDpi > 0 ? DeviceDpi : 96;
+        return Math.Max(1, (int)Math.Round(logicalPixels * (dpi / 96.0)));
+    }
+
+    private Font LabelFont
+    {
+        get
+        {
+            if (_labelFont is null || !ReferenceEquals(_labelFontFor, Font))
+            {
+                _labelFont?.Dispose();
+                FontFamily family = Font.FontFamily;
+                _labelFont = new Font(family, 8.5f, family.IsStyleAvailable(FontStyle.Bold) ? FontStyle.Bold : FontStyle.Regular, GraphicsUnit.Point);
+                _labelFontFor = Font;
+            }
+
+            return _labelFont;
+        }
+    }
+
+    public override Size GetPreferredSize(Size proposedSize) => new(Scale(74), Scale(28));
+
+    protected override void OnPaintBackground(PaintEventArgs e)
+    {
+        RoundedControlPainting.PaintParentBackground(this, e, InvokePaintBackground, InvokePaint);
+    }
+
+    protected override void OnPaint(PaintEventArgs e)
+    {
+        Rectangle client = ClientRectangle;
+        if (client.Width <= 8 || client.Height <= 8)
+        {
+            return;
+        }
+
+        Graphics graphics = e.Graphics;
+        Color track = _protectionOn ? (_darkStyle ? DarkOn : LightOn) : (_darkStyle ? DarkOff : LightOff);
+        if (Enabled && _hovered)
+        {
+            track = RoundedControlPainting.Highlight(track, _pressed);
+        }
+
+        SmoothingMode previous = graphics.SmoothingMode;
+        graphics.SmoothingMode = SmoothingMode.AntiAlias;
+        Rectangle knob;
+        try
+        {
+            using (GraphicsPath trackPath = RoundedControlPainting.CreatePillPath(client, 0))
+            using (var trackBrush = new SolidBrush(track))
+            {
+                graphics.FillPath(trackBrush, trackPath);
+            }
+
+            int inset = Math.Max(2, Scale(3));
+            int knobSize = Math.Max(4, client.Height - (inset * 2));
+            knob = new Rectangle(_protectionOn ? client.Right - inset - knobSize : client.X + inset, client.Y + inset, knobSize, knobSize);
+            using (var knobBrush = new SolidBrush(KnobColor))
+            {
+                graphics.FillEllipse(knobBrush, knob);
+            }
+
+            if (Focused && ShowFocusCues)
+            {
+                using GraphicsPath focusPath = RoundedControlPainting.CreatePillPath(RectangleF.Inflate(client, -1.5f, -1.5f), 0);
+                using var focusPen = new Pen(Color.White) { DashStyle = DashStyle.Dot };
+                graphics.DrawPath(focusPen, focusPath);
+            }
+        }
+        finally
+        {
+            graphics.SmoothingMode = previous;
+        }
+
+        // "ON" with a small arrow (it opens the menu of how long to turn protection off for) left of the knob, or "OFF"
+        // right of it.
+        string label = _protectionOn ? "ON" : "OFF";
+        const TextFormatFlags flags = TextFormatFlags.SingleLine | TextFormatFlags.NoPrefix | TextFormatFlags.NoPadding | TextFormatFlags.VerticalCenter | TextFormatFlags.Left;
+        Size labelSize = TextRenderer.MeasureText(graphics, label, LabelFont, new Size(int.MaxValue, client.Height), flags);
+        int arrowWidth = _protectionOn ? Math.Max(5, (int)Math.Round(labelSize.Height * 0.5)) : 0;
+        int arrowGap = _protectionOn ? Math.Max(2, Scale(3)) : 0;
+        int contentWidth = labelSize.Width + arrowGap + arrowWidth;
+        Rectangle area = _protectionOn
+            ? new Rectangle(client.X + Scale(6), client.Y, Math.Max(1, knob.Left - client.X - Scale(8)), client.Height)
+            : new Rectangle(knob.Right + Scale(2), client.Y, Math.Max(1, client.Right - knob.Right - Scale(8)), client.Height);
+        int left = area.X + Math.Max(0, (area.Width - contentWidth) / 2);
+        TextRenderer.DrawText(graphics, label, LabelFont, new Rectangle(left, area.Y, Math.Max(1, area.Right - left), area.Height), Color.White, flags);
+        if (_protectionOn)
+        {
+            float arrowLeft = left + labelSize.Width + arrowGap;
+            float arrowHeight = arrowWidth * 0.6f;
+            float arrowTop = client.Y + ((client.Height - arrowHeight) / 2f);
+            using var arrowBrush = new SolidBrush(Color.White);
+            graphics.SmoothingMode = SmoothingMode.AntiAlias;
+            graphics.FillPolygon(arrowBrush, new[]
+            {
+                new PointF(arrowLeft, arrowTop),
+                new PointF(arrowLeft + arrowWidth, arrowTop),
+                new PointF(arrowLeft + (arrowWidth / 2f), arrowTop + arrowHeight),
+            });
+            graphics.SmoothingMode = previous;
+        }
+    }
+
+    protected override void OnMouseEnter(EventArgs e)
+    {
+        _hovered = true;
+        Invalidate();
+        base.OnMouseEnter(e);
+    }
+
+    protected override void OnMouseLeave(EventArgs e)
+    {
+        _hovered = false;
+        _pressed = false;
+        Invalidate();
+        base.OnMouseLeave(e);
+    }
+
+    protected override void OnMouseDown(MouseEventArgs e)
+    {
+        if (e.Button == MouseButtons.Left)
+        {
+            _pressed = true;
+            Invalidate();
+        }
+
+        base.OnMouseDown(e);
+    }
+
+    protected override void OnMouseUp(MouseEventArgs e)
+    {
+        bool wasPressed = _pressed;
+        _pressed = false;
+        Invalidate();
+        base.OnMouseUp(e);
+        if (wasPressed && e.Button == MouseButtons.Left && ClientRectangle.Contains(e.Location))
+        {
+            ToggleRequested?.Invoke(this, EventArgs.Empty);
+        }
+    }
+
+    protected override bool IsInputKey(Keys keyData)
+    {
+        return keyData is Keys.Space or Keys.Enter || base.IsInputKey(keyData);
+    }
+
+    protected override void OnKeyDown(KeyEventArgs e)
+    {
+        base.OnKeyDown(e);
+        if (!e.Handled && e.Modifiers == Keys.None && e.KeyCode is Keys.Space or Keys.Enter)
+        {
+            e.Handled = true;
+            ToggleRequested?.Invoke(this, EventArgs.Empty);
+        }
+    }
+
+    protected override void OnGotFocus(EventArgs e)
+    {
+        base.OnGotFocus(e);
+        Invalidate();
+    }
+
+    protected override void OnLostFocus(EventArgs e)
+    {
+        base.OnLostFocus(e);
+        Invalidate();
+    }
+
+    protected override void OnFontChanged(EventArgs e)
+    {
+        base.OnFontChanged(e);
+        Invalidate();
+    }
+
+    protected override void Dispose(bool disposing)
+    {
+        if (disposing)
+        {
+            _labelFont?.Dispose();
+            _labelFont = null;
+        }
+
+        base.Dispose(disposing);
+    }
+}
+
+/// <summary>
+/// The drop-down button of the Compact top bar: an arrow that shows or hides the rest of the top bar, with a dot that
+/// always shows whether protection is on (green) or off (red), even while the protection controls are hidden.
+/// </summary>
+internal sealed class TopBarRevealButton : PillButton
+{
+    private Color _dotColor = Color.FromArgb(0, 191, 99);
+
+    public TopBarRevealButton()
+    {
+        // Drawn after the pill and its arrow (PillButton paints in the first Paint handler).
+        Paint += OnDotPaint;
+    }
+
+    [DesignerSerializationVisibility(DesignerSerializationVisibility.Hidden)]
+    public Color DotColor
+    {
+        get => _dotColor;
+        set
+        {
+            if (_dotColor != value)
+            {
+                _dotColor = value;
+                Invalidate();
+            }
+        }
+    }
+
+    private int Scale(int logicalPixels)
+    {
+        int dpi = DeviceDpi > 0 ? DeviceDpi : 96;
+        return Math.Max(1, (int)Math.Round(logicalPixels * (dpi / 96.0)));
+    }
+
+    private void OnDotPaint(object? sender, PaintEventArgs e)
+    {
+        int size = Scale(9);
+        int left = Math.Max(Scale(6), (Padding.Left - size) / 2);
+        var dot = new Rectangle(left, (ClientSize.Height - size) / 2, size, size);
+        SmoothingMode previous = e.Graphics.SmoothingMode;
+        e.Graphics.SmoothingMode = SmoothingMode.AntiAlias;
+        try
+        {
+            using var brush = new SolidBrush(_dotColor);
+            e.Graphics.FillEllipse(brush, dot);
+            using var ring = new Pen(Color.FromArgb(90, Color.Black), 1);
+            e.Graphics.DrawEllipse(ring, dot);
+        }
+        finally
+        {
+            e.Graphics.SmoothingMode = previous;
+        }
     }
 }

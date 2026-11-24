@@ -190,7 +190,7 @@ public partial class MainForm
     {
         var button = new PillButton();
         ConfigureMenuButton(button, GetDefaultExtensionButtonText(entry));
-        button.MinimumSize = new Size(ScaleByDpi(64), ScaleByDpi(HeaderButtonHeight));
+        button.MinimumSize = new Size(ScaleByDpi(Math.Min(64, CurrentTopBarMetrics.MenuButtonMinWidth)), ScaleByDpi(HeaderButtonHeight));
         // Labels come from extensions: show '&' literally instead of turning it into a mnemonic.
         button.UseMnemonic = false;
         button.AccessibleName = string.IsNullOrWhiteSpace(entry.Label) ? entry.ElementId : entry.Label;
@@ -887,17 +887,15 @@ public partial class MainForm
         }
 
         // Only elements that may be hidden are touched, and only when an extension hides or stops hiding them:
-        // Control.Visible reports false for every control in a hidden panel (the address bar in the Logs view).
+        // Control.Visible reports false for every control in a hidden panel (the address bar in the Logs view). The top
+        // bar's style can leave the control out as well, so both decide (ApplyCombinedVisibility).
         if ((binding.Capabilities & PhantomUiCapabilities.Visible) != 0)
         {
             bool visible = customization?.Visible ?? true;
-            if (!visible && _extensionHiddenControls.Add(control))
+            bool changed = visible ? _extensionHiddenControls.Remove(control) : _extensionHiddenControls.Add(control);
+            if (changed)
             {
-                control.Visible = false;
-            }
-            else if (visible && _extensionHiddenControls.Remove(control))
-            {
-                control.Visible = true;
+                ApplyCombinedVisibility(control);
             }
         }
 
