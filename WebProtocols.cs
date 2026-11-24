@@ -37,10 +37,13 @@ internal sealed class WebProtocolUnavailableException : Exception
     }
 }
 
-/// <summary>What protocol pages need from PhantomHaze. Every member is called on the UI thread.</summary>
+/// <summary>
+/// What protocol pages need from PhantomHaze. Every member is called on the UI thread, except <see cref="Log"/>, which
+/// may be called from any thread. Work on other threads uses a <see cref="WebRequestRules"/> snapshot.
+/// </summary>
 internal interface IWebProtocolHost
 {
-    /// <summary>Writes a line to the log panel and to today's log file.</summary>
+    /// <summary>Writes a line to the log panel and to today's log file (from any thread).</summary>
     void Log(string message);
 
     /// <summary>
@@ -51,6 +54,12 @@ internal interface IWebProtocolHost
 
     /// <summary>The CSS of enabled extensions' web.css rules whose pattern matches <paramref name="url"/>, in order.</summary>
     IReadOnlyList<string> GetExtensionStyleSheets(string url);
+
+    /// <summary>
+    /// The enabled extensions' web.block and web.css rules as they are now, for checking requests made on other threads.
+    /// Take a new snapshot for every page load: extensions can change in between.
+    /// </summary>
+    WebRequestRules GetRequestRules();
 
     /// <summary>This run's private folder for temporary web data. It is deleted when PhantomHaze closes.</summary>
     string SessionDirectory { get; }
@@ -69,6 +78,59 @@ internal interface IWebProtocolHost
     /// <paramref name="owner"/> exists (pages whose engine runs in-process and can open its own windows, like Legacy).
     /// </summary>
     void SetUiThreadWindowGuard(object owner, bool enabled);
+}
+
+/// <summary>
+/// A snapshot of the enabled extensions' web.block and web.css rules. Unlike <see cref="IWebProtocolHost"/>, it can be
+/// used from any thread: protocols that download pages and their parts in the background check every request with it.
+/// </summary>
+internal sealed class WebRequestRules
+{
+    private readonly (string Pattern, string BlockedBy)[] _blocks;
+    private readonly (string Pattern, string Css)[] _styles;
+
+    public WebRequestRules(IEnumerable<(string Pattern, string BlockedBy)> blocks, IEnumerable<(string Pattern, string Css)> styles)
+    {
+        _blocks = blocks.ToArray();
+        _styles = styles.ToArray();
+    }
+
+    /// <summary>No extension rules (extensions are turned off).</summary>
+    public static WebRequestRules None { get; } = new(Array.Empty<(string, string)>(), Array.Empty<(string, string)>());
+
+    /// <summary>True when a web.block rule matches <paramref name="url"/>; <paramref name="blockedBy"/> names it for the log.</summary>
+    public bool IsBlocked(string url, out string blockedBy)
+    {
+        if (!string.IsNullOrWhiteSpace(url))
+        {
+            foreach ((string pattern, string name) in _blocks)
+            {
+                if (PhantomExtensionPatternMatcher.IsMatch(url, pattern))
+                {
+                    blockedBy = name;
+                    return true;
+                }
+            }
+        }
+
+        blockedBy = string.Empty;
+        return false;
+    }
+
+    /// <summary>The CSS of the web.css rules matching <paramref name="url"/>, in the order they apply.</summary>
+    public IReadOnlyList<string> GetExtensionStyleSheets(string url)
+    {
+        var styles = new List<string>();
+        foreach ((string pattern, string css) in _styles)
+        {
+            if (PhantomExtensionPatternMatcher.IsMatch(url, pattern))
+            {
+                styles.Add(css);
+            }
+        }
+
+        return styles;
+    }
 }
 
 /// <summary>
@@ -216,6 +278,15 @@ internal abstract class WebProtocolPage : IDisposable
     public virtual Task<string?> GetDeclaredFaviconUrlAsync() => Task.FromResult<string?>(null);
 
     /// <summary>
+    /// True when the page downloads its tab icon itself (<see cref="DownloadFaviconAsync"/>), the way it downloads its
+    /// other parts - for example through a gateway - instead of PhantomHaze downloading it from the site.
+    /// </summary>
+    public virtual bool DownloadsOwnFavicon => false;
+
+    /// <summary>The page's icon, downloaded the way the page was, or null. Only called when <see cref="DownloadsOwnFavicon"/> is true.</summary>
+    public virtual Task<Image?> DownloadFaviconAsync() => Task.FromResult<Image?>(null);
+
+    /// <summary>
     /// Runs JavaScript in the document and returns its JSON-encoded result. Only called when <see cref="Features"/>
     /// include <see cref="WebProtocolFeatures.ExtensionScripts"/>.
     /// </summary>
@@ -338,18 +409,32 @@ internal abstract class WebProtocolPage : IDisposable
     }
 }
 
+/// <summary>The settings built-in protocols are configured with (Settings -> General).</summary>
+internal sealed record BuiltInProtocolSettings(bool RenderedPageScriptsEnabled, string HazeGateAddress, string HazeGateKey)
+{
+    public static BuiltInProtocolSettings Default { get; } = new(true, string.Empty, string.Empty);
+}
+
 /// <summary>The built-in protocols and protocol ids.</summary>
 internal static class WebProtocolCatalog
 {
     public const string WebView2Id = "webview2";
     public const string HtmlRendererId = "htmlrenderer";
+    public const string HazeGateId = "hazegate";
     public const string LegacyId = "legacy";
 
-    /// <summary>The built-in protocols, in the order Settings lists them. A new built-in protocol is added here (see README).</summary>
-    public static IReadOnlyList<WebProtocol> BuiltIn { get; } =
+    /// <summary>The built-in protocols with default settings, in the order Settings lists them (for their ids and names).</summary>
+    public static IReadOnlyList<WebProtocol> BuiltIn { get; } = CreateBuiltIn(BuiltInProtocolSettings.Default);
+
+    /// <summary>
+    /// The built-in protocols configured with <paramref name="settings"/>. A protocol's <see cref="WebProtocol.Signature"/>
+    /// includes its settings, so open tabs are reopened when they change. A new built-in protocol is added here (see README).
+    /// </summary>
+    public static IReadOnlyList<WebProtocol> CreateBuiltIn(BuiltInProtocolSettings settings) =>
     [
         new WebView2WebProtocol(),
-        new HtmlRendererWebProtocol(),
+        new HtmlRendererWebProtocol(null, settings.RenderedPageScriptsEnabled),
+        new HazeGateWebProtocol(settings.HazeGateAddress, settings.HazeGateKey, settings.RenderedPageScriptsEnabled),
         new LegacyWebProtocol(),
     ];
 
@@ -362,11 +447,11 @@ internal static class WebProtocolCatalog
     }
 
     /// <summary>The engine an extension protocol (protocol.add) runs on, configured with its proxy server.</summary>
-    public static WebProtocol CreateEngine(PhantomExtensionProtocolEngine engine, string? proxyServer)
+    public static WebProtocol CreateEngine(PhantomExtensionProtocolEngine engine, string? proxyServer, BuiltInProtocolSettings settings)
     {
         return engine switch
         {
-            PhantomExtensionProtocolEngine.HtmlRenderer => new HtmlRendererWebProtocol(proxyServer),
+            PhantomExtensionProtocolEngine.HtmlRenderer => new HtmlRendererWebProtocol(proxyServer, settings.RenderedPageScriptsEnabled),
             PhantomExtensionProtocolEngine.Legacy => new LegacyWebProtocol(),
             _ => new WebView2WebProtocol(proxyServer),
         };
@@ -492,13 +577,14 @@ internal sealed class ExtensionWebProtocol : WebProtocol
         string extensionId,
         string extensionName,
         PhantomExtensionProtocolDefinition definition,
-        string resolvedTemplate)
+        string resolvedTemplate,
+        BuiltInProtocolSettings settings)
     {
         ExtensionId = extensionId;
         ExtensionName = extensionName;
         Definition = definition;
         _resolvedTemplate = resolvedTemplate;
-        _engine = WebProtocolCatalog.CreateEngine(definition.Engine, definition.ProxyServer);
+        _engine = WebProtocolCatalog.CreateEngine(definition.Engine, definition.ProxyServer, settings);
         if (WebProtocolAddressTemplate.TryCreate(resolvedTemplate, out WebProtocolAddressTemplate template, out string error))
         {
             _template = template;
@@ -541,7 +627,7 @@ internal sealed class ExtensionWebProtocol : WebProtocol
         }
     }
 
-    public override string Signature => $"{Id}|{_engine.Id}|{_resolvedTemplate}|{Definition.ProxyServer}";
+    public override string Signature => $"{Id}|{_engine.Signature}|{_resolvedTemplate}|{Definition.ProxyServer}";
 
     public override bool LoadsPagesDirectly => _template is { IsDirect: true } && Definition.ProxyServer is null;
 
@@ -599,7 +685,10 @@ internal sealed class TemplateWebProtocolPage : WebProtocolPage
         _inner.FindRequested += (_, _) => OnFindRequested();
     }
 
-    public override WebProtocolFeatures Features => Protocol.Features;
+    // The engine page's own features (they can depend on settings), without saved cookies when the protocol has none.
+    public override WebProtocolFeatures Features => Protocol.Features.HasFlag(WebProtocolFeatures.SavedCookies)
+        ? _inner.Features
+        : _inner.Features & ~WebProtocolFeatures.SavedCookies;
 
     public override WebProtocolPage InnermostPage => _inner.InnermostPage;
 
@@ -632,6 +721,11 @@ internal sealed class TemplateWebProtocolPage : WebProtocolPage
     public override Task<int> FindAsync(string query) => _inner.FindAsync(query);
 
     public override Task<string?> GetDeclaredFaviconUrlAsync() => _inner.GetDeclaredFaviconUrlAsync();
+
+    // Through a gateway, the inner page's icon would be the gateway's; with a proxy server it is downloaded through it.
+    public override bool DownloadsOwnFavicon => _template.IsDirect && _inner.DownloadsOwnFavicon;
+
+    public override Task<Image?> DownloadFaviconAsync() => _inner.DownloadFaviconAsync();
 
     public override Task<string?> ExecuteScriptAsync(string script) => _inner.ExecuteScriptAsync(script);
 

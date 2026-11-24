@@ -179,8 +179,26 @@ internal static class UpdateReminder
         return true;
     }
 
-    /// <summary>The banner is shown whenever this build does not match the release listed for its channel.</summary>
-    public static bool ShouldShowBanner(ReleaseTag current, ReleaseTag latestOnChannel) => current != latestOnChannel;
+    /// <summary>
+    /// The banner is shown when the release listed for this build's channel is newer than this build. A build that is
+    /// newer than the listed release (a new version before ver-banner.csv is updated, or a test build) is never asked to
+    /// "update" to the older release.
+    /// </summary>
+    public static bool ShouldShowBanner(ReleaseTag current, ReleaseTag latestOnChannel) =>
+        latestOnChannel.Channel == current.Channel && CompareVersions(latestOnChannel, current) > 0;
+
+    /// <summary>Compares the version numbers of two tags (the channel is ignored).</summary>
+    public static int CompareVersions(ReleaseTag first, ReleaseTag second)
+    {
+        int major = first.Major.CompareTo(second.Major);
+        if (major != 0)
+        {
+            return major;
+        }
+
+        int minor = first.Minor.CompareTo(second.Minor);
+        return minor != 0 ? minor : first.Patch.CompareTo(second.Patch);
+    }
 
     private static string DescribeForLog(string value)
     {

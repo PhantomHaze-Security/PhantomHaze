@@ -258,6 +258,9 @@ public partial class MainForm
         }
 
         _knownCookieKeys.Clear();
+
+        // HTMLRenderer and HazeGate pages keep their own cookies and localStorage (in memory).
+        RenderedPageSessionData.ClearAll();
         Log("All cookies were cleared, including the saved ones.");
     }
 

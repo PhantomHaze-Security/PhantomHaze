@@ -138,6 +138,9 @@ public partial class MainForm
 
             AppSettings exported = _settings.Clone();
             exported.Extensions.RemoveAll(entry => !sources.ContainsKey(entry.FileName));
+
+            // The HazeGate key is encrypted for this Windows user (it could not be read on another PC) and is a secret.
+            exported.HazeGateKey = string.Empty;
             string settingsJson = JsonSerializer.Serialize(exported, new JsonSerializerOptions { WriteIndented = true });
 
             // Logged first, so it is the last line of the Master Log inside the export.
@@ -251,6 +254,11 @@ public partial class MainForm
 
         // The settings come from the file; which extensions end up installed depends on the choice.
         AppSettings newSettings = imported.Clone();
+
+        // Exports never contain the HazeGate key: the one set up here is kept while the address stays the same.
+        newSettings.HazeGateKey = string.Equals(newSettings.HazeGateAddress, _settings.HazeGateAddress, StringComparison.OrdinalIgnoreCase)
+            ? _settings.HazeGateKey
+            : string.Empty;
         newSettings.Extensions = choice == ExtensionImportChoice.Overwrite
             ? new List<InstalledExtensionEntry>()
             : _settings.Extensions.Select(entry => entry.Clone()).ToList();

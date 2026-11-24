@@ -10,30 +10,38 @@ using TheArtOfDev.HtmlRenderer.WinForms;
 namespace PhantomHaze;
 
 /// <summary>
-/// The HTMLRenderer protocol: every page's HTML is downloaded with the curl.exe that ships with Windows
-/// (curl -o index.html https://example.com/) and drawn with HTML Renderer (https://github.com/ArthurHub/HTML-Renderer).
-/// WebView2 is not used at all. Pages cannot run JavaScript, and HTML Renderer supports HTML 4 and CSS 2.
+/// The HTMLRenderer protocol: every page is downloaded with the curl.exe that ships with Windows, opened by PhantomHaze's
+/// page engine (AngleSharp for the document, Jint for its JavaScript, a CSS cascade of its own - see
+/// HtmlRendererEngine.cs) and drawn with HTML Renderer (https://github.com/ArthurHub/HTML-Renderer). WebView2 is not used
+/// at all.
 /// </summary>
 internal sealed class HtmlRendererWebProtocol : WebProtocol
 {
-    public HtmlRendererWebProtocol(string? proxyServer = null)
+    public HtmlRendererWebProtocol(string? proxyServer = null, bool scriptsEnabled = true)
     {
         ProxyServer = proxyServer;
+        ScriptsEnabled = scriptsEnabled;
     }
 
     /// <summary>The proxy server of an extension protocol (pages, images and stylesheets all go through it), or null.</summary>
     public string? ProxyServer { get; }
+
+    /// <summary>Pages run their JavaScript (Settings -> General).</summary>
+    public bool ScriptsEnabled { get; }
 
     public override string Id => WebProtocolCatalog.HtmlRendererId;
 
     public override string DisplayName => "HTMLRenderer";
 
     public override string Description =>
-        "Downloads each page's HTML with curl (curl -o index.html <address>) and draws it with HTML Renderer, without " +
-        "WebView2. Light and script-free: no JavaScript, HTML 4 and CSS 2 only, so modern sites look plain. Extensions' " +
-        "web.css styles apply; web.script does not.";
+        "Downloads each page with curl and draws it with HTML Renderer, without WebView2. Pages run their JavaScript (with " +
+        "Jint, a JavaScript engine written in C#) and modern CSS - variables, media queries, flex and grid layouts - is " +
+        "converted into what HTML Renderer can draw. Lighter than WebView2, but complex sites may look simpler. " +
+        "Extensions' web.css styles and web.script scripts apply.";
 
-    public override WebProtocolFeatures Features => WebProtocolFeatures.FindInPage;
+    public override WebProtocolFeatures Features => RenderedWebProtocolPage.GetFeatures(ScriptsEnabled);
+
+    public override string Signature => $"{Id}|{ProxyServer}|{(ScriptsEnabled ? "scripts" : "no-scripts")}";
 
     public override string? GetUnavailableReason()
     {
@@ -42,7 +50,380 @@ internal sealed class HtmlRendererWebProtocol : WebProtocol
             : null;
     }
 
-    public override WebProtocolPage CreatePage(IWebProtocolHost host) => new HtmlRendererProtocolPage(this, host, ProxyServer);
+    public override WebProtocolPage CreatePage(IWebProtocolHost host) =>
+        new RenderedWebProtocolPage(this, host, new CurlPageTransport(ProxyServer), ScriptsEnabled);
+}
+
+/// <summary>
+/// The HTMLRenderer protocol's way of downloading: pages with curl (one run per redirect, so every address is checked
+/// against web.block first), everything else with HttpClient. Cookies are kept for the session (in memory only).
+/// </summary>
+internal sealed class CurlPageTransport : IRenderedPageTransport
+{
+    private const int MaximumDocumentBytes = 10 * 1024 * 1024;
+    private const int MaximumRedirects = 10;
+
+    private readonly string? _proxyServer;
+    private Process? _curlProcess;
+    private volatile WebRequestRules _rules = WebRequestRules.None;
+
+    public CurlPageTransport(string? proxyServer)
+    {
+        _proxyServer = proxyServer;
+
+        // One cookie jar and one localStorage per proxy server, for the whole session (never written to disk).
+        (Cookies, Storage) = RenderedPageSessionData.Get("htmlrenderer|" + proxyServer);
+    }
+
+    public string ProtocolName => "HTMLRenderer";
+
+    public void UseRules(WebRequestRules rules)
+    {
+        _rules = rules;
+    }
+
+    public CookieContainer Cookies { get; }
+
+    public PageSessionStorage Storage { get; }
+
+    public void CancelDocument()
+    {
+        if (_curlProcess is Process process)
+        {
+            CurlTool.TryKill(process);
+            _curlProcess = null;
+        }
+    }
+
+    public async Task<FetchedDocument> FetchDocumentAsync(PageRequest request, IWebProtocolHost host, string folder, CancellationToken cancellationToken)
+    {
+        if (!Uri.TryCreate(request.Url, UriKind.Absolute, out Uri? requested) || !WebProtocolPage.IsWebAddress(request.Url))
+        {
+            throw new HtmlRendererLoadException("The HTMLRenderer protocol only opens http:// and https:// addresses.");
+        }
+
+        string curl = CurlTool.ExecutablePath
+            ?? throw new HtmlRendererLoadException($"curl.exe was not found in {Environment.SystemDirectory}.");
+        Directory.CreateDirectory(folder);
+        string outputPath = Path.Combine(folder, "index.html");
+        string headersPath = Path.Combine(folder, "headers.txt");
+        string bodyPath = Path.Combine(folder, "request-body.bin");
+        string fragment = requested.Fragment;
+        string method = request.Method;
+        byte[]? body = request.Body;
+        string? referrer = request.Referrer;
+
+        // Redirects are followed here, one curl run per step, so every address is checked against web.block before
+        // anything is requested from it (curl -L would follow them without asking).
+        string current = requested.GetLeftPart(UriPartial.Query);
+        for (int redirects = 0; ; redirects++)
+        {
+            if (_rules.IsBlocked(current, out string blockedBy))
+            {
+                host.Log($"{ProtocolName} did not open {WebPageSession.LogText(current, 220)}: it is blocked by {blockedBy}.");
+                return FetchedDocument.FromMessage(HtmlRendererDocumentBuilder.BuildMessagePage(current, "Blocked by an extension", $"This address is blocked by {blockedBy}.", isSuccess: false));
+            }
+
+            if (body is not null)
+            {
+                await File.WriteAllBytesAsync(bodyPath, body, cancellationToken);
+            }
+
+            CurlResult result = await RunCurlAsync(curl, current, method, body is null ? null : bodyPath, request.ContentType, referrer, outputPath, headersPath, cancellationToken);
+            StoreCookies(new Uri(current), headersPath);
+            if (result.ExitCode != 0)
+            {
+                throw new HtmlRendererLoadException(DescribeCurlFailure(result));
+            }
+
+            if (result.StatusCode is 301 or 302 or 303 or 307 or 308 && !string.IsNullOrWhiteSpace(result.RedirectUrl))
+            {
+                if (redirects >= MaximumRedirects)
+                {
+                    throw new HtmlRendererLoadException("The page redirected too many times.");
+                }
+
+                if (!Uri.TryCreate(new Uri(current), result.RedirectUrl, out Uri? next) || !WebProtocolPage.IsWebAddress(next.AbsoluteUri))
+                {
+                    throw new HtmlRendererLoadException($"The page redirected to an address that is not a web page: {WebPageSession.LogText(result.RedirectUrl, 200)}");
+                }
+
+                // Like browsers: 303 (and 301/302 after a form) continue with GET; 307 and 308 repeat the request.
+                if (result.StatusCode is 301 or 302 or 303 && method != "GET")
+                {
+                    method = "GET";
+                    body = null;
+                }
+
+                referrer = current;
+                current = next.GetLeftPart(UriPartial.Query);
+                if (next.Fragment.Length > 0)
+                {
+                    fragment = next.Fragment;
+                }
+
+                continue;
+            }
+
+            byte[] content = File.Exists(outputPath) ? await File.ReadAllBytesAsync(outputPath, cancellationToken) : Array.Empty<byte>();
+            if (content.Length > MaximumDocumentBytes)
+            {
+                throw new HtmlRendererLoadException("The page is larger than 10 MB, which the HTMLRenderer protocol does not open.");
+            }
+
+            return new FetchedDocument(current + fragment, result.StatusCode, result.ContentType, content);
+        }
+    }
+
+    private void StoreCookies(Uri address, string headersPath)
+    {
+        try
+        {
+            if (!File.Exists(headersPath))
+            {
+                return;
+            }
+
+            foreach (string line in File.ReadLines(headersPath))
+            {
+                if (line.StartsWith("set-cookie:", StringComparison.OrdinalIgnoreCase))
+                {
+                    try
+                    {
+                        Cookies.SetCookies(address, line["set-cookie:".Length..].Trim());
+                    }
+                    catch (CookieException)
+                    {
+                        // An invalid cookie is ignored, as browsers do.
+                    }
+                }
+            }
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+            // No cookies from this response.
+        }
+    }
+
+    private sealed record CurlResult(int ExitCode, int StatusCode, string RedirectUrl, string ContentType, string Error);
+
+    private async Task<CurlResult> RunCurlAsync(
+        string curl,
+        string url,
+        string method,
+        string? bodyPath,
+        string? contentType,
+        string? referrer,
+        string outputPath,
+        string headersPath,
+        CancellationToken cancellationToken)
+    {
+        Version? version = await CurlTool.GetVersionAsync();
+        cancellationToken.ThrowIfCancellationRequested();
+        TryDeleteFile(outputPath);
+        TryDeleteFile(headersPath);
+
+        var startInfo = new ProcessStartInfo(curl)
+        {
+            UseShellExecute = false,
+            CreateNoWindow = true,
+            RedirectStandardOutput = true,
+            RedirectStandardError = true,
+            WorkingDirectory = Path.GetDirectoryName(outputPath)!,
+            StandardOutputEncoding = Encoding.UTF8,
+            StandardErrorEncoding = Encoding.UTF8,
+        };
+
+        // curl -o index.html <address>, plus what keeps it safe and predictable inside PhantomHaze.
+        var arguments = startInfo.ArgumentList;
+        arguments.Add("-q"); // must be first: never read a .curlrc file that could change what curl does
+        arguments.Add("--silent");
+        arguments.Add("--show-error");
+        arguments.Add("--globoff"); // [] and {} in an address are not curl patterns
+        arguments.Add("--proto");
+        arguments.Add("=http,https");
+        arguments.Add("--compressed");
+        arguments.Add("--connect-timeout");
+        arguments.Add("15");
+        arguments.Add("--max-time");
+        arguments.Add("30");
+        arguments.Add("--max-filesize");
+        arguments.Add(MaximumDocumentBytes.ToString(CultureInfo.InvariantCulture));
+        if (version is not null && version >= new Version(7, 70))
+        {
+            // Like browsers, do not fail when the certificate revocation server cannot be reached.
+            arguments.Add("--ssl-revoke-best-effort");
+        }
+
+        if (_proxyServer is not null)
+        {
+            arguments.Add("--proxy");
+            arguments.Add(CurlTool.ToCurlProxy(_proxyServer));
+        }
+
+        // A browser's request: its user agent, what it accepts and the session's cookies for the site.
+        arguments.Add("--user-agent");
+        arguments.Add(PageEngineDefaults.UserAgent);
+        arguments.Add("--header");
+        arguments.Add("Accept: " + PageEngineDefaults.AcceptHtml);
+        arguments.Add("--header");
+        arguments.Add("Accept-Language: " + RenderedPageEnvironment.AcceptLanguage);
+        if (Uri.TryCreate(url, UriKind.Absolute, out Uri? address))
+        {
+            string cookieHeader = Cookies.GetCookieHeader(address);
+            if (cookieHeader.Length > 0)
+            {
+                arguments.Add("--cookie");
+                arguments.Add(cookieHeader);
+            }
+        }
+
+        if (!string.IsNullOrEmpty(referrer))
+        {
+            arguments.Add("--referer");
+            arguments.Add(referrer);
+        }
+
+        if (method != "GET")
+        {
+            arguments.Add("--request");
+            arguments.Add(method);
+        }
+
+        if (bodyPath is not null)
+        {
+            arguments.Add("--data-binary");
+            arguments.Add("@" + bodyPath);
+            arguments.Add("--header");
+            arguments.Add("Content-Type: " + (string.IsNullOrWhiteSpace(contentType) ? "application/x-www-form-urlencoded" : contentType));
+        }
+
+        arguments.Add("--dump-header");
+        arguments.Add(headersPath);
+        arguments.Add("--output");
+        arguments.Add(outputPath);
+        arguments.Add("--write-out");
+        arguments.Add("%{http_code}\\n%{redirect_url}\\n%{content_type}\\n");
+        arguments.Add("--url");
+        arguments.Add(url);
+
+        using var process = new Process { StartInfo = startInfo };
+        process.Start();
+        _curlProcess = process;
+        Task<string> output = process.StandardOutput.ReadToEndAsync();
+        Task<string> error = process.StandardError.ReadToEndAsync();
+        try
+        {
+            await process.WaitForExitAsync(cancellationToken);
+        }
+        catch (OperationCanceledException)
+        {
+            CurlTool.TryKill(process);
+            throw;
+        }
+        finally
+        {
+            if (ReferenceEquals(_curlProcess, process))
+            {
+                _curlProcess = null;
+            }
+        }
+
+        string[] lines = (await output).Replace("\r", string.Empty, StringComparison.Ordinal).Split('\n');
+        int statusCode = lines.Length > 0 && int.TryParse(lines[0].Trim(), NumberStyles.Integer, CultureInfo.InvariantCulture, out int status) ? status : 0;
+        return new CurlResult(
+            process.ExitCode,
+            statusCode,
+            lines.Length > 1 ? lines[1].Trim() : string.Empty,
+            lines.Length > 2 ? lines[2].Trim() : string.Empty,
+            (await error).Trim());
+    }
+
+    private static string DescribeCurlFailure(CurlResult result)
+    {
+        string reason = result.ExitCode switch
+        {
+            5 => "The proxy server could not be found.",
+            6 => "The server could not be found. Check the address, or your internet connection.",
+            7 => "The server could not be reached.",
+            28 => "The server took too long to respond.",
+            35 or 51 or 53 or 54 or 58 or 59 or 60 or 64 or 66 or 77 or 80 or 82 or 83 or 90 or 91 => "A secure connection to the server could not be made.",
+            52 => "The server did not send anything back.",
+            55 or 56 => "The connection to the server was interrupted.",
+            63 => "The page is larger than 10 MB, which the HTMLRenderer protocol does not open.",
+            97 => "The proxy server refused the connection.",
+            _ => $"curl could not download the page (error {result.ExitCode}).",
+        };
+
+        return string.IsNullOrWhiteSpace(result.Error) ? reason : $"{reason}\n\n{result.Error}";
+    }
+
+    public Task<PageResource?> FetchAsync(PageResourceRequest request, CancellationToken cancellationToken)
+    {
+        WebRequestRules rules = _rules;
+        return HtmlRendererResources.FetchAsync(request, _proxyServer, Cookies, url => rules.IsBlocked(url, out _), cancellationToken);
+    }
+
+    private static void TryDeleteFile(string path)
+    {
+        try
+        {
+            File.Delete(path);
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+            // curl overwrites it.
+        }
+    }
+}
+
+/// <summary>Things every rendered page shares: the language sent to sites and the fonts Windows has.</summary>
+internal static class RenderedPageEnvironment
+{
+    private static HashSet<string>? s_fonts;
+
+    /// <summary>The Accept-Language header, from the Windows display language (for example "en-AU,en;q=0.9").</summary>
+    public static string AcceptLanguage
+    {
+        get
+        {
+            string name = CultureInfo.CurrentUICulture.Name;
+            if (string.IsNullOrEmpty(name))
+            {
+                return "en-US,en;q=0.9";
+            }
+
+            string language = name.Split('-')[0];
+            return language.Equals(name, StringComparison.OrdinalIgnoreCase) ? name + ";q=1" : $"{name},{language};q=0.9";
+        }
+    }
+
+    public static string Language => string.IsNullOrEmpty(CultureInfo.CurrentUICulture.Name) ? "en-US" : CultureInfo.CurrentUICulture.Name;
+
+    public static bool IsFontInstalled(string family)
+    {
+        HashSet<string>? fonts = s_fonts;
+        if (fonts is null)
+        {
+            fonts = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            try
+            {
+                using var collection = new System.Drawing.Text.InstalledFontCollection();
+                foreach (FontFamily installed in collection.Families)
+                {
+                    fonts.Add(installed.Name);
+                }
+            }
+            catch (Exception ex) when (ex is ArgumentException or System.Runtime.InteropServices.ExternalException)
+            {
+                fonts.Add("Segoe UI");
+            }
+
+            s_fonts = fonts;
+        }
+
+        return fonts.Contains(family);
+    }
 }
 
 /// <summary>The curl.exe that ships with Windows.</summary>
@@ -137,760 +518,6 @@ internal static class CurlTool
     }
 }
 
-/// <summary>A tab shown with the HTMLRenderer protocol.</summary>
-internal sealed class HtmlRendererProtocolPage : WebProtocolPage
-{
-    private const int MaximumDocumentBytes = 10 * 1024 * 1024;
-    private const int MaximumRedirects = 10;
-
-    // Unknown (HTML5) elements are inline in HTML Renderer; these are blocks, as in every browser.
-    private const string BaseStyleSheet =
-        "article, aside, details, dialog, figcaption, figure, footer, header, hgroup, main, nav, section, summary { display: block; }\n" +
-        "img { border: 0; }";
-
-    private readonly HtmlPanel _panel;
-    private readonly string? _proxyServer;
-    private readonly List<string> _history = new();
-    private readonly string _folderName = Guid.NewGuid().ToString("N");
-    private readonly SemaphoreSlim _resourceSlots = new(6, 6);
-    private int _historyIndex = -1;
-    private string _currentUrl = string.Empty;
-    private string _title = string.Empty;
-    private Uri? _baseUri;
-    private string? _faviconUrl;
-    private string? _documentHtml;
-    private bool _documentHighlighted;
-    private int _findVersion;
-    private IReadOnlyDictionary<string, string> _styleSheets = new Dictionary<string, string>();
-    private Dictionary<string, Task<Image?>> _images = new(StringComparer.Ordinal);
-    private CancellationTokenSource _documentCancellation = new();
-    private CancellationTokenSource? _loadCancellation;
-    private Process? _curlProcess;
-    private int _loadSequence;
-    private bool _initialized;
-
-    public HtmlRendererProtocolPage(WebProtocol protocol, IWebProtocolHost host, string? proxyServer)
-        : base(protocol, host)
-    {
-        _proxyServer = proxyServer;
-        _panel = new HtmlPanel
-        {
-            Dock = DockStyle.Fill,
-            Visible = false,
-            BackColor = Color.White,
-            // Its menu offers "Save image" (an unprotected file dialog) and opens links itself.
-            IsContextMenuEnabled = false,
-            IsSelectionEnabled = true,
-            BaseStylesheet = BaseStyleSheet,
-        };
-        _panel.LinkClicked += OnLinkClicked;
-        _panel.StylesheetLoad += OnStylesheetLoad;
-        _panel.ImageLoad += OnImageLoad;
-    }
-
-    public override Control View => _panel;
-
-    public override bool IsReady => _initialized && !IsDisposed;
-
-    public override string CurrentUrl => _currentUrl;
-
-    public override string Title => _title;
-
-    public override bool CanGoBack => _historyIndex > 0;
-
-    public override bool CanGoForward => _historyIndex >= 0 && _historyIndex < _history.Count - 1;
-
-    public override Task InitializeAsync()
-    {
-        if (Protocol.GetUnavailableReason() is string reason)
-        {
-            throw new WebProtocolUnavailableException(reason);
-        }
-
-        _initialized = true;
-        return Task.CompletedTask;
-    }
-
-    public override void Navigate(string url) => StartLoad(url, HistoryUpdate.Push);
-
-    public override void GoBack()
-    {
-        if (!CanGoBack)
-        {
-            return;
-        }
-
-        _historyIndex--;
-        StartLoad(_history[_historyIndex], HistoryUpdate.ReplaceCurrent);
-    }
-
-    public override void GoForward()
-    {
-        if (!CanGoForward)
-        {
-            return;
-        }
-
-        _historyIndex++;
-        StartLoad(_history[_historyIndex], HistoryUpdate.ReplaceCurrent);
-    }
-
-    public override void Reload()
-    {
-        if (_currentUrl.Length > 0)
-        {
-            StartLoad(_currentUrl, HistoryUpdate.ReplaceCurrent);
-        }
-    }
-
-    public override Task<string?> GetDeclaredFaviconUrlAsync() => Task.FromResult(_faviconUrl);
-
-    private enum HistoryUpdate
-    {
-        Push,
-        ReplaceCurrent,
-    }
-
-    private void StartLoad(string url, HistoryUpdate historyUpdate)
-    {
-        if (IsDisposed)
-        {
-            return;
-        }
-
-        CancelLoad();
-        var cancellation = new CancellationTokenSource();
-        _loadCancellation = cancellation;
-        int sequence = ++_loadSequence;
-        OnNavigationStarting(url);
-        _ = LoadAsync(url, historyUpdate, sequence, cancellation.Token);
-    }
-
-    private void CancelLoad()
-    {
-        _loadCancellation?.Cancel();
-        _loadCancellation?.Dispose();
-        _loadCancellation = null;
-        if (_curlProcess is Process process)
-        {
-            CurlTool.TryKill(process);
-            _curlProcess = null;
-        }
-    }
-
-    private async Task LoadAsync(string requestedUrl, HistoryUpdate historyUpdate, int sequence, CancellationToken cancellationToken)
-    {
-        HtmlRendererDocument document;
-        try
-        {
-            document = await DownloadDocumentAsync(requestedUrl, cancellationToken);
-            if (document.StyleSheetLinks.Count > 0)
-            {
-                await DownloadStyleSheetsAsync(document, cancellationToken);
-            }
-        }
-        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
-        {
-            return;
-        }
-        catch (Exception ex)
-        {
-            document = HtmlRendererDocumentBuilder.BuildMessagePage(
-                requestedUrl,
-                "This page could not be opened",
-                ex is HtmlRendererLoadException ? ex.Message : $"Something went wrong while opening the page: {ex.Message}",
-                isSuccess: false);
-        }
-
-        if (IsDisposed || sequence != _loadSequence)
-        {
-            document.PrimaryImage?.Dispose();
-            return;
-        }
-
-        ShowDocument(document, historyUpdate);
-    }
-
-    private async Task<HtmlRendererDocument> DownloadDocumentAsync(string requestedUrl, CancellationToken cancellationToken)
-    {
-        if (!Uri.TryCreate(requestedUrl, UriKind.Absolute, out Uri? requested) || !IsWebAddress(requestedUrl))
-        {
-            throw new HtmlRendererLoadException("The HTMLRenderer protocol only opens http:// and https:// addresses.");
-        }
-
-        string curl = CurlTool.ExecutablePath
-            ?? throw new HtmlRendererLoadException($"curl.exe was not found in {Environment.SystemDirectory}.");
-        string folder = Path.Combine(Host.SessionDirectory, "htmlrenderer", _folderName);
-        Directory.CreateDirectory(folder);
-        string outputPath = Path.Combine(folder, "index.html");
-        string fragment = requested.Fragment;
-
-        // Redirects are followed here, one curl run per step, so every address is checked against web.block before
-        // anything is requested from it (curl -L would follow them without asking).
-        string current = requested.GetLeftPart(UriPartial.Query);
-        for (int redirects = 0; ; redirects++)
-        {
-            if (Host.IsBlocked(current, out string blockedBy))
-            {
-                Host.Log($"HTMLRenderer did not open {TrimForLog(current)}: it is blocked by {blockedBy}.");
-                return HtmlRendererDocumentBuilder.BuildMessagePage(current, "Blocked by an extension", $"This address is blocked by {blockedBy}.", isSuccess: false);
-            }
-
-            CurlResult result = await RunCurlAsync(curl, current, outputPath, cancellationToken);
-            if (result.ExitCode != 0)
-            {
-                throw new HtmlRendererLoadException(DescribeCurlFailure(result));
-            }
-
-            if (result.StatusCode is 301 or 302 or 303 or 307 or 308 && !string.IsNullOrWhiteSpace(result.RedirectUrl))
-            {
-                if (redirects >= MaximumRedirects)
-                {
-                    throw new HtmlRendererLoadException("The page redirected too many times.");
-                }
-
-                if (!Uri.TryCreate(new Uri(current), result.RedirectUrl, out Uri? next) || !IsWebAddress(next.AbsoluteUri))
-                {
-                    throw new HtmlRendererLoadException($"The page redirected to an address that is not a web page: {TrimForLog(result.RedirectUrl, 200)}");
-                }
-
-                current = next.GetLeftPart(UriPartial.Query);
-                if (next.Fragment.Length > 0)
-                {
-                    fragment = next.Fragment;
-                }
-
-                continue;
-            }
-
-            byte[] body = File.Exists(outputPath) ? await File.ReadAllBytesAsync(outputPath, cancellationToken) : Array.Empty<byte>();
-            if (body.Length > MaximumDocumentBytes)
-            {
-                throw new HtmlRendererLoadException("The page is larger than 10 MB, which the HTMLRenderer protocol does not open.");
-            }
-
-            string pageUrl = current + fragment;
-            IReadOnlyList<string> extensionStyles = Host.GetExtensionStyleSheets(current);
-            return await Task.Run(
-                () => HtmlRendererDocumentBuilder.Build(pageUrl, result.StatusCode, result.ContentType, body, extensionStyles),
-                cancellationToken);
-        }
-    }
-
-    private sealed record CurlResult(int ExitCode, int StatusCode, string RedirectUrl, string ContentType, string Error);
-
-    private async Task<CurlResult> RunCurlAsync(string curl, string url, string outputPath, CancellationToken cancellationToken)
-    {
-        Version? version = await CurlTool.GetVersionAsync();
-        cancellationToken.ThrowIfCancellationRequested();
-        TryDeleteFile(outputPath);
-
-        var startInfo = new ProcessStartInfo(curl)
-        {
-            UseShellExecute = false,
-            CreateNoWindow = true,
-            RedirectStandardOutput = true,
-            RedirectStandardError = true,
-            WorkingDirectory = Path.GetDirectoryName(outputPath)!,
-            StandardOutputEncoding = Encoding.UTF8,
-            StandardErrorEncoding = Encoding.UTF8,
-        };
-
-        // curl -o index.html <address>, plus what keeps it safe and predictable inside PhantomHaze.
-        var arguments = startInfo.ArgumentList;
-        arguments.Add("-q"); // must be first: never read a .curlrc file that could change what curl does
-        arguments.Add("--silent");
-        arguments.Add("--show-error");
-        arguments.Add("--globoff"); // [] and {} in an address are not curl patterns
-        arguments.Add("--proto");
-        arguments.Add("=http,https");
-        arguments.Add("--compressed");
-        arguments.Add("--connect-timeout");
-        arguments.Add("15");
-        arguments.Add("--max-time");
-        arguments.Add("30");
-        arguments.Add("--max-filesize");
-        arguments.Add(MaximumDocumentBytes.ToString(CultureInfo.InvariantCulture));
-        if (version is not null && version >= new Version(7, 70))
-        {
-            // Like browsers, do not fail when the certificate revocation server cannot be reached.
-            arguments.Add("--ssl-revoke-best-effort");
-        }
-
-        if (_proxyServer is not null)
-        {
-            arguments.Add("--proxy");
-            arguments.Add(CurlTool.ToCurlProxy(_proxyServer));
-        }
-
-        arguments.Add("--output");
-        arguments.Add(outputPath);
-        arguments.Add("--write-out");
-        arguments.Add("%{http_code}\\n%{redirect_url}\\n%{content_type}\\n");
-        arguments.Add("--url");
-        arguments.Add(url);
-
-        using var process = new Process { StartInfo = startInfo };
-        process.Start();
-        _curlProcess = process;
-        Task<string> output = process.StandardOutput.ReadToEndAsync();
-        Task<string> error = process.StandardError.ReadToEndAsync();
-        try
-        {
-            await process.WaitForExitAsync(cancellationToken);
-        }
-        catch (OperationCanceledException)
-        {
-            CurlTool.TryKill(process);
-            throw;
-        }
-        finally
-        {
-            if (ReferenceEquals(_curlProcess, process))
-            {
-                _curlProcess = null;
-            }
-        }
-
-        string[] lines = (await output).Replace("\r", string.Empty, StringComparison.Ordinal).Split('\n');
-        int statusCode = lines.Length > 0 && int.TryParse(lines[0].Trim(), NumberStyles.Integer, CultureInfo.InvariantCulture, out int status) ? status : 0;
-        return new CurlResult(
-            process.ExitCode,
-            statusCode,
-            lines.Length > 1 ? lines[1].Trim() : string.Empty,
-            lines.Length > 2 ? lines[2].Trim() : string.Empty,
-            (await error).Trim());
-    }
-
-    private static string DescribeCurlFailure(CurlResult result)
-    {
-        string reason = result.ExitCode switch
-        {
-            5 => "The proxy server could not be found.",
-            6 => "The server could not be found. Check the address, or your internet connection.",
-            7 => "The server could not be reached.",
-            28 => "The server took too long to respond.",
-            35 or 51 or 53 or 54 or 58 or 59 or 60 or 64 or 66 or 77 or 80 or 82 or 83 or 90 or 91 => "A secure connection to the server could not be made.",
-            52 => "The server did not send anything back.",
-            55 or 56 => "The connection to the server was interrupted.",
-            63 => "The page is larger than 10 MB, which the HTMLRenderer protocol does not open.",
-            97 => "The proxy server refused the connection.",
-            _ => $"curl could not download the page (error {result.ExitCode}).",
-        };
-
-        return string.IsNullOrWhiteSpace(result.Error) ? reason : $"{reason}\n\n{result.Error}";
-    }
-
-    private async Task DownloadStyleSheetsAsync(HtmlRendererDocument document, CancellationToken cancellationToken)
-    {
-        var downloads = document.StyleSheetLinks.Select(async link =>
-        {
-            ResourceResponse? response = await DownloadResourceAsync(link.Url, HtmlRendererResources.MaximumStyleSheetBytes, cancellationToken);
-            if (response is null ||
-                (response.ContentType.Length > 0 && !response.ContentType.Contains("css", StringComparison.OrdinalIgnoreCase)))
-            {
-                return (link.Token, Css: string.Empty);
-            }
-
-            string css = HtmlRendererDocumentBuilder.DecodeText(response.Body, response.ContentType, isHtml: false);
-            return (link.Token, Css: HtmlRendererDocumentBuilder.MakeCssUrlsAbsolute(css, new Uri(response.Url)));
-        });
-
-        foreach ((string token, string css) in await Task.WhenAll(downloads))
-        {
-            document.StyleSheets[token] = css;
-        }
-    }
-
-    private sealed record ResourceResponse(string Url, string ContentType, byte[] Body);
-
-    /// <summary>Downloads an image or stylesheet, checking every address (including redirects) against web.block.</summary>
-    private async Task<ResourceResponse?> DownloadResourceAsync(string url, int maximumBytes, CancellationToken cancellationToken)
-    {
-        await _resourceSlots.WaitAsync(cancellationToken);
-        try
-        {
-            string current = url;
-            for (int redirects = 0; redirects <= 5; redirects++)
-            {
-                if (!Uri.TryCreate(current, UriKind.Absolute, out Uri? uri) || !IsWebAddress(current) || Host.IsBlocked(uri.AbsoluteUri, out _))
-                {
-                    return null;
-                }
-
-                HtmlRendererResources.Response response = await Task.Run(
-                    () => HtmlRendererResources.GetAsync(uri, _proxyServer, maximumBytes, cancellationToken),
-                    cancellationToken);
-                if (response.RedirectTo is Uri redirect)
-                {
-                    // Like browsers, never follow an https -> http redirect for a part of a page.
-                    if (uri.Scheme == Uri.UriSchemeHttps && redirect.Scheme != Uri.UriSchemeHttps)
-                    {
-                        return null;
-                    }
-
-                    current = redirect.AbsoluteUri;
-                    continue;
-                }
-
-                return response.Body is null ? null : new ResourceResponse(uri.AbsoluteUri, response.ContentType, response.Body);
-            }
-
-            return null;
-        }
-        catch (Exception ex) when (ex is HttpRequestException or IOException or InvalidOperationException or TaskCanceledException)
-        {
-            return null;
-        }
-        finally
-        {
-            _resourceSlots.Release();
-        }
-    }
-
-    private void ShowDocument(HtmlRendererDocument document, HistoryUpdate historyUpdate)
-    {
-        // Images belong to one document: the next document starts a new set, and the old images are disposed once the
-        // panel no longer shows them.
-        _documentCancellation.Cancel();
-        _documentCancellation.Dispose();
-        _documentCancellation = new CancellationTokenSource();
-        Dictionary<string, Task<Image?>> previousImages = _images;
-        _images = new Dictionary<string, Task<Image?>>(StringComparer.Ordinal);
-        if (document.PrimaryImage is Image primary)
-        {
-            _images[document.PrimaryImageUrl!] = Task.FromResult<Image?>(primary);
-        }
-
-        _currentUrl = document.Url;
-        _title = document.Title;
-        _baseUri = document.BaseUri;
-        _faviconUrl = document.FaviconUrl;
-        _styleSheets = document.StyleSheets;
-        _documentHtml = document.Html;
-        _documentHighlighted = false;
-        _findVersion++;
-        SetPanelHtml(document.Html, keepScrollPosition: false);
-        DisposeImages(previousImages);
-
-        if (historyUpdate == HistoryUpdate.Push || _historyIndex < 0)
-        {
-            if (_historyIndex < _history.Count - 1)
-            {
-                _history.RemoveRange(_historyIndex + 1, _history.Count - _historyIndex - 1);
-            }
-
-            _history.Add(_currentUrl);
-            _historyIndex = _history.Count - 1;
-        }
-        else
-        {
-            _history[_historyIndex] = _currentUrl;
-        }
-
-        OnSourceChanged();
-        OnTitleChanged();
-        OnHistoryChanged();
-        if (Uri.TryCreate(_currentUrl, UriKind.Absolute, out Uri? shown) && shown.Fragment.Length > 1)
-        {
-            ScrollToFragment(Uri.UnescapeDataString(shown.Fragment[1..]));
-        }
-
-        OnNavigationCompleted(document.IsSuccess, document.ErrorDescription);
-    }
-
-    private void SetPanelHtml(string html, bool keepScrollPosition)
-    {
-        Point scroll = _panel.AutoScrollPosition;
-        try
-        {
-            _panel.Text = html;
-        }
-        catch (Exception ex)
-        {
-            Host.Log($"HTML Renderer could not draw {TrimForLog(_currentUrl)}: {ex.Message}");
-            _panel.Text = HtmlRendererDocumentBuilder.BuildMessagePage(_currentUrl, "This page could not be drawn", "HTML Renderer could not draw this page.", isSuccess: false).Html;
-        }
-
-        if (keepScrollPosition)
-        {
-            _panel.AutoScrollPosition = new Point(-scroll.X, -scroll.Y);
-        }
-    }
-
-    private void ScrollToFragment(string elementId)
-    {
-        if (string.IsNullOrWhiteSpace(elementId))
-        {
-            return;
-        }
-
-        try
-        {
-            _panel.ScrollToElement(elementId);
-        }
-        catch (Exception ex) when (ex is ArgumentException or InvalidOperationException or NullReferenceException)
-        {
-            // No such element.
-        }
-    }
-
-    private static void DisposeImages(Dictionary<string, Task<Image?>> images)
-    {
-        foreach (Task<Image?> task in images.Values)
-        {
-            _ = task.ContinueWith(
-                completed =>
-                {
-                    if (completed.Status == TaskStatus.RanToCompletion)
-                    {
-                        completed.Result?.Dispose();
-                    }
-                },
-                CancellationToken.None,
-                TaskContinuationOptions.ExecuteSynchronously,
-                TaskScheduler.Default);
-        }
-    }
-
-    private bool TryResolve(string reference, out string url)
-    {
-        url = string.Empty;
-        Uri? baseUri = _baseUri ?? (Uri.TryCreate(_currentUrl, UriKind.Absolute, out Uri? current) ? current : null);
-        if (!Uri.TryCreate(baseUri, reference.Trim(), out Uri? resolved) && !Uri.TryCreate(reference.Trim(), UriKind.Absolute, out resolved))
-        {
-            return false;
-        }
-
-        url = resolved.AbsoluteUri;
-        return true;
-    }
-
-    private void OnLinkClicked(object? sender, HtmlLinkClickedEventArgs e)
-    {
-        // Always handled here: HTML Renderer would otherwise start the link with the Windows shell, outside PhantomHaze.
-        e.Handled = true;
-        try
-        {
-            string link = (e.Link ?? string.Empty).Trim();
-            if (link.Length == 0)
-            {
-                return;
-            }
-
-            if (link.StartsWith('#'))
-            {
-                ScrollToFragment(Uri.UnescapeDataString(link[1..]));
-                return;
-            }
-
-            if (!TryResolve(link, out string url) || !IsWebAddress(url))
-            {
-                Host.Log($"HTMLRenderer did not open a link that is not a web address: {TrimForLog(link, 200)}");
-                return;
-            }
-
-            // A link to a part of the page that is already shown only scrolls.
-            if (Uri.TryCreate(url, UriKind.Absolute, out Uri? target) &&
-                Uri.TryCreate(_currentUrl, UriKind.Absolute, out Uri? shown) &&
-                target.Fragment.Length > 1 &&
-                string.Equals(target.GetLeftPart(UriPartial.Query), shown.GetLeftPart(UriPartial.Query), StringComparison.Ordinal))
-            {
-                ScrollToFragment(Uri.UnescapeDataString(target.Fragment[1..]));
-                return;
-            }
-
-            string targetName = e.Attributes is not null && e.Attributes.TryGetValue("target", out string? value) ? value.Trim() : string.Empty;
-            bool newWindow = targetName.Length > 0 &&
-                             !targetName.Equals("_self", StringComparison.OrdinalIgnoreCase) &&
-                             !targetName.Equals("_top", StringComparison.OrdinalIgnoreCase) &&
-                             !targetName.Equals("_parent", StringComparison.OrdinalIgnoreCase);
-            if (newWindow)
-            {
-                OnNewWindowRequested(url, isUserInitiated: true);
-            }
-            else
-            {
-                Navigate(url);
-            }
-        }
-        catch (Exception ex) when (ex is UriFormatException or ArgumentException or InvalidOperationException)
-        {
-            Host.Log($"HTMLRenderer could not open a link: {ex.Message}");
-        }
-    }
-
-    private void OnStylesheetLoad(object? sender, HtmlStylesheetLoadEventArgs e)
-    {
-        // Always answered here: HTML Renderer would otherwise download the stylesheet itself, on the UI thread and
-        // without web.block rules. Stylesheets were downloaded before the page was shown.
-        e.SetStyleSheet = _styleSheets.TryGetValue(e.Src ?? string.Empty, out string? css) && !string.IsNullOrWhiteSpace(css)
-            ? css
-            : "/* not loaded */";
-    }
-
-    private void OnImageLoad(object? sender, HtmlImageLoadEventArgs e)
-    {
-        string source = (e.Src ?? string.Empty).Trim();
-
-        // Inline images (data:image/...) are decoded by HTML Renderer itself; nothing is downloaded.
-        if (source.StartsWith("data:image", StringComparison.OrdinalIgnoreCase))
-        {
-            return;
-        }
-
-        // Everything else is loaded here: HTML Renderer would otherwise download images itself into the system temp
-        // folder, and read local files.
-        e.Handled = true;
-        if (source.Length == 0 || !TryResolve(source, out string url) || !IsWebAddress(url))
-        {
-            e.Callback();
-            return;
-        }
-
-        if (!_images.TryGetValue(url, out Task<Image?>? image))
-        {
-            image = DownloadImageAsync(url, _documentCancellation.Token);
-            _images[url] = image;
-        }
-
-        _ = DeliverImageAsync(image, e, _documentCancellation.Token);
-    }
-
-    private async Task<Image?> DownloadImageAsync(string url, CancellationToken cancellationToken)
-    {
-        ResourceResponse? response = await DownloadResourceAsync(url, HtmlRendererResources.MaximumImageBytes, cancellationToken);
-        if (response is null || cancellationToken.IsCancellationRequested)
-        {
-            return null;
-        }
-
-        return await Task.Run(() => HtmlRendererResources.DecodeImage(response.Body), CancellationToken.None);
-    }
-
-    private async Task DeliverImageAsync(Task<Image?> image, HtmlImageLoadEventArgs e, CancellationToken cancellationToken)
-    {
-        Image? result = null;
-        try
-        {
-            result = await image;
-        }
-        catch (Exception ex) when (ex is OperationCanceledException or HttpRequestException or IOException or InvalidOperationException)
-        {
-            // Shown without the image.
-        }
-
-        if (IsDisposed || cancellationToken.IsCancellationRequested)
-        {
-            return;
-        }
-
-        try
-        {
-            if (result is null)
-            {
-                e.Callback();
-            }
-            else
-            {
-                e.Callback(result);
-            }
-        }
-        catch (Exception ex) when (ex is ObjectDisposedException or InvalidOperationException or ArgumentException)
-        {
-            // The document was replaced while the image was loading.
-        }
-    }
-
-    public override async Task<int> FindAsync(string query)
-    {
-        if (_documentHtml is null || IsDisposed)
-        {
-            return 0;
-        }
-
-        int version = ++_findVersion;
-        string trimmed = query.Trim();
-        if (trimmed.Length > 0)
-        {
-            // Every change redraws the page, so wait until typing pauses.
-            await Task.Delay(150);
-            if (IsDisposed || version != _findVersion || _documentHtml is null)
-            {
-                return 0;
-            }
-        }
-
-        string html = _documentHtml;
-        (string highlighted, int count) = trimmed.Length == 0
-            ? (html, 0)
-            : await Task.Run(() => HtmlRendererDocumentBuilder.HighlightMatches(html, trimmed));
-        if (IsDisposed || version != _findVersion || !ReferenceEquals(html, _documentHtml))
-        {
-            return count;
-        }
-
-        if (count > 0)
-        {
-            SetPanelHtml(highlighted, keepScrollPosition: false);
-            _documentHighlighted = true;
-            ScrollToFragment(HtmlRendererDocumentBuilder.FirstMatchId);
-        }
-        else if (_documentHighlighted)
-        {
-            SetPanelHtml(html, keepScrollPosition: true);
-            _documentHighlighted = false;
-        }
-
-        return count;
-    }
-
-    protected override void Dispose(bool disposing)
-    {
-        if (!disposing)
-        {
-            return;
-        }
-
-        CancelLoad();
-        _documentCancellation.Cancel();
-        _panel.LinkClicked -= OnLinkClicked;
-        _panel.StylesheetLoad -= OnStylesheetLoad;
-        _panel.ImageLoad -= OnImageLoad;
-        try
-        {
-            _panel.Dispose();
-        }
-        catch (Exception ex) when (ex is InvalidOperationException or ObjectDisposedException)
-        {
-            // Best effort cleanup only.
-        }
-
-        DisposeImages(_images);
-        _images = new Dictionary<string, Task<Image?>>(StringComparer.Ordinal);
-        try
-        {
-            Directory.Delete(Path.Combine(Host.SessionDirectory, "htmlrenderer", _folderName), recursive: true);
-        }
-        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
-        {
-            // The session folder is deleted when PhantomHaze closes anyway.
-        }
-    }
-
-    private static void TryDeleteFile(string path)
-    {
-        try
-        {
-            File.Delete(path);
-        }
-        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
-        {
-            // curl overwrites it.
-        }
-    }
-}
-
 /// <summary>A page could not be opened with the HTMLRenderer protocol; the message is shown on the page.</summary>
 internal sealed class HtmlRendererLoadException : Exception
 {
@@ -900,52 +527,183 @@ internal sealed class HtmlRendererLoadException : Exception
     }
 }
 
-/// <summary>Downloads the images and stylesheets of HTMLRenderer pages.</summary>
+/// <summary>
+/// Downloads the parts of HTMLRenderer pages (scripts, stylesheets, images, the page's fetch/XMLHttpRequest requests),
+/// checking every address - redirects included - against web.block.
+/// </summary>
 internal static class HtmlRendererResources
 {
     public const int MaximumImageBytes = 8 * 1024 * 1024;
-    public const int MaximumStyleSheetBytes = 2 * 1024 * 1024;
+    public const int MaximumStyleSheetBytes = 4 * 1024 * 1024;
     private const long MaximumImagePixels = 40_000_000;
+    private const int MaximumRedirects = 5;
 
     private static readonly object Gate = new();
     private static readonly Dictionary<string, HttpClient> Clients = new(StringComparer.Ordinal);
 
-    public sealed record Response(Uri? RedirectTo, string ContentType, byte[]? Body);
+    // Headers a page script may not set (as in browsers), or that PhantomHaze sets itself.
+    private static readonly HashSet<string> ForbiddenRequestHeaders = new(StringComparer.OrdinalIgnoreCase)
+    {
+        "accept-charset", "accept-encoding", "access-control-request-headers", "access-control-request-method", "connection",
+        "content-length", "cookie", "cookie2", "date", "dnt", "expect", "host", "keep-alive", "origin", "referer", "te", "trailer",
+        "transfer-encoding", "upgrade", "user-agent", "via", "content-type", "authorization", "proxy-authorization",
+    };
 
-    /// <summary>One request, without following redirects (the caller checks each redirect against web.block first).</summary>
-    public static async Task<Response> GetAsync(Uri uri, string? proxyServer, int maximumBytes, CancellationToken cancellationToken)
+    public static async Task<PageResource?> FetchAsync(
+        PageResourceRequest request,
+        string? proxyServer,
+        CookieContainer cookies,
+        Func<string, bool> isBlocked,
+        CancellationToken cancellationToken)
     {
         HttpClient client = GetClient(proxyServer);
-        using HttpResponseMessage response = await client.GetAsync(uri, HttpCompletionOption.ResponseHeadersRead, cancellationToken).ConfigureAwait(false);
-        int status = (int)response.StatusCode;
-        if (status is 301 or 302 or 303 or 307 or 308)
+        string current = request.Url;
+        string method = request.Method;
+        byte[]? body = request.Body;
+        for (int redirect = 0; redirect <= MaximumRedirects; redirect++)
         {
-            return response.Headers.Location is Uri location
-                ? new Response(new Uri(uri, location), string.Empty, null)
-                : new Response(null, string.Empty, null);
-        }
-
-        string contentType = response.Content.Headers.ContentType?.ToString() ?? string.Empty;
-        if (!response.IsSuccessStatusCode || response.Content.Headers.ContentLength > maximumBytes)
-        {
-            return new Response(null, contentType, null);
-        }
-
-        await using Stream stream = await response.Content.ReadAsStreamAsync(cancellationToken).ConfigureAwait(false);
-        using var buffer = new MemoryStream();
-        byte[] chunk = new byte[81920];
-        int read;
-        while ((read = await stream.ReadAsync(chunk, cancellationToken).ConfigureAwait(false)) > 0)
-        {
-            if (buffer.Length + read > maximumBytes)
+            if (!Uri.TryCreate(current, UriKind.Absolute, out Uri? uri) || !WebProtocolPage.IsWebAddress(current) || isBlocked(uri.AbsoluteUri))
             {
-                return new Response(null, contentType, null);
+                return null;
             }
 
-            buffer.Write(chunk, 0, read);
+            using var message = new HttpRequestMessage(new HttpMethod(method), uri);
+            message.Headers.TryAddWithoutValidation("User-Agent", PageEngineDefaults.UserAgent);
+            message.Headers.TryAddWithoutValidation("Accept-Language", RenderedPageEnvironment.AcceptLanguage);
+            message.Headers.TryAddWithoutValidation("Accept", GetAcceptHeader(request.Kind));
+            if (!string.IsNullOrEmpty(request.Referrer))
+            {
+                message.Headers.TryAddWithoutValidation("Referer", request.Referrer);
+            }
+
+            if (request.SendCookies)
+            {
+                string cookieHeader = cookies.GetCookieHeader(uri);
+                if (cookieHeader.Length > 0)
+                {
+                    message.Headers.TryAddWithoutValidation("Cookie", cookieHeader);
+                }
+            }
+
+            if (request.Headers is not null)
+            {
+                foreach ((string name, string value) in request.Headers)
+                {
+                    if (IsAllowedRequestHeader(name, value))
+                    {
+                        message.Headers.TryAddWithoutValidation(name, value);
+                    }
+                }
+            }
+
+            if (body is not null)
+            {
+                message.Content = new ByteArrayContent(body);
+                message.Content.Headers.TryAddWithoutValidation("Content-Type", string.IsNullOrWhiteSpace(request.ContentType) ? "text/plain;charset=UTF-8" : request.ContentType);
+            }
+
+            using HttpResponseMessage response = await client.SendAsync(message, HttpCompletionOption.ResponseHeadersRead, cancellationToken).ConfigureAwait(false);
+            if (request.SendCookies && response.Headers.TryGetValues("Set-Cookie", out IEnumerable<string>? setCookies))
+            {
+                foreach (string setCookie in setCookies)
+                {
+                    try
+                    {
+                        cookies.SetCookies(uri, setCookie);
+                    }
+                    catch (CookieException)
+                    {
+                        // An invalid cookie is ignored, as browsers do.
+                    }
+                }
+            }
+
+            int status = (int)response.StatusCode;
+            if (status is 301 or 302 or 303 or 307 or 308 && response.Headers.Location is Uri location)
+            {
+                var next = new Uri(uri, location);
+
+                // Like browsers, never follow an https -> http redirect for a part of a page.
+                if (uri.Scheme == Uri.UriSchemeHttps && next.Scheme != Uri.UriSchemeHttps)
+                {
+                    return null;
+                }
+
+                if (status is 301 or 302 or 303 && method != "GET" && method != "HEAD")
+                {
+                    method = "GET";
+                    body = null;
+                }
+
+                current = next.AbsoluteUri;
+                continue;
+            }
+
+            string contentType = response.Content.Headers.ContentType?.ToString() ?? string.Empty;
+            if (response.Content.Headers.ContentLength > request.MaximumBytes)
+            {
+                return null;
+            }
+
+            byte[] content;
+            await using (Stream stream = await response.Content.ReadAsStreamAsync(cancellationToken).ConfigureAwait(false))
+            {
+                using var buffer = new MemoryStream();
+                byte[] chunk = new byte[81920];
+                int read;
+                while ((read = await stream.ReadAsync(chunk, cancellationToken).ConfigureAwait(false)) > 0)
+                {
+                    if (buffer.Length + read > request.MaximumBytes)
+                    {
+                        return null;
+                    }
+
+                    buffer.Write(chunk, 0, read);
+                }
+
+                content = buffer.ToArray();
+            }
+
+            var headers = new List<KeyValuePair<string, string>>();
+            if (request.Kind == PageResourceKind.Data)
+            {
+                foreach (KeyValuePair<string, IEnumerable<string>> header in response.Headers.Concat(response.Content.Headers))
+                {
+                    if (!header.Key.Equals("Set-Cookie", StringComparison.OrdinalIgnoreCase))
+                    {
+                        headers.Add(new KeyValuePair<string, string>(header.Key, string.Join(", ", header.Value)));
+                    }
+                }
+            }
+
+            return new PageResource(uri.AbsoluteUri, status, contentType, content)
+            {
+                StatusText = response.ReasonPhrase ?? string.Empty,
+                Headers = headers,
+            };
         }
 
-        return new Response(null, contentType, buffer.ToArray());
+        return null;
+    }
+
+    /// <summary>The Accept header for a part of a page.</summary>
+    public static string GetAcceptHeader(PageResourceKind kind) => kind switch
+    {
+        PageResourceKind.Image => PageEngineDefaults.AcceptImages,
+        PageResourceKind.StyleSheet => "text/css,*/*;q=0.1",
+        _ => "*/*",
+    };
+
+    /// <summary>False for headers a page script may not set (as in browsers), or that PhantomHaze sets itself.</summary>
+    public static bool IsAllowedRequestHeader(string name, string value)
+    {
+        return !ForbiddenRequestHeaders.Contains(name) &&
+               !name.StartsWith("sec-", StringComparison.OrdinalIgnoreCase) &&
+               !name.StartsWith("proxy-", StringComparison.OrdinalIgnoreCase) &&
+               name.Length is > 0 and < 100 &&
+               value.Length < 8000 &&
+               name.All(c => c is > ' ' and < (char)127 and not ':') &&
+               !value.Contains('\r') && !value.Contains('\n');
     }
 
     /// <summary>A copy of the image as a plain bitmap, or null for files that are not (supported) images or are huge.</summary>
@@ -992,10 +750,9 @@ internal static class HtmlRendererResources
 
             var client = new HttpClient(handler)
             {
-                Timeout = TimeSpan.FromSeconds(20),
-                MaxResponseContentBufferSize = MaximumImageBytes,
+                Timeout = TimeSpan.FromSeconds(25),
+                MaxResponseContentBufferSize = 16 * 1024 * 1024,
             };
-            client.DefaultRequestHeaders.UserAgent.Add(new ProductInfoHeaderValue("PhantomHaze", AppVersionInfo.Tag?.VersionNumber ?? "1"));
             Clients[key] = client;
             return client;
         }
@@ -1055,17 +812,6 @@ internal static class HtmlRendererDocumentBuilder
 
     // Void elements that would load or embed something; dropped.
     private static readonly HashSet<string> RemovedVoidElements = new(StringComparer.Ordinal) { "embed", "frame", "base", "param", "source", "track" };
-
-    private static readonly Regex MetaCharsetRegex = new(
-        @"<meta[^>]{0,400}?charset\s*=\s*[""']?\s*([A-Za-z0-9_\-:.]{1,40})",
-        RegexOptions.IgnoreCase | RegexOptions.CultureInvariant,
-        TimeSpan.FromMilliseconds(250));
-
-    static HtmlRendererDocumentBuilder()
-    {
-        // windows-1252, Shift_JIS, GB2312 and the other legacy page encodings.
-        Encoding.RegisterProvider(CodePagesEncodingProvider.Instance);
-    }
 
     public static HtmlRendererDocument Build(string pageUrl, int statusCode, string contentType, byte[] body, IReadOnlyList<string> extensionStyles)
     {
@@ -1214,71 +960,7 @@ internal static class HtmlRendererDocumentBuilder
     }
 
     /// <summary>Decodes a page or stylesheet: byte order mark, then the Content-Type charset, then &lt;meta charset&gt;, then UTF-8.</summary>
-    public static string DecodeText(byte[] body, string contentType, bool isHtml)
-    {
-        if (body.Length >= 3 && body[0] == 0xEF && body[1] == 0xBB && body[2] == 0xBF)
-        {
-            return Encoding.UTF8.GetString(body, 3, body.Length - 3);
-        }
-
-        if (body.Length >= 2 && body[0] == 0xFF && body[1] == 0xFE)
-        {
-            return Encoding.Unicode.GetString(body, 2, body.Length - 2);
-        }
-
-        if (body.Length >= 2 && body[0] == 0xFE && body[1] == 0xFF)
-        {
-            return Encoding.BigEndianUnicode.GetString(body, 2, body.Length - 2);
-        }
-
-        string? charset = null;
-        foreach (string part in contentType.Split(';'))
-        {
-            string trimmed = part.Trim();
-            if (trimmed.StartsWith("charset=", StringComparison.OrdinalIgnoreCase))
-            {
-                charset = trimmed["charset=".Length..].Trim().Trim('"', '\'');
-            }
-        }
-
-        if (charset is null && isHtml)
-        {
-            string head = Encoding.Latin1.GetString(body, 0, Math.Min(body.Length, 4096));
-            try
-            {
-                Match match = MetaCharsetRegex.Match(head);
-                if (match.Success)
-                {
-                    charset = match.Groups[1].Value;
-                }
-            }
-            catch (RegexMatchTimeoutException)
-            {
-                // Decoded as UTF-8.
-            }
-        }
-
-        Encoding encoding = Encoding.UTF8;
-        if (!string.IsNullOrWhiteSpace(charset))
-        {
-            try
-            {
-                encoding = Encoding.GetEncoding(charset);
-            }
-            catch (ArgumentException)
-            {
-                // Unknown name: UTF-8.
-            }
-        }
-
-        // A page that declares UTF-16 in a meta tag is really ASCII-compatible (browsers treat it as UTF-8).
-        if (encoding is UnicodeEncoding)
-        {
-            encoding = Encoding.UTF8;
-        }
-
-        return encoding.GetString(body);
-    }
+    public static string DecodeText(byte[] body, string contentType, bool isHtml) => PageText.Decode(body, contentType, isHtml);
 
     /// <summary>
     /// Makes a page safe for HTML Renderer: scripts and unsupported embedded content are removed, every tag is written

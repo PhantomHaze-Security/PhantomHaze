@@ -38,6 +38,8 @@ public partial class MainForm
 
         public IReadOnlyList<string> GetExtensionStyleSheets(string url) => _form.GetExtensionStyleSheets(url);
 
+        public WebRequestRules GetRequestRules() => _form.BuildRequestRules();
+
         public Task<CoreWebView2Environment> GetWebView2EnvironmentAsync(string? proxyServer) => _form.GetWebView2EnvironmentAsync(proxyServer);
 
         public Task OnWebView2CoreCreatedAsync(WebView2ProtocolPage page, CoreWebView2 core) => _form.OnWebView2CoreCreatedAsync(page, core);
@@ -71,18 +73,28 @@ public partial class MainForm
     /// <summary>The built-in protocols followed by the protocols enabled extensions add (protocol.add).</summary>
     private List<WebProtocol> GetAvailableWebProtocols()
     {
-        var protocols = new List<WebProtocol>(WebProtocolCatalog.BuiltIn);
+        BuiltInProtocolSettings settings = GetBuiltInProtocolSettings(_settings);
+        var protocols = new List<WebProtocol>(WebProtocolCatalog.CreateBuiltIn(settings));
         foreach (LoadedExtension extension in GetEnabledExtensions())
         {
             foreach (PhantomExtensionProtocolDefinition definition in extension.Definition.Protocols)
             {
                 // Setting values in the address are percent-encoded, so they can never change which server is used.
                 string template = ResolveExtensionPlaceholders(definition.AddressTemplate, extension, PhantomExtensionPlaceholderContext.UrlComponent);
-                protocols.Add(new ExtensionWebProtocol(extension.Definition.Id, extension.Definition.Name, definition, template));
+                protocols.Add(new ExtensionWebProtocol(extension.Definition.Id, extension.Definition.Name, definition, template, settings));
             }
         }
 
         return protocols;
+    }
+
+    /// <summary>What the built-in protocols are configured with: the JavaScript setting and the HazeGate connection.</summary>
+    private static BuiltInProtocolSettings GetBuiltInProtocolSettings(AppSettings settings)
+    {
+        return new BuiltInProtocolSettings(
+            settings.RenderedPageScriptsEnabled,
+            settings.HazeGateAddress,
+            HazeGateKeyStore.Unprotect(settings.HazeGateKey));
     }
 
     /// <summary>
@@ -435,6 +447,42 @@ public partial class MainForm
     }
 
     // ---- Extension styles for protocols that apply them themselves ----------------------------------------------
+
+    /// <summary>A snapshot of the enabled extensions' web.block and web.css rules, usable from any thread.</summary>
+    private WebRequestRules BuildRequestRules()
+    {
+        if (!_settings.ExtensionsEnabled)
+        {
+            return WebRequestRules.None;
+        }
+
+        List<LoadedExtension> extensions = GetEnabledExtensions().ToList();
+        var blocks = new List<(string Pattern, string BlockedBy)>();
+        foreach (LoadedExtension extension in extensions)
+        {
+            foreach (PhantomExtensionWebBlockDefinition rule in extension.Definition.WebBlocks)
+            {
+                blocks.Add((rule.MatchPattern, $"the extension {NormalizeForLog(extension.Definition.Name)} ({rule.Id})"));
+            }
+        }
+
+        var styles = new List<(string Pattern, string Css)>();
+        foreach (PhantomExtensionScriptTiming timing in new[] { PhantomExtensionScriptTiming.DocumentStart, PhantomExtensionScriptTiming.DocumentEnd })
+        {
+            foreach (LoadedExtension extension in extensions)
+            {
+                foreach (PhantomExtensionWebScriptDefinition script in extension.Definition.WebScripts)
+                {
+                    if (script.IsCss && script.Timing == timing)
+                    {
+                        styles.Add((script.MatchPattern, ResolveExtensionPlaceholders(script.Content, extension)));
+                    }
+                }
+            }
+        }
+
+        return new WebRequestRules(blocks, styles);
+    }
 
     /// <summary>The CSS of enabled extensions' web.css rules matching <paramref name="url"/> (document-start rules first).</summary>
     private IReadOnlyList<string> GetExtensionStyleSheets(string url)
