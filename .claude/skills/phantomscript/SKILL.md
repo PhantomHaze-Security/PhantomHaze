@@ -275,8 +275,12 @@ Which rules apply depends on the [Web View protocol](#web-view-protocols) the us
 | Protocol      | `web.script` | `web.css` | `web.block`                                                        |
 | :------------ | :----------: | :-------: | :----------------------------------------------------------------- |
 | WebView2      | ✓            | ✓         | Everything listed above.                                           |
-| HTMLRenderer  |              | ✓         | Pages, redirects, images and stylesheets (pages never run scripts). |
+| HTMLRenderer  | ✓ (when scripts are on) | ✓ | Pages, redirects, images, stylesheets, scripts and the page's `fetch`/`XMLHttpRequest` requests. |
+| HazeGate      | ✓ (when scripts are on) | ✓ | The same as HTMLRenderer (checked before the HazeGate function is asked for anything). |
 | Legacy        |              |           | Pages and frames (not the images and scripts inside them).         |
+
+HTMLRenderer and HazeGate pages run their scripts with Jint (a JavaScript engine written in C#) unless the user turns
+them off in **Settings -> General**; `web.script` rules then run there too, against the same document.
 
 An extension protocol (`protocol.add`) works like the engine it uses.
 

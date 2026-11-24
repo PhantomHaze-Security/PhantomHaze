@@ -423,8 +423,9 @@ public partial class MainForm : Form
     private readonly Label _findCountLabel = new();
     private readonly Button _findCloseButton = new();
     private readonly TextBox _logBox = new();
-    // Redirects are followed manually so every hop can be checked against extension web.block rules.
-    private readonly HttpClient _faviconHttpClient = new(new HttpClientHandler { AllowAutoRedirect = false });
+    // Redirects are followed manually so every hop can be checked against extension web.block rules. No cookies: a
+    // shared cookie jar would let sites recognise the user across tabs through their icons.
+    private readonly HttpClient _faviconHttpClient = new(new HttpClientHandler { AllowAutoRedirect = false, UseCookies = false });
     private readonly Font _tabCloseFontRegular = new("Segoe UI", 8, FontStyle.Bold);
     private readonly Font _tabCloseFontCompact = new("Segoe UI", 6.5f, FontStyle.Bold);
     private readonly Font _menuButtonFontRegular = new("Segoe UI", 10, FontStyle.Regular);
@@ -4187,7 +4188,9 @@ public partial class MainForm : Form
         }
 
         string candidate = rawUrl.Trim();
-        if (!candidate.Contains("://", StringComparison.Ordinal))
+        // Only a scheme at the very start counts: "example.com/?next=https://other.example" has none (it used to be
+        // taken for one, so the address could not be opened).
+        if (!StartsWithUrlScheme(candidate))
         {
             candidate = $"https://{candidate}";
         }
@@ -4207,6 +4210,27 @@ public partial class MainForm : Form
         return true;
     }
 
+    /// <summary>True when <paramref name="value"/> starts with "scheme://" (a letter, then letters, digits, '+', '-' or '.').</summary>
+    private static bool StartsWithUrlScheme(string value)
+    {
+        int separator = value.IndexOf("://", StringComparison.Ordinal);
+        if (separator <= 0 || !char.IsAsciiLetter(value[0]))
+        {
+            return false;
+        }
+
+        for (int i = 1; i < separator; i++)
+        {
+            char c = value[i];
+            if (!char.IsAsciiLetterOrDigit(c) && c is not ('+' or '-' or '.'))
+            {
+                return false;
+            }
+        }
+
+        return true;
+    }
+
     private bool TryResolveNavigationTarget(string rawInput, out string targetUrl, out bool isSearchQuery)
     {
         targetUrl = string.Empty;
@@ -4221,7 +4245,14 @@ public partial class MainForm : Form
         bool hasExplicitHttpScheme = candidate.StartsWith("http://", StringComparison.OrdinalIgnoreCase) ||
                                      candidate.StartsWith("https://", StringComparison.OrdinalIgnoreCase);
 
-        if (hasExplicitHttpScheme || LooksLikeLocalAddress(candidate) || LooksLikeDirectAddress(candidate))
+        if (!hasExplicitHttpScheme && LooksLikeLocalAddress(candidate))
+        {
+            // Servers on this PC or the local network ("localhost:3000") rarely have https; typed without a scheme they
+            // are opened with http, as browsers do.
+            return TryNormalizeUrl("http://" + candidate, out targetUrl);
+        }
+
+        if (hasExplicitHttpScheme || LooksLikeDirectAddress(candidate))
         {
             return TryNormalizeUrl(candidate, out targetUrl);
         }

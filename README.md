@@ -25,7 +25,7 @@
 
 ###  Stealth Capture Protection
 Leverages native Windows `WDA_EXCLUDEFROMCAPTURE` API to block screen recorders, screenshot utilities, and desktop-sharing apps from capturing your window.
-The protection banner shows the real protection state at a glance: green while you are protected, red while you are not. In Web View it is a card beside the address bar with an **ON**/**OFF** switch; in the Logs view it runs across the window with the **Disable Protection** button below it. Turn protection off for a while (from 5 minutes to 1 day, or until you turn it back on) and a live countdown shows when it will automatically resume.
+The protection banner shows the real protection state at a glance: green while you are protected, red while you are not. In Web View it is a card beside the address bar with an **ON**/**OFF** switch; in the Logs view it runs across the window with the **Disable Protection** button below it. Turn protection off for a while (from 5 minutes to 1 day, or until you turn it back on) and a live countdown shows when it will automatically resume. With the **Simple** top bar it becomes a small **ON**/**OFF** switch next to Settings, and with the **Compact** top bar a green or red dot on the drop-down button (see [Top bar styles](#-top-bar-styles)).
 
 ###  True Ephemeral Privacy
 * **Zero Session Footprint:** Web history and session cookies are stored strictly in memory and wiped automatically the moment you close the app.
@@ -34,7 +34,8 @@ The protection banner shows the real protection state at a glance: green while y
 * **Logs You Control:** Logs (including the addresses of pages you open) are kept in `%LOCALAPPDATA%\PhantomHaze\logs`, so the Master Log covers everything since installation. Cookie names and values are never logged, and **Settings -> About -> Delete all logs** removes them at any time.
 
 ###  Modern Browser Suite
-* **Tabbed Navigation:** Clean tab interface with live site favicons and title updates, plus Back (`←`), Forward (`→`), Go (`⏎`), Refresh (`⟳`) and History (`🕘`) buttons. `Alt+←` and `Alt+→` go back and forward.
+* **Tabbed Navigation:** Clean tab interface with live site favicons and title updates, plus Back (`←`), Forward (`→`), Go (`⏎`), Refresh (`⟳`) and History (`🕘`) buttons.
+* **Keyboard Shortcuts:** `Alt+←` / `Alt+→` (back and forward), `Ctrl+L`, `Alt+D` or `F6` (address box), `Ctrl+T` (new tab, or double-click next to the tabs), `Ctrl+W` / `Ctrl+F4` (close the tab), `F5` / `Ctrl+R` (reload), `Ctrl+H` (history and favourites) and `Ctrl+F` (find in page).
 * **Background Tabs & Resource Saver:** Tabs you are not looking at keep running for the time you choose in **Settings -> General -> Render background tabs for** (1 minute by default, from 10 seconds to forever), then pause until you open them again; a paused tab shows 💤 instead of its icon. With more than 20 tabs open, the resource saver pauses them after 10 seconds instead, so PhantomHaze stays responsive (it can be turned off from its banner or in Settings).
 * **In-Page Search (`Ctrl+F`):** Fast search panel with real-time match highlighting.
 * **Web View Protocols:** Choose how Web View loads pages in **Settings -> General -> Web View protocol** (see [Web View protocols](#-web-view-protocols)).
@@ -46,6 +47,7 @@ The protection banner shows the real protection state at a glance: green while y
 * **Text Colour:** Theme default, White, Black, any custom colour - or **Rainbow**, which changes the text to a random colour every half second.
 * **Google Fonts:** Paste a link from [Google Fonts](https://fonts.google.com) to use that font throughout the app. It is downloaded once and cached.
 * **Live Clock:** The menu bar shows the time from your computer's clock, seconds included.
+* **Top Bar Styles:** Comfortable, Comfy, Compact or Simple in **Settings -> Appearance -> Top bar** (see [Top bar styles](#-top-bar-styles)).
 
 ###  Backup, Sync & Diagnostics
 * **Export / Import (`.phstg`):** Settings -> Backup saves your settings and installed extensions (with their settings) to a `.phstg` file. Import it into any PhantomHaze to sync it straight away; if both have extensions, choose to **Skip**, **Merge** or **Overwrite**.
@@ -74,7 +76,8 @@ open tabs are reopened with the new protocol when you click **Save**.
 | Protocol | How it works | Good for |
 | :--- | :--- | :--- |
 | **WebView2** *(default)* | Microsoft Edge WebView2 (Chromium). | Everything: modern sites, JavaScript, extension scripts and styles, zoom, find in page and saved cookies. |
-| **HTMLRenderer** | Downloads each page's HTML with the `curl.exe` built into Windows (`curl -o index.html https://example.com/`) and draws it with [HTML Renderer](https://github.com/ArthurHub/HTML-Renderer). WebView2 is not used at all. | Light, script-free reading. No JavaScript, HTML 4 and CSS 2 only, so modern sites look plain. Images and stylesheets are downloaded by PhantomHaze and checked against extensions' `web.block` rules. |
+| **HTMLRenderer** | Downloads each page with the `curl.exe` built into Windows and draws it with [HTML Renderer](https://github.com/ArthurHub/HTML-Renderer), without WebView2. Pages are parsed like a browser parses them ([AngleSharp](https://anglesharp.github.io/)) and run their JavaScript with [Jint](https://github.com/sebastienros/jint), a JavaScript engine written in C#; PhantomHaze works out modern CSS itself (variables, media queries, `calc()`, modern colours, flex and grid layouts) and turns it into what HTML Renderer can draw. Form fields are real text boxes, lists and checkboxes. | A lighter, WebView2-free browser. jQuery, React and Vue pages work; very complex web apps may look simpler or be slow. Scripts can be turned off in **Settings -> General**. Every download is checked against extensions' `web.block` rules. |
+| **HazeGate** | Like HTMLRenderer, but nothing is downloaded by your PC: each address goes to *your* HazeGate Azure function, which downloads the page with its stylesheets and scripts and sends everything back. Images and the page's own requests go through it too. | Hiding your IP address and network from the sites you visit. Set it up once (see [HazeGate](#hazegate-cloud-web-view-protocol)). |
 | **Legacy** | The Internet Explorer engine built into Windows (the legacy WebBrowser control). WebView2 is not used. | Old intranet sites and pages made for Internet Explorer. Its dialogs, menus and pop-up windows are suppressed or opened as protected tabs, and its cookies only last until PhantomHaze closes. |
 | **Extension protocols** | Added by extensions with `protocol.add`: one of the engines above, with an optional gateway address and proxy server. | Loading pages through a server or proxy. They appear as *Name (from Extension)*. |
 
@@ -82,6 +85,38 @@ If the chosen protocol cannot be used (for example its extension was turned off)
 in the log. Whatever the protocol, the PhantomHaze window stays protected from screen capture.
 
 Developers: see [Adding a Web View protocol](#-adding-a-web-view-protocol-developers) to build another one.
+
+### HazeGate (cloud Web View protocol)
+
+HazeGate pages are downloaded by an [Azure Function](https://learn.microsoft.com/azure/azure-functions/) that you own,
+from the [azure-cloud-webview-protocol](https://github.com/PhantomHaze-Security/azure-cloud-webview-protocol)
+repository, and drawn by PhantomHaze's HTMLRenderer engine. The sites you visit only ever see Azure.
+
+1. Deploy the function (pushing to that repository's `main` branch deploys it with GitHub Actions; see its README).
+2. In [Azure Portal](https://portal.azure.com), open your Function App, then **Functions -> hazegate -> Get function
+   URL**, and copy the **default (Function key)** URL.
+3. In PhantomHaze, paste it into **Settings -> General -> HazeGate function**, click **Test**, choose **HazeGate** as
+   the **Web View protocol** and click **Save**.
+
+The function key (the `?code=` part) is stored encrypted for your Windows account (DPAPI), sent in a header rather than
+in addresses, and never included in settings exports. HazeGate keeps cookies on your PC (in memory, like the rest of a
+session) and only sends a site the cookies that belong to it; the function itself keeps nothing.
+
+---
+
+## 🧭 Top Bar Styles
+
+Choose how the top bar looks in **Settings -> Appearance -> Top bar**:
+
+| Style | What it looks like |
+| :--- | :--- |
+| **Comfortable** *(default)* | The full top bar. |
+| **Comfy** | Every control, closer together and a little smaller, to leave more room for pages. |
+| **Compact** | Only **Logs**, **Web** and extension buttons. The **▾** button at the right shows the rest - the protection banner or strip, the Web View address and tab rows, the clock and Settings - and its dot is green while protection is on and red while it is off. |
+| **Simple** | A small **ON**/**OFF** protection switch next to Settings (click it to choose how long to turn protection off), and in Web View only Back, Forward, the address box and small tabs, together in one row. Use `Ctrl+T` (or double-click next to the tabs) for a new tab, `F5` to reload and `Ctrl+H` for history. |
+
+Extensions that hide built-in controls with `ui.element` keep working with every style: a control is shown only when
+neither the style nor an extension hides it.
 
 ---
 
@@ -159,7 +194,10 @@ changes anywhere else. The base classes, and the rules below, are in [`WebProtoc
 Use the existing protocols as examples:
 
 * [`WebView2Protocol.cs`](./WebView2Protocol.cs): wraps a browser control and translates its events.
-* [`HtmlRendererProtocol.cs`](./HtmlRendererProtocol.cs): downloads pages itself and draws them.
+* [`HtmlRendererProtocol.cs`](./HtmlRendererProtocol.cs) and [`HazeGateProtocol.cs`](./HazeGateProtocol.cs): download
+  pages themselves (an `IRenderedPageTransport`) and leave opening, scripting and drawing them to
+  [`RenderedProtocolPage.cs`](./RenderedProtocolPage.cs) and the page engine (`HtmlRendererEngine.cs`,
+  `HtmlRendererCss.cs`, `HtmlRendererMarkup.cs`).
 * [`LegacyProtocol.cs`](./LegacyProtocol.cs): an engine that runs inside PhantomHaze and can open windows of its own.
 
 ### 1. Describe the protocol (`WebProtocol`)
@@ -177,6 +215,9 @@ Create a new file, for example `MyProtocol.cs`, with a class that derives from `
 | `Signature` *(optional)* | Change it whenever pages would behave differently; open tabs are reopened when it changes. |
 | `LoadsPagesDirectly` *(optional)* | `false` if pages go through another server; PhantomHaze then never contacts the sites itself (for example for tab icons). |
 
+A protocol that depends on settings (like HazeGate's address, or whether HTMLRenderer runs scripts) gets them through
+its constructor from `BuiltInProtocolSettings`, and includes them in its `Signature`.
+
 ### 2. Show the pages (`WebProtocolPage`)
 
 Derive a class from `WebProtocolPage`. Create its control in the constructor (with `Dock = DockStyle.Fill` and
@@ -188,7 +229,8 @@ Derive a class from `WebProtocolPage`. Create its control in the constructor (wi
 * Report what happens by calling `OnNavigationStarting`, `OnNavigationCompleted`, `OnSourceChanged`, `OnTitleChanged`,
   `OnHistoryChanged`, `OnNewWindowRequested` and `OnFindRequested` (`Ctrl+F` pressed inside the page).
 * Optional, to match `Features`: `SetZoom`, `FindAsync`, `ExecuteScriptAsync`, `GetDeclaredFaviconUrlAsync` and
-  `DocumentUrl`.
+  `DocumentUrl`. A page that downloads its parts itself can also download its tab icon the same way
+  (`DownloadsOwnFavicon` and `DownloadFaviconAsync`).
 * Optional: if the engine can pause a page, return `true` from `CanPauseRendering`. `SetRenderingActive(false)` is then
   called when a tab has been in the background for the time chosen in Settings (or by the resource saver), and
   `SetRenderingActive(true)` when it should continue; paused tabs show 💤.
@@ -196,7 +238,7 @@ Derive a class from `WebProtocolPage`. Create its control in the constructor (wi
 
 ### 3. Register it
 
-Add an instance to `WebProtocolCatalog.BuiltIn` in [`WebProtocols.cs`](./WebProtocols.cs). It then appears in
+Add an instance to `WebProtocolCatalog.CreateBuiltIn` in [`WebProtocols.cs`](./WebProtocols.cs). It then appears in
 **Settings -> General -> Web View protocol** in that position.
 
 To let extensions use it as an engine for `protocol.add`, also add a value to `PhantomExtensionProtocolEngine` and its
@@ -215,7 +257,8 @@ These keep PhantomHaze protected from screen capture and private, whatever the p
   `Dispose`, and every window it opens is protected as it appears.
 * **Never start other programs** or let the engine open files or links with Windows.
 * **Only load `http://` and `https://` addresses,** and check every request you make - pages, frames, redirects, images,
-  stylesheets - with `Host.IsBlocked(url, out string blockedBy)`, so extensions' `web.block` rules apply.
+  stylesheets - with `Host.IsBlocked(url, out string blockedBy)`, so extensions' `web.block` rules apply. Requests made
+  on other threads use a snapshot from `Host.GetRequestRules()` (take a new one for every page load).
 * **Keep temporary files in `Host.SessionDirectory`.** It is private to this run and deleted when PhantomHaze closes.
 * **Work on the UI thread.** Pages are created, used and disposed there, and must raise their events there; do slow work
   in background tasks.
