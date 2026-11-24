@@ -51,5 +51,3 @@ These Terms end when your authorised access period expires or your licence is re
 This Agreement is governed by the laws of the NSW Government of Australia, subject to mandatory rights that apply to you.
 
 Contact: support@tyco.it.com
-
-> Template only • Replace bracketed fields and obtain legal advice before release.
