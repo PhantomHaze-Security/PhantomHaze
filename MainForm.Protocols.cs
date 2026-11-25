@@ -88,13 +88,10 @@ public partial class MainForm
         return protocols;
     }
 
-    /// <summary>What the built-in protocols are configured with: the JavaScript setting and the HazeGate connection.</summary>
+    /// <summary>What the built-in protocols are configured with (HazeGate's connection is built in: HazeGateConnection).</summary>
     private static BuiltInProtocolSettings GetBuiltInProtocolSettings(AppSettings settings)
     {
-        return new BuiltInProtocolSettings(
-            settings.RenderedPageScriptsEnabled,
-            settings.HazeGateAddress,
-            HazeGateKeyStore.Unprotect(settings.HazeGateKey));
+        return new BuiltInProtocolSettings(settings.RenderedPageScriptsEnabled);
     }
 
     /// <summary>

@@ -77,7 +77,7 @@ open tabs are reopened with the new protocol when you click **Save**.
 | :--- | :--- | :--- |
 | **WebView2** *(default)* | Microsoft Edge WebView2 (Chromium). | Everything: modern sites, JavaScript, extension scripts and styles, zoom, find in page and saved cookies. |
 | **HTMLRenderer** | Downloads each page with the `curl.exe` built into Windows and draws it with [HTML Renderer](https://github.com/ArthurHub/HTML-Renderer), without WebView2. Pages are parsed like a browser parses them ([AngleSharp](https://anglesharp.github.io/)) and run their JavaScript with [Jint](https://github.com/sebastienros/jint), a JavaScript engine written in C#; PhantomHaze works out modern CSS itself (variables, media queries, `calc()`, modern colours, flex and grid layouts) and turns it into what HTML Renderer can draw. Form fields are real text boxes, lists and checkboxes. | A lighter, WebView2-free browser. jQuery, React and Vue pages work; very complex web apps may look simpler or be slow. Scripts can be turned off in **Settings -> General**. Every download is checked against extensions' `web.block` rules. |
-| **HazeGate** | Like HTMLRenderer, but nothing is downloaded by your PC: each address goes to *your* HazeGate Azure function, which downloads the page with its stylesheets and scripts and sends everything back. Images and the page's own requests go through it too. | Hiding your IP address and network from the sites you visit. Set it up once (see [HazeGate](#hazegate-cloud-web-view-protocol)). |
+| **HazeGate** | Like HTMLRenderer, but nothing is downloaded by your PC: each address goes to the HazeGate Azure function, which downloads the page with its stylesheets and scripts and sends everything back. Images and the page's own requests go through it too. | Hiding your IP address and network from the sites you visit. Nothing to set up (see [HazeGate](#hazegate-cloud-web-view-protocol)). |
 | **Legacy** | The Internet Explorer engine built into Windows (the legacy WebBrowser control). WebView2 is not used. | Old intranet sites and pages made for Internet Explorer. Its dialogs, menus and pop-up windows are suppressed or opened as protected tabs, and its cookies only last until PhantomHaze closes. |
 | **Extension protocols** | Added by extensions with `protocol.add`: one of the engines above, with an optional gateway address and proxy server. | Loading pages through a server or proxy. They appear as *Name (from Extension)*. |
 
@@ -88,19 +88,16 @@ Developers: see [Adding a Web View protocol](#-adding-a-web-view-protocol-develo
 
 ### HazeGate (cloud Web View protocol)
 
-HazeGate pages are downloaded by an [Azure Function](https://learn.microsoft.com/azure/azure-functions/) that you own,
-from the [azure-cloud-webview-protocol](https://github.com/PhantomHaze-Security/azure-cloud-webview-protocol)
-repository, and drawn by PhantomHaze's HTMLRenderer engine. The sites you visit only ever see Azure.
+HazeGate pages are downloaded by an [Azure Function](https://learn.microsoft.com/azure/azure-functions/) from the
+[azure-cloud-webview-protocol](https://github.com/PhantomHaze-Security/azure-cloud-webview-protocol) repository and
+drawn by PhantomHaze's HTMLRenderer engine, so the sites you visit only ever see Azure. Just choose **HazeGate** in
+**Settings -> General -> Web View protocol**.
 
-1. Deploy the function (pushing to that repository's `main` branch deploys it with GitHub Actions; see its README).
-2. In [Azure Portal](https://portal.azure.com), open your Function App, then **Functions -> hazegate -> Get function
-   URL**, and copy the **default (Function key)** URL.
-3. In PhantomHaze, paste it into **Settings -> General -> HazeGate function**, click **Test**, choose **HazeGate** as
-   the **Web View protocol** and click **Save**.
-
-The function key (the `?code=` part) is stored encrypted for your Windows account (DPAPI), sent in a header rather than
-in addresses, and never included in settings exports. HazeGate keeps cookies on your PC (in memory, like the rest of a
-session) and only sends a site the cookies that belong to it; the function itself keeps nothing.
+In this beta, the function's address and key are built into PhantomHaze (`HazeGateConnection` in
+[`HazeGateProtocol.cs`](./HazeGateProtocol.cs)); they are not shown or changeable in Settings. To point a build at
+another function, or after renewing the key in Azure Portal (**Functions -> hazegate -> Function Keys**), change them
+there and rebuild. HazeGate keeps cookies on your PC (in memory, like the rest of a session) and only sends a site the
+cookies that belong to it; the function itself keeps nothing.
 
 ---
 
@@ -215,7 +212,7 @@ Create a new file, for example `MyProtocol.cs`, with a class that derives from `
 | `Signature` *(optional)* | Change it whenever pages would behave differently; open tabs are reopened when it changes. |
 | `LoadsPagesDirectly` *(optional)* | `false` if pages go through another server; PhantomHaze then never contacts the sites itself (for example for tab icons). |
 
-A protocol that depends on settings (like HazeGate's address, or whether HTMLRenderer runs scripts) gets them through
+A protocol that depends on settings (like whether HTMLRenderer and HazeGate run scripts) gets them through
 its constructor from `BuiltInProtocolSettings`, and includes them in its `Signature`.
 
 ### 2. Show the pages (`WebProtocolPage`)

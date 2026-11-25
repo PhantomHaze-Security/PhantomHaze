@@ -1,7 +1,5 @@
-using System.Globalization;
 using System.Net;
 using System.Net.Http.Headers;
-using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
 
@@ -14,20 +12,26 @@ namespace PhantomHaze;
 // through the function too, so the sites shown only ever see Azure. The function's protocol is described in that
 // repository's README ("The HazeGate protocol").
 
+/// <summary>
+/// The HazeGate function this build uses. Beta builds have it built in (it cannot be seen or changed in Settings), so
+/// testers can use HazeGate straight away. Anyone with this build can find the key: if it is misused, renew the
+/// function's default key in Azure Portal (Functions -> hazegate -> Function Keys) and put the new one here.
+/// </summary>
+internal static class HazeGateConnection
+{
+    public const string Address = "https://website-fetcher-f2gddhfyhrf9etdr.australiasoutheast-01.azurewebsites.net/api/hazegate";
+
+    /// <summary>The function's "default" function key (never the _master key).</summary>
+    public const string Key = "G0oz2xtj4RguVJUkEzkoLA8tBuygQN-pdvTk3A4cxFOMAzFuMoKFWw==";
+}
+
 /// <summary>The HazeGate protocol (Settings -> General -> Web View protocol).</summary>
 internal sealed class HazeGateWebProtocol : WebProtocol
 {
-    private readonly string _key;
-
-    public HazeGateWebProtocol(string address, string key, bool scriptsEnabled)
+    public HazeGateWebProtocol(bool scriptsEnabled)
     {
-        Address = address ?? string.Empty;
-        _key = key ?? string.Empty;
         ScriptsEnabled = scriptsEnabled;
     }
-
-    /// <summary>The address of the HazeGate function ("" when it is not set up).</summary>
-    public string Address { get; }
 
     public bool ScriptsEnabled { get; }
 
@@ -36,164 +40,20 @@ internal sealed class HazeGateWebProtocol : WebProtocol
     public override string DisplayName => "HazeGate";
 
     public override string Description =>
-        "Sends each address to your HazeGate Azure function, which downloads the page together with its stylesheets and " +
+        "Sends each address to the HazeGate Azure function, which downloads the page together with its stylesheets and " +
         "scripts and sends everything back; PhantomHaze then draws it like the HTMLRenderer protocol does (with its " +
         "JavaScript and modern CSS support). Images and the page's own requests go through the function too, so the " +
         "sites you visit only see Azure, never this PC.";
 
     public override WebProtocolFeatures Features => RenderedWebProtocolPage.GetFeatures(ScriptsEnabled);
 
-    // The key itself never appears in the signature (it ends up in comparisons and could end up in logs).
-    public override string Signature => $"{Id}|{Address}|{HazeGateKeyStore.Fingerprint(_key)}|{(ScriptsEnabled ? "scripts" : "no-scripts")}";
+    public override string Signature => $"{Id}|{(ScriptsEnabled ? "scripts" : "no-scripts")}";
 
     /// <summary>Every page, image and request goes through the function: PhantomHaze never contacts the sites itself.</summary>
     public override bool LoadsPagesDirectly => false;
 
-    public override string? GetUnavailableReason()
-    {
-        return Address.Length == 0
-            ? "HazeGate is not set up yet: paste the address of your HazeGate Azure function under \"HazeGate function\" in Settings -> General."
-            : null;
-    }
-
-    public override WebProtocolPage CreatePage(IWebProtocolHost host)
-    {
-        if (GetUnavailableReason() is string reason)
-        {
-            throw new WebProtocolUnavailableException(reason);
-        }
-
-        return new RenderedWebProtocolPage(this, host, new HazeGatePageTransport(Address, _key), ScriptsEnabled);
-    }
-}
-
-/// <summary>Reads the HazeGate function address pasted in Settings.</summary>
-internal static class HazeGateEndpoint
-{
-    /// <summary>The route of the function in the azure-cloud-webview-protocol repository.</summary>
-    public const string DefaultPath = "/api/hazegate";
-
-    /// <summary>
-    /// Reads the function URL the way Azure Portal shows it ("https://app.azurewebsites.net/api/hazegate?code=..."), or
-    /// just the Function App's address ("app.azurewebsites.net"). The function key (?code=) is returned separately, so it
-    /// can be stored encrypted and sent in a header instead of the address. http:// is only accepted for this PC itself
-    /// (a function started locally with Azure Functions Core Tools).
-    /// </summary>
-    public static bool TryParse(string? input, out string address, out string? key, out string error)
-    {
-        address = string.Empty;
-        key = null;
-        string value = (input ?? string.Empty).Trim();
-        if (value.Length == 0)
-        {
-            error = string.Empty;
-            return true;
-        }
-
-        if (!value.Contains("://", StringComparison.Ordinal))
-        {
-            value = "https://" + value;
-        }
-
-        if (!Uri.TryCreate(value, UriKind.Absolute, out Uri? uri) || uri.Host.Length == 0)
-        {
-            error = "This is not a web address. Paste the function URL from Azure Portal (it starts with https://).";
-            return false;
-        }
-
-        bool loopback = uri.IsLoopback;
-        if (!(uri.Scheme == Uri.UriSchemeHttps || (uri.Scheme == Uri.UriSchemeHttp && loopback)))
-        {
-            error = "The HazeGate function address must start with https:// (http:// only works for a function running on this PC).";
-            return false;
-        }
-
-        if (uri.UserInfo.Length > 0)
-        {
-            error = "The address must not contain a user name or password.";
-            return false;
-        }
-
-        foreach (string part in uri.Query.TrimStart('?').Split('&', StringSplitOptions.RemoveEmptyEntries))
-        {
-            int equals = part.IndexOf('=');
-            string name = equals < 0 ? part : part[..equals];
-            if (name.Equals("code", StringComparison.OrdinalIgnoreCase) && equals > 0)
-            {
-                try
-                {
-                    key = Uri.UnescapeDataString(part[(equals + 1)..].Replace('+', ' ')).Trim();
-                }
-                catch (UriFormatException)
-                {
-                    key = part[(equals + 1)..].Trim();
-                }
-            }
-        }
-
-        if (key is not null && (key.Length == 0 || key.Length > 512 || key.Any(c => char.IsControl(c) || c == ' ')))
-        {
-            error = "The function key (the code= part of the address) is not valid.";
-            return false;
-        }
-
-        string path = uri.AbsolutePath;
-        if (path.Length <= 1)
-        {
-            path = DefaultPath;
-        }
-
-        address = $"{uri.Scheme}://{uri.Authority}{path.TrimEnd('/')}";
-        error = string.Empty;
-        return true;
-    }
-
-    public static bool TryNormalizeAddress(string? input, out string address, out string error)
-    {
-        return TryParse(input, out address, out _, out error);
-    }
-}
-
-/// <summary>Keeps the HazeGate function key in settings.json encrypted for the current Windows user (DPAPI).</summary>
-internal static class HazeGateKeyStore
-{
-    private static readonly byte[] Entropy = Encoding.UTF8.GetBytes("PhantomHaze.HazeGate.FunctionKey.v1");
-
-    public static string Protect(string? key)
-    {
-        if (string.IsNullOrEmpty(key))
-        {
-            return string.Empty;
-        }
-
-        byte[] protectedBytes = ProtectedData.Protect(Encoding.UTF8.GetBytes(key), Entropy, DataProtectionScope.CurrentUser);
-        return Convert.ToBase64String(protectedBytes);
-    }
-
-    /// <summary>The key, or "" when there is none or it cannot be read (settings.json from another PC or Windows user).</summary>
-    public static string Unprotect(string? stored)
-    {
-        if (string.IsNullOrWhiteSpace(stored))
-        {
-            return string.Empty;
-        }
-
-        try
-        {
-            byte[] bytes = ProtectedData.Unprotect(Convert.FromBase64String(stored), Entropy, DataProtectionScope.CurrentUser);
-            return Encoding.UTF8.GetString(bytes);
-        }
-        catch (Exception ex) when (ex is CryptographicException or FormatException or PlatformNotSupportedException)
-        {
-            return string.Empty;
-        }
-    }
-
-    /// <summary>A short, one-way fingerprint of the key (tells keys apart without revealing them).</summary>
-    public static string Fingerprint(string? key)
-    {
-        return string.IsNullOrEmpty(key) ? "none" : Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(key)))[..12];
-    }
+    public override WebProtocolPage CreatePage(IWebProtocolHost host) =>
+        new RenderedWebProtocolPage(this, host, new HazeGatePageTransport(HazeGateConnection.Address, HazeGateConnection.Key), ScriptsEnabled);
 }
 
 /// <summary>Something went wrong between PhantomHaze and the HazeGate function (the message is for people).</summary>
@@ -463,48 +323,6 @@ internal static class HazeGateClient
         }
     }
 
-    /// <summary>Settings -> Test: asks the function who it is (this also checks the key). Returns what to show.</summary>
-    public static async Task<(bool Success, string Message)> TestAsync(string address, string key, CancellationToken cancellationToken)
-    {
-        using var message = new HttpRequestMessage(HttpMethod.Get, address);
-        AddHeaders(message, key);
-        try
-        {
-            using HttpResponseMessage response = await Client.SendAsync(message, cancellationToken).ConfigureAwait(false);
-            byte[] answer = await response.Content.ReadAsByteArrayAsync(cancellationToken).ConfigureAwait(false);
-            if (response.StatusCode != HttpStatusCode.OK)
-            {
-                return (false, DescribeFailure((int)response.StatusCode, answer));
-            }
-
-            using JsonDocument document = JsonDocument.Parse(answer);
-            if (document.RootElement.ValueKind == JsonValueKind.Object &&
-                document.RootElement.TryGetProperty("service", out JsonElement service) &&
-                service.ValueKind == JsonValueKind.String &&
-                string.Equals(service.GetString(), "HazeGate", StringComparison.Ordinal))
-            {
-                string version = document.RootElement.TryGetProperty("version", out JsonElement value) && value.ValueKind == JsonValueKind.String
-                    ? " " + value.GetString()
-                    : string.Empty;
-                return (true, $"Connected to HazeGate{version}.");
-            }
-
-            return (false, "Something answered, but it is not a HazeGate function. Check the address.");
-        }
-        catch (JsonException)
-        {
-            return (false, "Something answered, but it is not a HazeGate function. Check the address.");
-        }
-        catch (TaskCanceledException) when (!cancellationToken.IsCancellationRequested)
-        {
-            return (false, "The HazeGate function did not answer in time. A function that was idle can take a minute to start; try again.");
-        }
-        catch (HttpRequestException ex)
-        {
-            return (false, $"The HazeGate function could not be reached: {ex.Message}");
-        }
-    }
-
     private static void AddHeaders(HttpRequestMessage message, string key)
     {
         message.Headers.TryAddWithoutValidation("User-Agent", "PhantomHaze/" + (AppVersionInfo.Tag?.VersionNumber ?? "1"));
@@ -537,9 +355,9 @@ internal static class HazeGateClient
         return status switch
         {
             401 or 403 when detail is null =>
-                "The HazeGate function refused PhantomHaze: the function key is missing or wrong. In Azure Portal, open the Function " +
-                "App, then Functions -> hazegate -> Get function URL, and paste the \"default (Function key)\" URL in Settings -> General.",
-            404 => "There is no HazeGate function at this address. Check the address in Settings -> General, and that the function was deployed.",
+                "The HazeGate function refused PhantomHaze: the function key built into this version is no longer valid. " +
+                "A newer version of PhantomHaze may be needed.",
+            404 => "The HazeGate function was not found. It may not be deployed (or was moved); a newer version of PhantomHaze may be needed.",
             429 => "The HazeGate function is busy (too many requests). Try again in a moment.",
             503 => "The HazeGate function is not running. It may be stopped in Azure Portal, or still starting.",
             _ when detail is not null => detail,

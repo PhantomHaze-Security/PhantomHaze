@@ -1,6 +1,5 @@
 using System.Globalization;
 using System.Net;
-using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
 using System.Text.Json.Serialization;
@@ -68,12 +67,6 @@ public partial class MainForm : Form
         /// <summary>HTMLRenderer and HazeGate pages run their JavaScript (Settings -> General).</summary>
         public bool RenderedPageScriptsEnabled { get; set; } = true;
 
-        /// <summary>The address of the HazeGate Azure function, without its key ("" until HazeGate is set up).</summary>
-        public string HazeGateAddress { get; set; } = string.Empty;
-
-        /// <summary>The HazeGate function key, encrypted for this Windows user (see HazeGateKeyStore). Never exported.</summary>
-        public string HazeGateKey { get; set; } = string.Empty;
-
         /// <summary>How the top bar looks (Settings -> Appearance -> Top bar).</summary>
         public TopBarStyle TopBarStyle { get; set; } = TopBarStyle.Comfortable;
 
@@ -108,8 +101,6 @@ public partial class MainForm : Form
                 CookieRetentionDays = CookieRetentionDays,
                 WebViewProtocol = WebViewProtocol,
                 RenderedPageScriptsEnabled = RenderedPageScriptsEnabled,
-                HazeGateAddress = HazeGateAddress,
-                HazeGateKey = HazeGateKey,
                 TopBarStyle = TopBarStyle,
                 DefaultSearchEngine = DefaultSearchEngine,
                 StartingPage = StartingPage,
@@ -1149,10 +1140,6 @@ public partial class MainForm : Form
         settings.RenderWebViewInBackground = settings.BackgroundTabRenderSeconds == -1;
 
         settings.WebViewProtocol = WebProtocolCatalog.NormalizeId(settings.WebViewProtocol);
-        settings.HazeGateAddress = HazeGateEndpoint.TryNormalizeAddress(settings.HazeGateAddress, out string hazeGateAddress, out _)
-            ? hazeGateAddress
-            : string.Empty;
-        settings.HazeGateKey ??= string.Empty;
         if (!Enum.IsDefined(settings.TopBarStyle))
         {
             settings.TopBarStyle = TopBarStyle.Comfortable;
@@ -6375,7 +6362,7 @@ public partial class MainForm : Form
         {
             Dock = DockStyle.Fill,
             ColumnCount = 2,
-            RowCount = 15,
+            RowCount = 13,
             AutoScroll = true,
             Padding = ScalePadding(12, 12, 12, 12),
         };
@@ -6392,8 +6379,6 @@ public partial class MainForm : Form
         generalLayout.RowStyles.Add(new RowStyle(SizeType.Absolute, ScaleByDpi(36)));
         generalLayout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
         generalLayout.RowStyles.Add(new RowStyle(SizeType.Absolute, ScaleByDpi(36)));
-        generalLayout.RowStyles.Add(new RowStyle(SizeType.Absolute, ScaleByDpi(36)));
-        generalLayout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
         generalLayout.RowStyles.Add(new RowStyle(SizeType.Percent, 100f));
 
         // How long a tab keeps rendering after it goes into the background (replaces "Render web pages in the
@@ -6564,11 +6549,7 @@ public partial class MainForm : Form
             string label = protocol is ExtensionWebProtocol extensionProtocol
                 ? $"{protocol.DisplayName} (from {extensionProtocol.ExtensionName})"
                 : protocol.DisplayName;
-            if (protocol is HazeGateWebProtocol)
-            {
-                // Set up below, in this dialog.
-            }
-            else if (protocol.GetUnavailableReason() is not null)
+            if (protocol.GetUnavailableReason() is not null)
             {
                 label += " - not available";
             }
@@ -6614,12 +6595,6 @@ public partial class MainForm : Form
             }
 
             string applies = _tabs.Count > 0 ? " Open tabs are reopened with the new protocol when you click Save." : string.Empty;
-            if (protocol is HazeGateWebProtocol)
-            {
-                protocolDescriptionLabel.Text = protocol.Description + applies + "\n\nSet it up with \"HazeGate function\" below.";
-                return;
-            }
-
             string? unavailable = protocol.GetUnavailableReason();
             protocolDescriptionLabel.Text = unavailable is null
                 ? protocol.Description + applies
@@ -6636,97 +6611,6 @@ public partial class MainForm : Form
             Checked = draftSettings.RenderedPageScriptsEnabled,
             TextAlign = ContentAlignment.MiddleLeft,
             AccessibleDescription = "Pages shown with the HTMLRenderer or HazeGate protocol run their scripts (with Jint). Turned off, they are shown as they are downloaded.",
-        };
-
-        // HazeGate: the address of the user's HazeGate Azure function. Its key (?code=) is stored encrypted, never shown.
-        var hazeGateTextBox = new TextBox
-        {
-            Dock = DockStyle.Fill,
-            Text = draftSettings.HazeGateAddress,
-            PlaceholderText = "https://your-function-app.azurewebsites.net/api/hazegate?code=...",
-            AccessibleName = "HazeGate function address",
-        };
-        var hazeGateTestButton = new Button
-        {
-            Text = "Test",
-            AutoSize = true,
-            AutoSizeMode = AutoSizeMode.GrowAndShrink,
-            Anchor = AnchorStyles.Left,
-            Margin = ScalePadding(6, 0, 0, 0),
-            AccessibleDescription = "Checks that PhantomHaze can reach the HazeGate function with this address and key.",
-        };
-        var hazeGateLayout = new TableLayoutPanel
-        {
-            Dock = DockStyle.Fill,
-            ColumnCount = 2,
-            RowCount = 1,
-            Margin = Padding.Empty,
-        };
-        hazeGateLayout.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100f));
-        hazeGateLayout.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
-        hazeGateLayout.Controls.Add(hazeGateTextBox, 0, 0);
-        hazeGateLayout.Controls.Add(hazeGateTestButton, 1, 0);
-        var hazeGateNoteLabel = new Label
-        {
-            AutoSize = true,
-            MaximumSize = new Size(ScaleByDpi(440), 0),
-            Margin = ScalePadding(3, 0, 0, 8),
-            Font = dialogFont,
-            UseMnemonic = false,
-        };
-
-        void UpdateHazeGateNote()
-        {
-            if (!HazeGateEndpoint.TryParse(hazeGateTextBox.Text, out string address, out string? key, out string error))
-            {
-                hazeGateNoteLabel.Text = error;
-                return;
-            }
-
-            bool keySaved = draftSettings.HazeGateKey.Length > 0 &&
-                            string.Equals(address, draftSettings.HazeGateAddress, StringComparison.OrdinalIgnoreCase);
-            hazeGateNoteLabel.Text = address.Length == 0
-                ? "To use HazeGate, open Azure Portal, then your Function App -> Functions -> hazegate -> Get function URL, and paste the " +
-                  "\"default (Function key)\" URL here."
-                : key is not null
-                    ? "The function key in this address is saved encrypted for your Windows account and is sent in a header, never in addresses."
-                    : keySaved
-                        ? "The function key is saved (encrypted for your Windows account). Paste the function URL again to replace it."
-                        : "No function key: paste the whole function URL from Azure Portal, including its ?code= part (unless your function needs no key).";
-        }
-
-        hazeGateTextBox.TextChanged += (_, _) => UpdateHazeGateNote();
-        UpdateHazeGateNote();
-        hazeGateTestButton.Click += async (_, _) =>
-        {
-            if (!HazeGateEndpoint.TryParse(hazeGateTextBox.Text, out string address, out string? key, out string error) || address.Length == 0)
-            {
-                hazeGateNoteLabel.Text = address.Length == 0 && error.Length == 0 ? "Paste the HazeGate function's address first." : error;
-                return;
-            }
-
-            key ??= string.Equals(address, draftSettings.HazeGateAddress, StringComparison.OrdinalIgnoreCase)
-                ? HazeGateKeyStore.Unprotect(draftSettings.HazeGateKey)
-                : string.Empty;
-            hazeGateTestButton.Enabled = false;
-            hazeGateNoteLabel.Text = "Testing... (a function that was idle can take up to a minute to start)";
-            try
-            {
-                (bool success, string message) = await HazeGateClient.TestAsync(address, key, CancellationToken.None);
-                if (!hazeGateNoteLabel.IsDisposed)
-                {
-                    hazeGateNoteLabel.Text = (success ? "✔ " : "✖ ") + message;
-                }
-
-                Log($"HazeGate test of {NormalizeForLog(address)}: {NormalizeForLog(message)}");
-            }
-            finally
-            {
-                if (!hazeGateTestButton.IsDisposed)
-                {
-                    hazeGateTestButton.Enabled = true;
-                }
-            }
         };
 
         // The theme moved to the Appearance tab, together with the text colour and font.
@@ -6763,11 +6647,6 @@ public partial class MainForm : Form
 
         generalLayout.Controls.Add(renderedScriptsCheckBox, 0, 11);
         generalLayout.SetColumnSpan(renderedScriptsCheckBox, 2);
-
-        generalLayout.Controls.Add(BuildSettingsLabel("HazeGate function"), 0, 12);
-        generalLayout.Controls.Add(hazeGateLayout, 1, 12);
-
-        generalLayout.Controls.Add(hazeGateNoteLabel, 1, 13);
 
         generalTab.Controls.Add(generalLayout);
 
@@ -7425,31 +7304,6 @@ public partial class MainForm : Form
         draftSettings.StartingPage = NormalizeStartPage(startPageTextBox.Text.Trim());
         draftSettings.ExtensionsEnabled = extensionsEnabledCheckBox.Checked;
         draftSettings.RenderedPageScriptsEnabled = renderedScriptsCheckBox.Checked;
-        if (HazeGateEndpoint.TryParse(hazeGateTextBox.Text, out string hazeGateAddress, out string? hazeGateKey, out string hazeGateError))
-        {
-            try
-            {
-                if (hazeGateKey is not null)
-                {
-                    draftSettings.HazeGateKey = HazeGateKeyStore.Protect(hazeGateKey);
-                }
-                else if (!string.Equals(hazeGateAddress, draftSettings.HazeGateAddress, StringComparison.OrdinalIgnoreCase))
-                {
-                    // A key belongs to its function.
-                    draftSettings.HazeGateKey = string.Empty;
-                }
-
-                draftSettings.HazeGateAddress = hazeGateAddress;
-            }
-            catch (CryptographicException ex)
-            {
-                Log($"The HazeGate function key could not be saved: {ex.Message}");
-            }
-        }
-        else
-        {
-            Log($"The HazeGate function address was not changed: {hazeGateError}");
-        }
 
         if (HasSettingsFileChangedSinceLastAccess() && TryReadSettingsFile() is AppSettings currentOnDisk)
         {

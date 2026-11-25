@@ -410,9 +410,9 @@ internal abstract class WebProtocolPage : IDisposable
 }
 
 /// <summary>The settings built-in protocols are configured with (Settings -> General).</summary>
-internal sealed record BuiltInProtocolSettings(bool RenderedPageScriptsEnabled, string HazeGateAddress, string HazeGateKey)
+internal sealed record BuiltInProtocolSettings(bool RenderedPageScriptsEnabled)
 {
-    public static BuiltInProtocolSettings Default { get; } = new(true, string.Empty, string.Empty);
+    public static BuiltInProtocolSettings Default { get; } = new(true);
 }
 
 /// <summary>The built-in protocols and protocol ids.</summary>
@@ -434,7 +434,7 @@ internal static class WebProtocolCatalog
     [
         new WebView2WebProtocol(),
         new HtmlRendererWebProtocol(null, settings.RenderedPageScriptsEnabled),
-        new HazeGateWebProtocol(settings.HazeGateAddress, settings.HazeGateKey, settings.RenderedPageScriptsEnabled),
+        new HazeGateWebProtocol(settings.RenderedPageScriptsEnabled),
         new LegacyWebProtocol(),
     ];
 
