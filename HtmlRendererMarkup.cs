@@ -3157,13 +3157,16 @@ internal sealed class PageMarkupWriter
             var embedded = new PageFrame(_ids.GetId(element), srcdoc is null ? url : _baseUri.AbsoluteUri,
                 srcdoc, element.GetAttribute("title") ?? "Embedded page");
             _frames.Add(embedded);
-            WritePlaceholder(element, box, embedded.ElementId, 300, 150, itemStyle);
+            double Dimension(string name, double fallback) =>
+                int.TryParse(element.GetAttribute(name), NumberStyles.None, CultureInfo.InvariantCulture, out var pixels)
+                    ? Math.Clamp(pixels, 0, 8192) : fallback;
+            WritePlaceholder(element, box, embedded.ElementId, Dimension("width", 300), Dimension("height", 150), itemStyle);
         }
 
         if (!hasSource || srcdoc is not null) return;
         string label = "Embedded page: " + (Uri.TryCreate(url, UriKind.Absolute, out Uri? frame) ? frame.Host : url);
         // A YouTube player becomes a link to the video.
-        if (frame is not null && frame.Host.Contains("youtube", StringComparison.OrdinalIgnoreCase) && frame.AbsolutePath.StartsWith("/embed/", StringComparison.OrdinalIgnoreCase))
+        if (frame is not null && (frame.Host is "youtube.com" or "www.youtube.com" or "youtube-nocookie.com" or "www.youtube-nocookie.com") && frame.AbsolutePath.StartsWith("/embed/", StringComparison.OrdinalIgnoreCase))
         {
             string id = frame.AbsolutePath["/embed/".Length..].Split('/', '?')[0];
             if (id.Length > 0)
@@ -4014,7 +4017,7 @@ internal static class CssLength
                     double minimum = Resolve(arguments[0]);
                     double preferred = Resolve(arguments[1]);
                     double maximum = Resolve(arguments[2]);
-                    return preferred < minimum ? arguments[0] : preferred > maximum ? arguments[2] : arguments[1];
+                    return maximum < minimum || preferred < minimum ? arguments[0] : preferred > maximum ? arguments[2] : arguments[1];
                 }
                 case "abs":
                     return arguments.Count == 1 ? new Value(Math.Abs(arguments[0].Px), Math.Abs(arguments[0].Percent), arguments[0].HasPercent, arguments[0].IsNumber) : null;

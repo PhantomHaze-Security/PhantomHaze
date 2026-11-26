@@ -18,11 +18,11 @@ internal sealed record PhantomUser(Guid Id, string Name, string? PinHash = null)
     {
         if (PinHash is null) return true;
         if (!IsPin(pin)) return false;
-        byte[] stored = Convert.FromBase64String(PinHash);
-        return stored.Length == 48 && CryptographicOperations.FixedTimeEquals(stored.AsSpan(16), Derive(pin, stored[..16]));
+        Span<byte> stored = stackalloc byte[48];
+        return Convert.TryFromBase64String(PinHash, stored, out int count) && count == 48 && CryptographicOperations.FixedTimeEquals(stored[16..], Derive(pin, stored[..16]));
     }
 
-    private static byte[] Derive(string pin, byte[] salt) =>
+    private static byte[] Derive(string pin, ReadOnlySpan<byte> salt) =>
         Rfc2898DeriveBytes.Pbkdf2(pin, salt, 100_000, HashAlgorithmName.SHA256, 32);
 }
 

@@ -52,7 +52,9 @@ internal sealed partial class WebView2ProtocolPage : WebProtocolPage
 
     private readonly WebView2 _webView;
     private readonly string? _proxyServer;
-    private CoreWebView2? _core;
+    // Keep the environment supplied to the controller. Core.Environment creates a new managed wrapper on every read.
+    internal (CoreWebView2Environment Environment, CoreWebView2 Core)? Session { get; private set; }
+    private bool _ready;
     private bool _hasFaviconEvents;
     private bool _renderingActive = true;
     private int _zoomPercent = 100;
@@ -71,12 +73,12 @@ internal sealed partial class WebView2ProtocolPage : WebProtocolPage
     public override Control View => _webView;
 
     /// <summary>The CoreWebView2 once the page is ready (null before that and after the page is disposed).</summary>
-    public CoreWebView2? Core => IsDisposed ? null : _core;
+    public CoreWebView2? Core => IsReady ? Session?.Core : null;
 
     /// <summary>True when the page runs in a proxy protocol's own WebView2 environment (with its own cookie store).</summary>
     public bool UsesIsolatedEnvironment => _proxyServer is not null;
 
-    public override bool IsReady => !IsDisposed && _core is not null;
+    public override bool IsReady => !IsDisposed && _ready;
 
     public override string CurrentUrl
     {
@@ -87,7 +89,7 @@ internal sealed partial class WebView2ProtocolPage : WebProtocolPage
                 return string.Empty;
             }
 
-            return _webView.Source?.ToString() ?? _core?.Source ?? string.Empty;
+            return _webView.Source?.ToString() ?? Core?.Source ?? string.Empty;
         }
     }
 
@@ -152,6 +154,7 @@ internal sealed partial class WebView2ProtocolPage : WebProtocolPage
             return;
         }
 
+        Session = (environment, core);
         core.Settings.IsScriptEnabled = true;
         core.Settings.AreDefaultContextMenusEnabled = true;
         core.Settings.IsStatusBarEnabled = true;
@@ -180,13 +183,13 @@ internal sealed partial class WebView2ProtocolPage : WebProtocolPage
             return;
         }
 
-        await Host.OnWebView2CoreCreatedAsync(this, core);
+        await Host.OnWebView2CoreCreatedAsync(this);
         if (IsDisposed)
         {
             return;
         }
 
-        _core = core;
+        _ready = true;
         _webView.ZoomFactor = _zoomPercent / 100.0;
     }
 
@@ -388,7 +391,8 @@ internal sealed partial class WebView2ProtocolPage : WebProtocolPage
             }
         }
 
-        _core = null;
+        _ready = false;
+        Session = null;
         try
         {
             _webView.Dispose();

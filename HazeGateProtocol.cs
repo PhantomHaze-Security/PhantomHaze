@@ -537,6 +537,7 @@ internal sealed class HazeGatePageTransport : IRenderedPageTransport
             string current = request.Url;
             string method = request.Method;
             byte[]? body = request.Body;
+            bool sendCookies = request.SendCookies;
             string? contentType = request.ContentType;
             for (int redirect = 0; redirect <= MaximumResourceRedirects; redirect++)
             {
@@ -554,7 +555,7 @@ internal sealed class HazeGatePageTransport : IRenderedPageTransport
                         Body = body,
                         ContentType = contentType,
                         Headers = request.Headers?.Where(header => HtmlRendererResources.IsAllowedRequestHeader(header.Key, header.Value)).ToList(),
-                        Cookie = request.SendCookies && Cookies.GetCookieHeader(uri) is { Length: > 0 } cookie ? cookie : null,
+                        Cookie = sendCookies && Cookies.GetCookieHeader(uri) is { Length: > 0 } cookie ? cookie : null,
                         Referrer = request.Referrer,
                         Accept = HtmlRendererResources.GetAcceptHeader(request.Kind),
                         MaximumBytes = request.MaximumBytes,
@@ -565,7 +566,7 @@ internal sealed class HazeGatePageTransport : IRenderedPageTransport
                     return null;
                 }
 
-                if (request.SendCookies)
+                if (sendCookies)
                 {
                     StoreCookies(uri, response.SetCookies);
                 }
@@ -590,6 +591,7 @@ internal sealed class HazeGatePageTransport : IRenderedPageTransport
                         contentType = null;
                     }
 
+                    sendCookies &= Uri.Compare(uri, next, UriComponents.SchemeAndServer, UriFormat.SafeUnescaped, StringComparison.OrdinalIgnoreCase) == 0;
                     current = next.AbsoluteUri;
                     continue;
                 }

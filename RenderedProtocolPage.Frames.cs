@@ -45,7 +45,7 @@ internal sealed partial class RenderedWebProtocolPage
 
     private void PositionFrame(PageFrame frame, RenderedWebProtocolPage child, Point scroll)
     {
-        if (_panel.GetElementRectangle(frame.ElementId) is not RectangleF rect || rect.Width < 2 || rect.Height < 2)
+        if (GetLayoutRectangle(frame.ElementId) is not RectangleF rect || rect.Width < 2 || rect.Height < 2)
         {
             child.View.Visible = false;
             return;

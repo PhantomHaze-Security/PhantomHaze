@@ -101,7 +101,7 @@ try {
 	$binDir = Join-Path $tempRoot 'PhantomHaze\bin'
 	$objDir = Join-Path $tempRoot 'PhantomHaze\obj'
 
-	Remove-Item -LiteralPath $binDir, $objDir, $OutputDir -Recurse -Force -ErrorAction SilentlyContinue
+	Remove-Item -LiteralPath $binDir, $objDir -Recurse -Force -ErrorAction SilentlyContinue
 
 	New-Item -ItemType Directory -Path $logDir -Force | Out-Null
 	New-Item -ItemType Directory -Path $binDir -Force | Out-Null
@@ -111,26 +111,6 @@ try {
 	$timestamp = (Get-Date).ToUniversalTime().ToString('yyyyMMddTHHmmssZ')
 	$logFile = Join-Path $logDir "compiler-$timestamp.log"
 	New-Item -ItemType File -Path $logFile -Force | Out-Null
-
-	$projectDir = Split-Path -Parent $projectFile
-	$legacyBinDir = Join-Path $projectDir 'bin'
-	$legacyObjDir = Join-Path $projectDir 'obj'
-	$projectLocalTempRoot = Join-Path $scriptDir 'tmp'
-	$projectLocalTempRootFull = [System.IO.Path]::GetFullPath($projectLocalTempRoot)
-	$currentTempRootFull = [System.IO.Path]::GetFullPath($tempRoot)
-	$projectLocalTempRootPrefix = $projectLocalTempRootFull.TrimEnd('\') + '\'
-	$preservedTempChildDirFull = $null
-
-	if ($currentTempRootFull.Equals($projectLocalTempRootFull, [System.StringComparison]::OrdinalIgnoreCase)) {
-		$preservedTempChildDirFull = [System.IO.Path]::GetFullPath((Join-Path $projectLocalTempRootFull 'PhantomHaze'))
-	}
-	elseif ($currentTempRootFull.StartsWith($projectLocalTempRootPrefix, [System.StringComparison]::OrdinalIgnoreCase)) {
-		$relativeTempRootFromProjectTmp = $currentTempRootFull.Substring($projectLocalTempRootFull.Length).TrimStart('\')
-		$activeTopLevelChild = $relativeTempRootFromProjectTmp.Split('\')[0]
-		if ($activeTopLevelChild) {
-			$preservedTempChildDirFull = [System.IO.Path]::GetFullPath((Join-Path $projectLocalTempRootFull $activeTopLevelChild))
-		}
-	}
 
 	$script:LogFile = $logFile
 	$script:ExePath = Join-Path $OutputDir 'PhantomHaze.exe'
@@ -147,20 +127,6 @@ try {
 	Write-Log "Using .NET SDK $dotnetVersion"
 	Write-Log "Publishing $projectFile to $OutputDir"
 	Write-Log "Temp build paths: bin=$binDir obj=$objDir"
-
-	if ((Test-Path -LiteralPath $legacyBinDir) -or (Test-Path -LiteralPath $legacyObjDir)) {
-		Write-Log 'Cleaning project-root bin/obj to avoid duplicate compile items with custom temp paths.'
-		Remove-Item -LiteralPath $legacyBinDir, $legacyObjDir -Recurse -Force -ErrorAction SilentlyContinue
-	}
-
-	if ((Test-Path -LiteralPath $projectLocalTempRoot) -and $preservedTempChildDirFull) {
-		Get-ChildItem -LiteralPath $projectLocalTempRoot -Directory -ErrorAction SilentlyContinue |
-			Where-Object { [System.IO.Path]::GetFullPath($_.FullName) -ne $preservedTempChildDirFull } |
-			ForEach-Object {
-				Write-Log "Cleaning stale temp build root: $($_.FullName)"
-				Remove-Item -LiteralPath $_.FullName -Recurse -Force -ErrorAction SilentlyContinue
-			}
-	}
 
 	$publishArgs = @(
 		'publish'

@@ -1,7 +1,6 @@
 # PhantomScript (for `.phext` files) Guide
 
-PhantomHaze extensions are plain-text `.phext` files.  
-You import them from **Settings -> Extensions -> Import extension**.
+PhantomHaze extensions are plain-text `.phext` files. You import them from **Settings -> Extensions -> Import extension**.
 
 ## File structure
 
@@ -167,6 +166,19 @@ ui.element dashboard text "Dashboard"
 - `app.log "<message>"`
   - Writes a log message when the extension starts (at app startup, or when it is installed or enabled).
 
+#### App name and icon
+
+`app.name "<name>"` sets the name in the window title and beside the menu logo. The window title keeps the release version and channel. Use a single line of up to 64 characters.
+
+`app.icon "<icon>"` sets the window icon and menu logo. It accepts the same built-in tokens and image formats as `meta.icon`. Use `meta.name` and `meta.icon` for the extension’s own label and launcher.
+
+```text
+app.name "Focus Browser"
+app.icon "shield"
+```
+
+Only enabled extensions contribute. If enabled extensions request different values for the same property, PhantomHaze shows an error naming the extensions and uses the default for that property. Disabling an extension immediately reapplies the remaining choices. Existing `ui.element menu.title` and `ui.svg menu.logo` commands can still style the menu.
+
 ### Menu bar
 
 Extensions can add buttons and dropdown menus to the top menu bar. They appear between **Web View** and the clock,
@@ -210,6 +222,20 @@ the file. `menu.button`, `menu.dropdown` and `app.page` ids cannot use the name 
   - Like extension windows, a page only ever shows the extension's own content: web links the user clicks open in a
     new PhantomHaze tab, and `web.block` rules apply to everything the page loads.
 
+### Extension Web View protocols
+
+Use `protocol.add <id> "<name>" <engine> "<address>"` to add a choice under **Settings → General → Web View protocol**. The engine is `webview2`, `htmlrenderer`, or `legacy`. Each extension can define up to ten protocols.
+
+```text
+protocol.add docs "Docs gateway" htmlrenderer "https://gateway.example/view?url={{url}}"
+protocol.add direct "Company proxy" webview2 "{{url}}"
+protocol.proxy direct "http://proxy.example:8080"
+```
+
+The address template requires exactly one `{{url}}` (percent-encoded) or `{{url.raw}}` (literal). A gateway template needs a fixed HTTP or HTTPS origin. Extension and setting placeholders in its path or query are percent-encoded. The direct template loads the original address. The address bar, history, and favourites use the page address.
+
+`protocol.proxy <id> "<proxy>"` configures an earlier protocol in the same file. WebView2 and HTMLRenderer accept HTTP, SOCKS4, and SOCKS5 proxy addresses with an explicit port. WebView2 gives a proxied protocol a separate cookie store.
+
 ### Web View / website modifications
 
 - `web.script <id> "<urlPattern>" <document-start|document-end> <<TAG ... TAG`
@@ -222,6 +248,8 @@ the file. `menu.button`, `menu.dropdown` and `app.page` ids cannot use the name 
 - `"*"` (all pages)
 - `"https://*.github.com/*"` (github.com and all of its subdomains, over https)
 - `"*://*.example.org/*"` (example.org and its subdomains, any scheme)
+
+WebView2 runs `web.script` and `web.css`. HTMLRenderer and HazeGate apply CSS with scripts on or off, and run extension scripts when page scripts are enabled. Legacy applies blocking to pages and frames. An extension protocol inherits the capabilities of its engine.
 
 Patterns written as `scheme://host/path` are matched part by part: a wildcard in the scheme or host never matches
 characters in the rest of the URL, so `https://*.github.com/*` does not match `https://evil.example/?a.github.com/`.
@@ -316,6 +344,7 @@ log) rather than replaced by an unrelated fallback font.
 | `address.bar`      | The address box                 |      | ✓       |         | ✓          | ✓          |        | ✓    |        |          |
 | `address.favorite` | The favourite (star) button     |      | ✓       | ✓       |            |            | ✓      | ✓    | ✓      | ✓        |
 | `address.back`     | The Back button                 | ✓    | ✓       | ✓       | ✓          | ✓          | ✓      | ✓    | ✓      | ✓        |
+| `address.forward`  | The Forward button              | ✓    | ✓       | ✓       | ✓          | ✓          | ✓      | ✓    | ✓      | ✓        |
 | `address.go`       | The Go button                   | ✓    | ✓       | ✓       | ✓          | ✓          | ✓      | ✓    | ✓      | ✓        |
 | `address.refresh`  | The Refresh button              | ✓    | ✓       | ✓       | ✓          | ✓          | ✓      | ✓    | ✓      | ✓        |
 | `address.history`  | The History button              | ✓    | ✓       | ✓       | ✓          | ✓          | ✓      | ✓    | ✓      | ✓        |

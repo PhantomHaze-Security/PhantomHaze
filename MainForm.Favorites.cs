@@ -67,7 +67,7 @@ public partial class MainForm
         _favoritesBar.SuspendLayout();
         try
         {
-            while (_favoritesBar.Items.Count > 0) _favoritesBar.Items[0].Dispose();
+            ClearMenuItems(_favoritesBar);
             foreach (Favorite favorite in _favorites)
             {
                 string title = string.IsNullOrWhiteSpace(favorite.Title) ? BuildFallbackTitle(favorite.Url) : favorite.Title;

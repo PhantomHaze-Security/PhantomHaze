@@ -13,11 +13,11 @@ internal static class PagePrelude
 (function (g, cfg) {
   'use strict';
   var bridge = {
-    fetch: g.__phFetch, media: g.__phMatchMedia, open: g.__phOpen, url: g.__phUrl, go: g.__phGo,
+    fetch: g.__phFetch, supports: g.__phSupports, media: g.__phMatchMedia, open: g.__phOpen, url: g.__phUrl, go: g.__phGo,
     sget: g.__phStorageGet, sset: g.__phStorageSet, sdel: g.__phStorageRemove, sclear: g.__phStorageClear,
     skeys: g.__phStorageKeys, log: g.__phLog
   };
-  ['__phFetch', '__phMatchMedia', '__phOpen', '__phUrl', '__phGo', '__phStorageGet', '__phStorageSet',
+  ['__phFetch', '__phSupports', '__phMatchMedia', '__phOpen', '__phUrl', '__phGo', '__phStorageGet', '__phStorageSet',
    '__phStorageRemove', '__phStorageClear', '__phStorageKeys', '__phLog'].forEach(function (name) {
     try { delete g[name]; } catch (e) { try { g[name] = undefined; } catch (e2) { } }
   });
@@ -186,7 +186,8 @@ internal static class PagePrelude
   function startRequest(method, url, headers, body, mode, done) {
     var id = nextRequest++;
     pending[id] = done;
-    try { bridge.fetch(id, String(url), String(method || 'GET'), JSON.stringify(headers || {}), body == null ? '' : String(body), String(mode || 'same-origin')); }
+    var binary = body !== null && typeof body === 'object';
+    try { bridge.fetch(id, String(url), String(method || 'GET'), JSON.stringify(headers || {}), binary ? body.base64 : body, String(mode || 'same-origin'), binary); }
     catch (e) { delete pending[id]; done({ status: 0, statusText: '', url: String(url), headers: {}, body: '', kind: 'text', error: String(e) }); }
   }
   function decodeBase64(text) {
@@ -218,19 +219,22 @@ internal static class PagePrelude
     if (body && typeof body.__phEntries === 'function') {
       return body.__phEntries().map(function (pair) { return encodeURIComponent(pair[0]) + '=' + encodeURIComponent(pair[1]); }).join('&');
     }
-    if (typeof body === 'object' && typeof body.byteLength === 'number') {
-      var bytes = new Uint8Array(body.buffer || body), text = '';
-      for (var i = 0; i < bytes.length; i++) { text += String.fromCharCode(bytes[i]); }
-      return text;
+    if (body instanceof ArrayBuffer || ArrayBuffer.isView(body)) {
+      var bytes = body instanceof ArrayBuffer ? new Uint8Array(body) : new Uint8Array(body.buffer, body.byteOffset, body.byteLength);
+      var chunks = [];
+      for (var i = 0; i < bytes.length; i += 8192) {
+        chunks.push(String.fromCharCode.apply(null, bytes.subarray(i, i + 8192)));
+      }
+      return { base64: btoa(chunks.join('')) };
     }
     return String(body);
   }
   function PhHeaders(init) {
-    var map = {};
+    var map = Object.create(null);
     this._map = map;
     if (init) {
       if (typeof init.forEach === 'function' && !Array.isArray(init)) { init.forEach(function (value, key) { map[String(key).toLowerCase()] = String(value); }); }
-      else if (Array.isArray(init)) { init.forEach(function (pair) { map[String(pair[0]).toLowerCase()] = String(pair[1]); }); }
+      else if (Array.isArray(init)) { init.forEach(function (pair) { this.append(pair[0], pair[1]); }, this); }
       else { Object.keys(init).forEach(function (key) { map[key.toLowerCase()] = String(init[key]); }); }
     }
   }
@@ -472,13 +476,24 @@ internal static class PagePrelude
   define(g, 'prompt', function (message) { bridge.log('prompt', String(message)); return null; });
   define(g, 'showModalDialog', function () { return null; });
 
-  if (!g.CSS || typeof g.CSS.supports !== 'function') {
-    define(g, 'CSS', {
-      supports: function (property, value) {
-        var text = value === undefined ? String(property) : String(property) + ':' + String(value);
-        return !/grid|subgrid|sticky|backdrop|container|aspect-ratio/i.test(text);
-      },
-      escape: function (text) { return String(text).replace(/([^a-zA-Z0-9_ -￿-])/g, '\\$1'); }
+  var css = g.CSS || {};
+  if (!g.CSS) { define(g, 'CSS', css); }
+  define(css, 'supports', function (property, value) {
+    var condition = arguments.length > 1 ? '(' + property + ':' + value + ')' : String(property);
+    return bridge.supports(condition);
+  });
+  if (typeof css.escape !== 'function') {
+    define(css, 'escape', function (value) {
+      var text = String(value), out = '';
+      for (var i = 0; i < text.length; i++) {
+        var c = text.charAt(i), code = text.charCodeAt(i);
+        if (!code) { out += '\uFFFD'; }
+        else if (code < 32 || code === 127 || (code >= 48 && code <= 57 && (i === 0 || i === 1 && text[0] === '-'))) {
+          out += '\\' + code.toString(16) + ' ';
+        } else if (code >= 128 || /[A-Za-z0-9_]/.test(c) || c === '-' && text.length > 1) { out += c; }
+        else { out += '\\' + c; }
+      }
+      return out;
     });
   }
   if (typeof g.structuredClone !== 'function') {

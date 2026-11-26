@@ -380,52 +380,21 @@ public partial class MainForm
     /// Keyboard shortcuts, which also reach what a style leaves out: Ctrl+L, Alt+D or F6 (the address box), Ctrl+T (new
     /// tab), Ctrl+W or Ctrl+F4 (close the tab), F5 or Ctrl+R (reload) and Ctrl+H (history and favourites).
     /// </summary>
-    private bool HandleTopBarShortcut(Keys keyData)
+    private Action? GetBrowserShortcut(Keys keyData)
     {
-        switch (keyData)
+        var tab = _activeTab;
+        if (keyData == (Keys.Control | Keys.T)) return () => _ = OpenNewTabFromShortcutAsync();
+        if (!_webViewModeEnabled) return null;
+        return keyData switch
         {
-            case Keys.Control | Keys.L:
-            case Keys.Alt | Keys.D:
-            case Keys.F6:
-                if (!_webViewModeEnabled)
-                {
-                    return false;
-                }
-
-                FocusAddressBar();
-                return true;
-            case Keys.Control | Keys.T:
-                _ = OpenNewTabFromShortcutAsync();
-                return true;
-            case Keys.Control | Keys.W:
-            case Keys.Control | Keys.F4:
-                if (!_webViewModeEnabled || _activeTab is null)
-                {
-                    return false;
-                }
-
-                _ = CloseTabAsync(_activeTab);
-                return true;
-            case Keys.F5:
-            case Keys.Control | Keys.R:
-                if (!_webViewModeEnabled || _activeTab is null)
-                {
-                    return false;
-                }
-
-                RefreshWebView();
-                return true;
-            case Keys.Control | Keys.H:
-                if (!_webViewModeEnabled)
-                {
-                    return false;
-                }
-
-                ToggleHistoryPanel();
-                return true;
-            default:
-                return false;
-        }
+            (Keys.Control | Keys.L) or (Keys.Alt | Keys.D) or Keys.F6 => FocusAddressBar,
+            (Keys.Control | Keys.H) => ToggleHistoryPanel,
+            (Keys.Control | Keys.W) or (Keys.Control | Keys.F4) when tab is not null => () => _ = CloseTabAsync(tab),
+            Keys.F5 or (Keys.Control | Keys.R) when tab is not null => RefreshWebView,
+            (Keys.Alt | Keys.Left) or Keys.BrowserBack when tab is not null => GoBack,
+            (Keys.Alt | Keys.Right) or Keys.BrowserForward when tab is not null => GoForward,
+            _ => null,
+        };
     }
 
     /// <summary>Puts the cursor in the address box (Compact shows it first).</summary>

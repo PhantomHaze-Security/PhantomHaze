@@ -560,6 +560,7 @@ internal static class HtmlRendererResources
         string current = request.Url;
         string method = request.Method;
         byte[]? body = request.Body;
+        bool sendCookies = request.SendCookies;
         for (int redirect = 0; redirect <= MaximumRedirects; redirect++)
         {
             if (!Uri.TryCreate(current, UriKind.Absolute, out Uri? uri) || !WebProtocolPage.IsWebAddress(current) || isBlocked(uri.AbsoluteUri))
@@ -576,7 +577,7 @@ internal static class HtmlRendererResources
                 message.Headers.TryAddWithoutValidation("Referer", request.Referrer);
             }
 
-            if (request.SendCookies)
+            if (sendCookies)
             {
                 string cookieHeader = cookies.GetCookieHeader(uri);
                 if (cookieHeader.Length > 0)
@@ -603,7 +604,7 @@ internal static class HtmlRendererResources
             }
 
             using HttpResponseMessage response = await client.SendAsync(message, HttpCompletionOption.ResponseHeadersRead, cancellationToken).ConfigureAwait(false);
-            if (request.SendCookies && response.Headers.TryGetValues("Set-Cookie", out IEnumerable<string>? setCookies))
+            if (sendCookies && response.Headers.TryGetValues("Set-Cookie", out IEnumerable<string>? setCookies))
             {
                 foreach (string setCookie in setCookies)
                 {
@@ -635,6 +636,7 @@ internal static class HtmlRendererResources
                     body = null;
                 }
 
+                sendCookies &= Uri.Compare(uri, next, UriComponents.SchemeAndServer, UriFormat.SafeUnescaped, StringComparison.OrdinalIgnoreCase) == 0;
                 current = next.AbsoluteUri;
                 continue;
             }

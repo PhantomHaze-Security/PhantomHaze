@@ -34,6 +34,8 @@ The protection banner shows the real protection state at a glance: green while y
 * **Logs You Control:** Logs (including the addresses of pages you open) are kept in `%LOCALAPPDATA%\PhantomHaze\logs`, so the Master Log covers everything since installation. Cookie names and values are never logged, and **Settings -> About -> Delete all logs** removes them at any time.
 
 ###  Modern Browser Suite
+* **Switch users:** Click the person beside Settings to select a profile. PIN-protected profiles prompt for their PIN.
+* **Manage favourites:** Select a favourite in History and press Delete or Backspace to remove it.
 * **Tabbed Navigation:** Clean tab interface with live site favicons and title updates, plus Back (`←`), Forward (`→`), Go (`⏎`), Refresh (`⟳`) and History (`🕘`) buttons.
 * **Keyboard Shortcuts:** `Alt+←` / `Alt+→` (back and forward), `Ctrl+L`, `Alt+D` or `F6` (address box), `Ctrl+T` (new tab, or double-click next to the tabs), `Ctrl+W` / `Ctrl+F4` (close the tab), `F5` / `Ctrl+R` (reload), `Ctrl+H` (history and favourites) and `Ctrl+F` (find in page).
 * **Background Tabs & Resource Saver:** Tabs you are not looking at keep running for the time you choose in **Settings -> General -> Render background tabs for** (1 minute by default, from 10 seconds to forever), then pause until you open them again; a paused tab shows 💤 instead of its icon. With more than 20 tabs open, the resource saver pauses them after 10 seconds instead, so PhantomHaze stays responsive (it can be turned off from its banner or in Settings).
@@ -64,7 +66,7 @@ The protection banner shows the real protection state at a glance: green while y
 * **Extension Protocols:** Extensions can add Web View protocols, for example to load pages through a server or a proxy.
 * **UI Customization:** Extensions can restyle PhantomHaze's own controls and replace them with SVG graphics or shapes (the protection banner is off-limits, so an extension can never fake your protection status).
 
-Extension language reference: [PhantomScript guide](./.claude/skills/phantomscript/SKILL.md)
+Extension authors can find the command reference and examples in the [PhantomScript wiki](./phantomscript-wiki.md).
 
 ---
 
@@ -83,6 +85,8 @@ open tabs are reopened with the new protocol when you click **Save**.
 
 If the chosen protocol cannot be used (for example its extension was turned off), Web View uses WebView2 and says so
 in the log. Whatever the protocol, the PhantomHaze window stays protected from screen capture.
+
+HTMLRenderer and HazeGate display inline `srcdoc` and same-origin HTML iframe previews, including their styles and images. Previews use a separate document with scripts off. External embeds have a link to open the page in a tab.
 
 Developers: see [Adding a Web View protocol](#-adding-a-web-view-protocol-developers) to build another one.
 

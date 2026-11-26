@@ -1225,6 +1225,18 @@ internal sealed partial class RenderedWebProtocolPage : WebProtocolPage
     }
 
     /// <summary>Puts every field control over its placeholder in the drawn page (and hides it when the field is not drawn).</summary>
+    private RectangleF? GetLayoutRectangle(string elementId)
+    {
+        try
+        {
+            return _panel.GetElementRectangle(elementId);
+        }
+        catch (Exception ex) when (ex is InvalidOperationException or NullReferenceException or ArgumentException)
+        {
+            return null;
+        }
+    }
+
     private void PositionFieldControls()
     {
         if ((_fieldControls.Count == 0 && _frames.Count == 0) || IsDisposed || _positioningFields)
@@ -1245,17 +1257,7 @@ internal sealed partial class RenderedWebProtocolPage : WebProtocolPage
                     continue;
                 }
 
-                RectangleF? found;
-                try
-                {
-                    found = _panel.GetElementRectangle(tag.ElementId);
-                }
-                catch (Exception ex) when (ex is InvalidOperationException or NullReferenceException or ArgumentException)
-                {
-                    found = null;
-                }
-
-                if (found is not RectangleF rectangle || rectangle.Width < 2 || rectangle.Height < 2)
+                if (GetLayoutRectangle(tag.ElementId) is not RectangleF rectangle || rectangle.Width < 2 || rectangle.Height < 2)
                 {
                     control.Visible = false;
                     continue;

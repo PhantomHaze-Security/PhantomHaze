@@ -13,6 +13,57 @@ public partial class MainForm
         page.Controls.Add(viewport);
     }
 
+    private readonly ContextMenuStrip _userMenu = new();
+
+    private bool UnlockUser(Form owner, PhantomUser user)
+    {
+        if (user.PinHash is null) return true;
+        string? pin = PromptUserValue(owner, $"PIN for {user.Name}", "", pin: true);
+        if (pin is null) return false;
+        if (user.Accepts(pin)) return true;
+        ShowCaptureProtectedDialog(() => MessageBox.Show(owner, "The PIN was incorrect.", "PhantomHaze Users",
+            MessageBoxButtons.OK, MessageBoxIcon.Warning));
+        return false;
+    }
+
+    private void ShowUserMenu()
+    {
+        try
+        {
+            var state = _userStore.Read();
+            if (!state.Enabled)
+            {
+                OpenSettingsWindow(showUsers: true);
+                return;
+            }
+
+            ClearMenuItems(_userMenu);
+            foreach (PhantomUser user in state.Users)
+            {
+                var item = new ToolStripMenuItem(EscapeMenuText(user.Name))
+                {
+                    Checked = user.Id == _userId,
+                    Enabled = user.Id != _userId,
+                };
+                item.Click += (_, _) =>
+                {
+                    if (!UnlockUser(this, user)) return;
+                    NextUser = user;
+                    Close();
+                };
+                _userMenu.Items.Add(item);
+            }
+
+            _userMenu.Items.Add(new ToolStripSeparator());
+            _userMenu.Items.Add("Manage users…", null, (_, _) => OpenSettingsWindow(showUsers: true));
+            _userMenu.Show(_usersButton, new Point(0, _usersButton.Height));
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or System.Text.Json.JsonException or InvalidDataException)
+        {
+            ShowCaptureProtectedDialog(() => MessageBox.Show(this, ex.Message, "PhantomHaze Users", MessageBoxButtons.OK, MessageBoxIcon.Warning));
+        }
+    }
+
     private TabPage BuildUsersTab(Form owner)
     {
         var page = new TabPage("Users");
@@ -35,14 +86,6 @@ public partial class MainForm
             Commit(state with { Users = state.Users.Select(u => u.Id == updated.Id ? updated : u).ToList() });
         bool Confirm(string message) => ShowCaptureProtectedDialog(() => MessageBox.Show(owner, message, "PhantomHaze Users",
             MessageBoxButtons.YesNo, MessageBoxIcon.Warning, MessageBoxDefaultButton.Button2)) == DialogResult.Yes;
-        bool Unlock(PhantomUser user)
-        {
-            if (user.PinHash is null) return true;
-            string? pin = PromptUserValue(owner, $"PIN for {user.Name}", "", pin: true);
-            if (pin is null) return false;
-            if (!user.Accepts(pin)) throw new ArgumentException("The PIN was incorrect.");
-            return true;
-        }
         void SwitchTo(PhantomUser user)
         {
             NextUser = user;
@@ -86,7 +129,7 @@ public partial class MainForm
         });
         OnClick(switchButton, () =>
         {
-            if (Selected() is { } user && Unlock(user)) SwitchTo(user);
+            if (Selected() is { } user && UnlockUser(owner, user)) SwitchTo(user);
         });
         OnClick(rename, () =>
         {
@@ -96,7 +139,7 @@ public partial class MainForm
         });
         OnClick(pinButton, () =>
         {
-            if (Selected() is not { } user || user.Id == state.DefaultId || !Unlock(user)) return;
+            if (Selected() is not { } user || user.Id == state.DefaultId || !UnlockUser(owner, user)) return;
             string? pin = PromptUserValue(owner, "New four-digit PIN (leave empty to remove)", "", pin: true);
             if (pin is null) return;
             Replace(pin.Length == 0 ? user with { PinHash = null } : user.WithPin(pin));
@@ -104,7 +147,7 @@ public partial class MainForm
         });
         OnClick(makeDefault, () =>
         {
-            if (Selected() is not { } user || !Unlock(user)) return;
+            if (Selected() is not { } user || !UnlockUser(owner, user)) return;
             Commit(state with { DefaultId = user.Id, Users = state.Users.Select(u => u.Id == user.Id ? u with { PinHash = null } : u).ToList() });
             RefreshList(user.Id);
         });

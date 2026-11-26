@@ -250,7 +250,7 @@ public partial class MainForm
         _webViewLoadingOverlayPanel, _protectionStripPanel,
     ];
 
-    private ToolStrip[] PopupMenus => [_disableProtectionMenu, _extensionMenuOverflowMenu, _extensionDropdownMenu, _updateBannerSnoozeMenu];
+    private ToolStrip[] PopupMenus => [_userMenu, _disableProtectionMenu, _extensionMenuOverflowMenu, _extensionDropdownMenu, _updateBannerSnoozeMenu];
 
     private static ThemePalette BuildThemePalette(AppSettings settings)
     {

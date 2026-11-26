@@ -42,7 +42,7 @@ public partial class MainForm
 
         public Task<CoreWebView2Environment> GetWebView2EnvironmentAsync(string? proxyServer) => _form.GetWebView2EnvironmentAsync(proxyServer);
 
-        public Task OnWebView2CoreCreatedAsync(WebView2ProtocolPage page, CoreWebView2 core) => _form.OnWebView2CoreCreatedAsync(page, core);
+        public Task OnWebView2CoreCreatedAsync(WebView2ProtocolPage page) => _form.OnWebView2CoreCreatedAsync(page);
 
         public void SetUiThreadWindowGuard(object owner, bool enabled) => _form.SetUiThreadWindowGuard(owner, enabled);
     }
@@ -202,13 +202,14 @@ public partial class MainForm
     private CoreWebView2Environment? DetachPageFromTab(WebProtocolPage page)
     {
         CoreWebView2Environment? environment = null;
-        if (page.InnermostPage is WebView2ProtocolPage { Core: CoreWebView2 core })
+        if (page.InnermostPage is WebView2ProtocolPage { Session: { } session })
         {
+            var core = session.Core;
+            environment = session.Environment;
             try
             {
                 core.WebResourceRequested -= OnWebResourceRequested;
                 core.WebResourceResponseReceived -= OnWebResourceResponseReceived;
-                environment = core.Environment;
             }
             catch (Exception ex) when (ex is InvalidOperationException or ObjectDisposedException or COMException)
             {
@@ -216,8 +217,7 @@ public partial class MainForm
             }
 
             _tabByCore.Remove(core);
-            if (environment is not null &&
-                _workerRequestFilterCores.TryGetValue(environment, out CoreWebView2? filterCore) &&
+            if (_workerRequestFilterCores.TryGetValue(environment, out CoreWebView2? filterCore) &&
                 ReferenceEquals(filterCore, core))
             {
                 _workerRequestFilterCores.Remove(environment);
@@ -240,35 +240,17 @@ public partial class MainForm
             return;
         }
 
-        bool stillUsed = false;
         foreach (BrowserTab remaining in _tabs)
         {
-            if (remaining.Browser.InnermostPage is not WebView2ProtocolPage { Core: CoreWebView2 core })
+            if (remaining.Browser.InnermostPage is WebView2ProtocolPage { Session: { } session } &&
+                ReferenceEquals(session.Environment, environment))
             {
-                continue;
-            }
-
-            try
-            {
-                if (!ReferenceEquals(core.Environment, environment))
-                {
-                    continue;
-                }
-
-                stillUsed = true;
-                EnsureWorkerRequestFilter(core);
-                break;
-            }
-            catch (Exception ex) when (ex is InvalidOperationException or ObjectDisposedException or COMException)
-            {
-                // That tab is closing; try the next one.
+                EnsureWorkerRequestFilter(environment, session.Core);
+                return;
             }
         }
 
-        if (!stillUsed)
-        {
-            _preparedEnvironments.Remove(environment);
-        }
+        _preparedEnvironments.Remove(environment);
     }
 
     // ---- WebView2 ------------------------------------------------------------------------------------------------
@@ -353,8 +335,10 @@ public partial class MainForm
     /// The WebView2-only parts of a tab, set up before its first navigation: extension request blocking (pages, frames
     /// and workers), the cookie notices, and the empty session with the saved cookies.
     /// </summary>
-    private async Task OnWebView2CoreCreatedAsync(WebView2ProtocolPage page, CoreWebView2 core)
+    private async Task OnWebView2CoreCreatedAsync(WebView2ProtocolPage page)
     {
+        if (page.Session is not { } session) return;
+        var (environment, core) = session;
         AddWebResourceRequestedFilterForAllFrames(core);
         core.WebResourceRequested += OnWebResourceRequested;
         core.WebResourceResponseReceived += OnWebResourceResponseReceived;
@@ -363,13 +347,12 @@ public partial class MainForm
             _tabByCore[core] = owner;
         }
 
-        EnsureWorkerRequestFilter(core);
-        await PrepareWebView2SessionAsync(core, restoreSavedCookies: !page.UsesIsolatedEnvironment);
+        EnsureWorkerRequestFilter(environment, core);
+        await PrepareWebView2SessionAsync(environment, core, restoreSavedCookies: !page.UsesIsolatedEnvironment);
     }
 
-    private Task PrepareWebView2SessionAsync(CoreWebView2 core, bool restoreSavedCookies)
+    private Task PrepareWebView2SessionAsync(CoreWebView2Environment environment, CoreWebView2 core, bool restoreSavedCookies)
     {
-        CoreWebView2Environment environment = core.Environment;
         if (!_preparedEnvironments.TryGetValue(environment, out Task? preparation) || preparation.IsFaulted || preparation.IsCanceled)
         {
             preparation = PrepareAsync();
@@ -381,13 +364,14 @@ public partial class MainForm
         async Task PrepareAsync()
         {
             // Each run starts from an empty web session...
-            core.CookieManager.DeleteAllCookies();
+            var cookies = core.CookieManager;
+            cookies.DeleteAllCookies();
             await core.Profile.ClearBrowsingDataAsync();
 
             // ...plus the cookies saved with Settings -> Save cookies across sessions.
             if (restoreSavedCookies)
             {
-                RestoreSavedCookies(core.CookieManager);
+                await RestoreSavedCookiesAsync(cookies);
             }
         }
     }
@@ -397,19 +381,9 @@ public partial class MainForm
     /// the environment that has a matching filter. The worker filter is therefore kept on exactly one tab per
     /// environment, so web.block applies to worker requests without every tab handling (and logging) each of them.
     /// </summary>
-    private void EnsureWorkerRequestFilter(CoreWebView2 candidate)
+    private void EnsureWorkerRequestFilter(CoreWebView2Environment environment, CoreWebView2 candidate)
     {
         if (_workerRequestFilterUnavailable)
-        {
-            return;
-        }
-
-        CoreWebView2Environment environment;
-        try
-        {
-            environment = candidate.Environment;
-        }
-        catch (Exception ex) when (ex is InvalidOperationException or ObjectDisposedException or COMException)
         {
             return;
         }
@@ -431,6 +405,10 @@ public partial class MainForm
         {
             _workerRequestFilterUnavailable = true;
             Log("This WebView2 runtime cannot filter service or shared worker requests; extension blocking does not cover them.");
+        }
+        catch (Exception ex) when (ex is InvalidOperationException or COMException)
+        {
+            // The browser process went away while its tabs were changing.
         }
     }
 

@@ -875,20 +875,9 @@ public partial class MainForm
     private void ApplyExtensionBranding()
     {
         var enabled = GetEnabledExtensions().Select(ext => ext.Definition).ToList();
-        var conflicts = new List<string>();
-        string? Resolve(string property, Func<PhantomExtensionDefinition, string?> read)
-        {
-            var providers = enabled.Where(ext => read(ext) is not null).ToList();
-            var values = providers.Select(read).Distinct(StringComparer.Ordinal).ToArray();
-            if (values.Length <= 1) return values.FirstOrDefault();
-            conflicts.Add($"The app {property} uses its default because these extensions request different values: " +
-                string.Join(", ", providers.Select(ext => ext.Name)));
-            return null;
-        }
-
-        _appDisplayName = Resolve("name", ext => ext.AppName) ?? "PhantomHaze";
-        Text = AppVersionInfo.WindowTitle(_appDisplayName);
-        string? token = Resolve("icon", ext => ext.AppIcon);
+        var (name, token, conflict) = PhantomExtensionDefinition.ResolveAppBranding(enabled);
+        _appDisplayName = name;
+        Text = AppVersionInfo.WindowTitle(name);
         if (token != _brandIconToken)
         {
             using var image = token is null ? null : PhantomExtensionIconFactory.CreateIcon(token);
@@ -903,7 +892,7 @@ public partial class MainForm
             _brandIconToken = token;
         }
 
-        _brandingConflict = string.Join(Environment.NewLine, conflicts);
+        _brandingConflict = conflict;
         if (_brandingConflict.Length == 0) _shownBrandingConflict = string.Empty;
         else if (Visible && _shownBrandingConflict != _brandingConflict) BeginInvoke(ShowBrandingConflict);
     }

@@ -8,6 +8,9 @@ using AngleSharp;
 using AngleSharp.Browser;
 using AngleSharp.Dom;
 using AngleSharp.Html.Dom;
+using AngleSharp.Html;
+using AngleSharp.Html.Parser;
+using AngleSharp.Text;
 using AngleSharp.Io;
 using AngleSharp.Js;
 using Jint;
@@ -291,7 +294,6 @@ internal sealed class WebPageSession : IDisposable
 
     // Cancelled to stop the page's scripts (time budget used up, or the page closed); the document stays usable.
     private readonly CancellationTokenSource _scriptStop = new();
-    private readonly ConcurrentSet _deniedResources = new();
     private readonly object _networkGate = new();
     private readonly NodeIdTable _nodeIds = new();
     private readonly PageStyleCache _styleCache = new();
@@ -367,7 +369,7 @@ internal sealed class WebPageSession : IDisposable
             .WithCss()
             .With(new SessionRequester(this))
             .WithDefaultLoader(new LoaderOptions { IsResourceLoadingEnabled = scripts, IsNavigationDisabled = false })
-            .With<IResourceLoader>(context => new ScriptOnlyResourceLoader(context, this))
+            .With<IResourceLoader>(context => new ScriptOnlyResourceLoader(context))
             .With(new SessionNavigationHandler(this))
             .With(new MemoryCookieProvider(cookies))
             .WithEventLoop();
@@ -384,7 +386,9 @@ internal sealed class WebPageSession : IDisposable
         _loop = context.GetService<IEventLoop>();
         _scriptsAlive = scripts;
 
-        string html = scripts ? PrepareScriptedHtml(input.Html, BuildPreludeConfig()) : input.Html;
+        string html = scripts
+            ? await Task.Run(() => PrepareScriptedHtml(input.Html, BuildPreludeConfig()), cancellationToken).ConfigureAwait(false)
+            : input.Html;
 
         // Scripts get a total time budget for loading the page; past it, they are stopped and the page is drawn as it is.
         using var budget = scripts ? new CancellationTokenSource(_options.LoadScriptBudget) : null;
@@ -421,7 +425,8 @@ internal sealed class WebPageSession : IDisposable
         var engine = new Engine(options);
 
         // The bridge the prelude uses (it removes these names from the page's global object right away).
-        engine.SetValue("__phFetch", new Action<int, string, string, string, string, string>(OnScriptFetch));
+        engine.SetValue("__phFetch", new Action<int, string, string, string, string?, string, bool>(OnScriptFetch));
+        engine.SetValue("__phSupports", new Func<string, bool>(CssSupportsEvaluator.Matches));
         engine.SetValue("__phMatchMedia", new Func<string, bool>(query => CssMediaQueryEvaluator.Matches(query, BuildMediaContext())));
         engine.SetValue("__phOpen", new Action<string>(OnScriptOpenWindow));
         engine.SetValue("__phUrl", new Action<string, bool>(OnScriptUrlChanged));
@@ -476,83 +481,50 @@ internal sealed class WebPageSession : IDisposable
     internal static string PrepareScriptedHtml(string html, string preludeConfig)
     {
         string prelude = "<script>" + PagePrelude.Script.Replace("__PH_CONFIG__", preludeConfig, StringComparison.Ordinal) + "</script>";
-        string withoutFallbacks = DisableNoModuleScripts(html);
-        int insertAt = FindPreludeInsertPosition(withoutFallbacks);
-        return withoutFallbacks.Insert(insertAt, prelude);
-    }
-
-    private static int FindPreludeInsertPosition(string html)
-    {
-        foreach (string tag in new[] { "<head", "<html" })
+        using var source = new TextSource(html);
+        using var tokenizer = new HtmlTokenizer(source, HtmlEntityProvider.ResolverExtended);
+        int insertAt = 0;
+        var fallbacks = new List<int>();
+        bool scanScripts = html.Contains("nomodule", StringComparison.OrdinalIgnoreCase);
+        bool prologue = true;
+        while (prologue || scanScripts)
         {
-            int index = html.IndexOf(tag, StringComparison.OrdinalIgnoreCase);
-            while (index >= 0)
+            var token = tokenizer.Get();
+            if (token.Type == HtmlTokenType.EndOfFile) break;
+            if (prologue)
             {
-                int after = index + tag.Length;
-                if (after < html.Length && (html[after] == '>' || char.IsWhiteSpace(html[after])))
+                if (token.Type is HtmlTokenType.Doctype or HtmlTokenType.Comment || token.IsStartTag("html") ||
+                    token.IsStartTag("head") || token.Type == HtmlTokenType.Character && string.IsNullOrWhiteSpace(token.Data))
                 {
-                    int end = html.IndexOf('>', after);
-                    if (end >= 0)
-                    {
-                        return end + 1;
-                    }
+                    insertAt = source.Index;
+                    if (token.IsStartTag("head")) prologue = false;
                 }
-
-                index = html.IndexOf(tag, after, StringComparison.OrdinalIgnoreCase);
+                else prologue = false;
             }
+
+            if (token.Type != HtmlTokenType.StartTag) continue;
+            if (token.IsStartTag("script") && token.AsTag().Attributes.Any(attribute => attribute.Name == "nomodule"))
+                fallbacks.Add(token.Position.Index + "<script".Length);
+            // Tokenize raw text in its proper state so script strings and comments are preserved.
+            tokenizer.State = token.Name switch
+            {
+                "script" => HtmlParseMode.Script,
+                "textarea" or "title" => HtmlParseMode.RCData,
+                "style" or "xmp" or "iframe" or "noembed" or "noframes" or "noscript" => HtmlParseMode.Rawtext,
+                "plaintext" => HtmlParseMode.Plaintext,
+                _ => HtmlParseMode.PCData,
+            };
         }
 
-        int doctype = html.IndexOf("<!doctype", StringComparison.OrdinalIgnoreCase);
-        if (doctype >= 0 && doctype < 64)
+        var output = new StringBuilder(html.Length + prelude.Length);
+        output.Append(html, 0, insertAt).Append(prelude);
+        int cursor = insertAt;
+        foreach (int position in fallbacks)
         {
-            int end = html.IndexOf('>', doctype);
-            if (end >= 0)
-            {
-                return end + 1;
-            }
+            output.Append(html, cursor, position - cursor).Append(" type=\"text/x-phantomhaze-nomodule\"");
+            cursor = position;
         }
-
-        return 0;
-    }
-
-    private static string DisableNoModuleScripts(string html)
-    {
-        int index = html.IndexOf("nomodule", StringComparison.OrdinalIgnoreCase);
-        if (index < 0)
-        {
-            return html;
-        }
-
-        var output = new StringBuilder(html.Length + 64);
-        int cursor = 0;
-        int search = 0;
-        while (true)
-        {
-            int start = html.IndexOf("<script", search, StringComparison.OrdinalIgnoreCase);
-            if (start < 0)
-            {
-                break;
-            }
-
-            int end = html.IndexOf('>', start);
-            if (end < 0)
-            {
-                break;
-            }
-
-            string tag = html[start..end];
-            if (tag.Contains("nomodule", StringComparison.OrdinalIgnoreCase))
-            {
-                // The first of two duplicate attributes wins, so this type comes before the script's own.
-                output.Append(html, cursor, start - cursor).Append("<script type=\"text/x-phantomhaze-nomodule\"");
-                cursor = start + "<script".Length;
-            }
-
-            search = end + 1;
-        }
-
-        output.Append(html, cursor, html.Length - cursor);
-        return output.ToString();
+        return output.Append(html, cursor, html.Length - cursor).ToString();
     }
 
     private void OnScriptLog(string level, string message)
@@ -649,7 +621,7 @@ internal sealed class WebPageSession : IDisposable
     }
 
     // fetch() and XMLHttpRequest: downloaded by the protocol's fetcher, answered on the event loop.
-    private void OnScriptFetch(int id, string url, string method, string headersJson, string body, string mode)
+    private void OnScriptFetch(int id, string url, string method, string headersJson, string? body, string mode, bool binaryBody)
     {
         if (!TryResolve(url, out string absolute))
         {
@@ -678,7 +650,8 @@ internal sealed class WebPageSession : IDisposable
         var request = new PageResourceRequest(absolute, PageResourceKind.Data)
         {
             Method = upperMethod,
-            Body = upperMethod is "GET" or "HEAD" || string.IsNullOrEmpty(body) ? null : Encoding.UTF8.GetBytes(body),
+            Body = upperMethod is "GET" or "HEAD" || body is null ? null :
+                binaryBody ? Convert.FromBase64String(body) : Encoding.UTF8.GetBytes(body),
             ContentType = contentType,
             Headers = headers,
             Referrer = DocumentUri.AbsoluteUri,
@@ -1694,7 +1667,7 @@ internal sealed class WebPageSession : IDisposable
     private async Task<IResponse> FetchForDocumentAsync(Request request, CancellationToken cancel)
     {
         string url = request.Address.Href;
-        if (_deniedResources.Contains(url) || !_scriptsAlive || _host.IsBlocked(url, out _) ||
+        if (!_scriptsAlive || _host.IsBlocked(url, out _) ||
             Interlocked.Increment(ref _scriptCount) > MaximumScripts || Interlocked.Read(ref _scriptBytes) > MaximumScriptBytes)
         {
             return NotFound(request.Address);
@@ -1753,26 +1726,14 @@ internal sealed class WebPageSession : IDisposable
     /// AngleSharp would also download images, frames, media and stylesheets. Only scripts are downloaded for the
     /// document: images are drawn (and downloaded) by HTML Renderer, and stylesheets are read by the cascade.
     /// </summary>
-    private sealed class ScriptOnlyResourceLoader : DefaultResourceLoader
+    private sealed class ScriptOnlyResourceLoader(IBrowsingContext context) : DefaultResourceLoader(context, null)
     {
-        private readonly WebPageSession _session;
+        private readonly DefaultResourceLoader _ignored = new(context, _ => false);
 
-        public ScriptOnlyResourceLoader(IBrowsingContext context, WebPageSession session)
-            : base(context, null)
-        {
-            _session = session;
-        }
-
-        public override IDownload FetchAsync(ResourceRequest request)
-        {
-            bool script = request.Source is IHtmlScriptElement scriptElement && !scriptElement.HasAttribute("nomodule");
-            if (!script)
-            {
-                _session._deniedResources.Add(request.Target.Href);
-            }
-
-            return base.FetchAsync(request);
-        }
+        public override IDownload FetchAsync(ResourceRequest request) =>
+            request.Source is IHtmlScriptElement script && !script.HasAttribute("nomodule")
+                ? base.FetchAsync(request)
+                : _ignored.FetchAsync(request);
     }
 
     /// <summary>Navigations a page starts (location.href = ..., form.submit(), links) are handed to PhantomHaze.</summary>
@@ -1814,30 +1775,6 @@ internal sealed class WebPageSession : IDisposable
         }
     }
 
-    /// <summary>A small thread-safe set of strings.</summary>
-    private sealed class ConcurrentSet
-    {
-        private readonly HashSet<string> _items = new(StringComparer.Ordinal);
-
-        public void Add(string item)
-        {
-            lock (_items)
-            {
-                if (_items.Count < 20_000)
-                {
-                    _items.Add(item);
-                }
-            }
-        }
-
-        public bool Contains(string item)
-        {
-            lock (_items)
-            {
-                return _items.Contains(item);
-            }
-        }
-    }
 }
 
 /// <summary>Stable numbers for the nodes of a document, so the drawn page can refer back to them.</summary>
@@ -1857,7 +1794,7 @@ internal sealed class NodeIdTable
         int id = _next++;
         _ids.Add(node, new StrongBox<int>(id));
         _nodes[id] = new WeakReference<INode>(node);
-        if (_nodes.Count > 50_000)
+        if (_nodes.Count > 50_000 && id % 4096 == 0)
         {
             foreach (int stale in _nodes.Where(pair => !pair.Value.TryGetTarget(out _)).Select(pair => pair.Key).ToList())
             {

@@ -511,6 +511,24 @@ internal sealed class PhantomExtensionDefinition
 
     public bool HasUiCustomizations => UiEdits.Count > 0 || UiSvgs.Count > 0 || UiShapes.Count > 0;
 
+    public static (string Name, string? Icon, string Conflict) ResolveAppBranding(IReadOnlyList<PhantomExtensionDefinition> enabled)
+    {
+        var conflicts = new List<string>();
+        string? Resolve(string property, Func<PhantomExtensionDefinition, string?> read)
+        {
+            var providers = enabled.Where(ext => read(ext) is not null).ToList();
+            var values = providers.Select(read).Distinct(StringComparer.Ordinal).ToArray();
+            if (values.Length <= 1) return values.FirstOrDefault();
+            conflicts.Add($"The app {property} uses its default because these extensions request different values: " +
+                string.Join(", ", providers.Select(ext => ext.Name)));
+            return null;
+        }
+
+        string name = Resolve("name", ext => ext.AppName) ?? "PhantomHaze";
+        string? icon = Resolve("icon", ext => ext.AppIcon);
+        return (name, icon, string.Join(Environment.NewLine, conflicts));
+    }
+
     public PhantomExtensionPageDefinition? FindPage(string? pageId)
     {
         return Pages.FirstOrDefault(page => page.Id.Equals(pageId ?? string.Empty, StringComparison.OrdinalIgnoreCase));
@@ -605,7 +623,10 @@ internal static class PhextParser
                             throw new PhextParseException(lineNumber, "app.name needs a single line of up to 64 characters.");
                         definition.AppName = brandingValue;
                     }
-                    else definition.AppIcon = brandingValue;
+                    else
+                    {
+                        definition.AppIcon = PhantomExtensionIconFactory.NormalizeToken(brandingValue);
+                    }
                     break;
                 case "setting.toggle":
                 {
@@ -2242,29 +2263,34 @@ internal static class PhantomExtensionScriptBuilder
 
 internal static class PhantomExtensionIconFactory
 {
+    public static string NormalizeToken(string? iconToken)
+    {
+        string token = iconToken?.Trim() ?? "";
+        if (token.StartsWith("base64:", StringComparison.OrdinalIgnoreCase) ||
+            token.StartsWith("data:image", StringComparison.OrdinalIgnoreCase)) return token;
+        return token.ToLowerInvariant() switch
+        {
+            "" or "security" => "shield",
+            "shield" or "warning" or "info" or "error" or "question" => token.ToLowerInvariant(),
+            _ => "app",
+        };
+    }
+
     public static Image CreateIcon(string? iconToken)
     {
-        if (string.IsNullOrWhiteSpace(iconToken))
-        {
-            return SystemIcons.Shield.ToBitmap();
-        }
-
-        string trimmed = iconToken.Trim();
-
-        if (TryCreateImageFromBase64(trimmed, out Image? decoded) && decoded is not null)
+        string token = NormalizeToken(iconToken);
+        if (TryCreateImageFromBase64(token, out Image? decoded) && decoded is not null)
         {
             return decoded;
         }
 
-        return trimmed.ToLowerInvariant() switch
+        return token switch
         {
             "shield" => SystemIcons.Shield.ToBitmap(),
             "warning" => SystemIcons.Warning.ToBitmap(),
             "info" => SystemIcons.Information.ToBitmap(),
             "error" => SystemIcons.Error.ToBitmap(),
             "question" => SystemIcons.Question.ToBitmap(),
-            "security" => SystemIcons.Shield.ToBitmap(),
-            "app" => SystemIcons.Application.ToBitmap(),
             _ => SystemIcons.Application.ToBitmap(),
         };
     }

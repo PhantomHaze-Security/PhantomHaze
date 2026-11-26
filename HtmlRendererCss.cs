@@ -1458,7 +1458,7 @@ internal static class CssMediaQueryEvaluator
     {
         return name switch
         {
-            "orientation" => context.HeightPx > context.WidthPx ? "portrait" : "landscape",
+            "orientation" => context.HeightPx >= context.WidthPx ? "portrait" : "landscape",
             "prefers-color-scheme" => context.PrefersDark ? "dark" : "light",
             "prefers-reduced-motion" or "prefers-reduced-transparency" or "prefers-reduced-data" or "prefers-contrast" => "no-preference",
             "forced-colors" or "inverted-colors" or "high-contrast" => "none",
@@ -1573,7 +1573,7 @@ internal static class CssSupportsEvaluator
     // (with a simpler fallback outside), so reporting them as unsupported gives the better result.
     private static readonly HashSet<string> UnsupportedProperties = new(StringComparer.OrdinalIgnoreCase)
     {
-        "grid", "grid-template", "grid-template-columns", "grid-template-rows", "grid-template-areas", "grid-area",
+        "grid-template-rows", "grid-area",
         "aspect-ratio", "backdrop-filter", "-webkit-backdrop-filter", "container-type", "container", "contain",
         "content-visibility", "mask", "-webkit-mask", "mask-image", "-webkit-mask-image", "scroll-snap-type",
         "scroll-timeline", "animation-timeline", "view-transition-name", "anchor-name", "position-anchor",
@@ -1583,7 +1583,12 @@ internal static class CssSupportsEvaluator
     {
         try
         {
-            return Evaluate(condition.Trim());
+            string text = condition.Trim();
+            // CSS.supports and @import supports() also accept a bare declaration.
+            int colon = text.IndexOf(':');
+            if (colon > 0 && text[..colon].Trim().All(c => char.IsAsciiLetterOrDigit(c) || c is '-' or '_'))
+                text = "(" + text + ")";
+            return Evaluate(text, 0);
         }
         catch (Exception ex) when (ex is FormatException or ArgumentException or IndexOutOfRangeException)
         {
@@ -1591,11 +1596,12 @@ internal static class CssSupportsEvaluator
         }
     }
 
-    private static bool Evaluate(string condition)
+    private static bool Evaluate(string condition, int depth)
     {
+        if (depth > 48) return false;
         if (condition.StartsWith("not", StringComparison.OrdinalIgnoreCase) && condition.Length > 3 && (char.IsWhiteSpace(condition[3]) || condition[3] == '('))
         {
-            return !Evaluate(condition[3..].Trim());
+            return !Evaluate(condition[3..].Trim(), depth + 1);
         }
 
         List<(string Group, string? Combinator)> groups = SplitGroups(condition);
@@ -1604,17 +1610,17 @@ internal static class CssSupportsEvaluator
             return false;
         }
 
-        bool result = EvaluateGroup(groups[0].Group);
+        bool result = EvaluateGroup(groups[0].Group, depth);
         for (int i = 1; i < groups.Count; i++)
         {
-            bool value = EvaluateGroup(groups[i].Group);
+            bool value = EvaluateGroup(groups[i].Group, depth);
             result = string.Equals(groups[i].Combinator, "or", StringComparison.OrdinalIgnoreCase) ? result || value : result && value;
         }
 
         return result;
     }
 
-    private static bool EvaluateGroup(string group)
+    private static bool EvaluateGroup(string group, int depth)
     {
         string text = group.Trim();
         if (text.StartsWith("selector(", StringComparison.OrdinalIgnoreCase))
@@ -1628,14 +1634,15 @@ internal static class CssSupportsEvaluator
             return false;
         }
 
-        if (text.StartsWith('(') && text.EndsWith(')'))
+        if (!text.EndsWith(')')) return false;
+        if (text.StartsWith('('))
         {
             text = text[1..^1].Trim();
         }
 
         if (text.StartsWith('(') || text.StartsWith("not", StringComparison.OrdinalIgnoreCase))
         {
-            return Evaluate(text);
+            return Evaluate(text, depth + 1);
         }
 
         int colon = text.IndexOf(':');
@@ -1651,17 +1658,18 @@ internal static class CssSupportsEvaluator
             return false;
         }
 
-        if (property.Equals("display", StringComparison.OrdinalIgnoreCase))
-        {
-            return value is not ("grid" or "inline-grid" or "subgrid" or "ruby" or "math");
-        }
+        if (property.StartsWith("grid", StringComparison.OrdinalIgnoreCase) && value.Contains("subgrid", StringComparison.Ordinal)) return false;
+        if (property.Equals("display", StringComparison.OrdinalIgnoreCase) && value is "ruby" or "math") return false;
 
         if (property.Equals("position", StringComparison.OrdinalIgnoreCase))
         {
-            return value is not ("sticky" or "-webkit-sticky");
+            if (value is "sticky" or "-webkit-sticky") return false;
         }
 
-        return true;
+        if (value.Length == 0) return false;
+        if (property.Equals("color", StringComparison.OrdinalIgnoreCase) && CssValues.TryParseColor(value, CssColor.Black, out _))
+            return true;
+        return new CssParser().ParseDeclaration(text)?.Length > 0;
     }
 
     private static List<(string Group, string? Combinator)> SplitGroups(string condition)

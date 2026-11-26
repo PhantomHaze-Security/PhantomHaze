@@ -2360,6 +2360,7 @@ public partial class MainForm : Form
         BuildResourceSaverBanner();
         BuildProtectionDisableMenu();
         ProtectPopupMenuFromCapture(_disableProtectionMenu);
+        ProtectPopupMenuFromCapture(_userMenu);
         ProtectPopupMenuFromCapture(_extensionMenuOverflowMenu);
         ProtectPopupMenuFromCapture(_extensionDropdownMenu);
         ProtectPopupMenuFromCapture(_updateBannerSnoozeMenu);
@@ -2545,7 +2546,7 @@ public partial class MainForm : Form
         _usersButton.MinimumSize = _settingsButton.MinimumSize;
         _usersButton.AccessibleName = "Switch user";
         _headerToolTip.SetToolTip(_usersButton, "Switch user");
-        _usersButton.Click += (_, _) => OpenSettingsWindow(showUsers: true);
+        _usersButton.Click += (_, _) => ShowUserMenu();
 
         // A live clock (with seconds) from the computer's clock, to the left of Settings.
         _menuClockLabel.AutoSize = true;
@@ -3509,11 +3510,13 @@ public partial class MainForm : Form
 
                 int switchVersion = ++_webViewModeSwitchVersion;
                 ShowWebViewLoadingOverlay();
-                await WaitForActiveWebViewDisplayReadinessAsync(switchVersion);
-
-                if (_webViewModeEnabled && switchVersion == _webViewModeSwitchVersion)
+                try
                 {
-                    HideWebViewLoadingOverlay();
+                    await WaitForActiveWebViewDisplayReadinessAsync();
+                }
+                finally
+                {
+                    if (!IsDisposed && switchVersion == _webViewModeSwitchVersion) HideWebViewLoadingOverlay();
                 }
 
                 Log("Web View mode enabled.");
@@ -3574,7 +3577,7 @@ public partial class MainForm : Form
         _webViewLoadingOverlayPanel.Visible = false;
     }
 
-    private async Task WaitForActiveWebViewDisplayReadinessAsync(int switchVersion)
+    private async Task WaitForActiveWebViewDisplayReadinessAsync()
     {
         BrowserTab? tab = _activeTab;
         if (!_webViewModeEnabled || tab is null || !tab.Page.IsReady)
@@ -3597,11 +3600,6 @@ public partial class MainForm : Form
         {
             int stabilizationDelay = wasSuspended ? 220 : 75;
             await Task.WhenAll(minimumOverlayTask, Task.Delay(stabilizationDelay));
-        }
-
-        if (switchVersion != _webViewModeSwitchVersion || !_webViewModeEnabled)
-        {
-            return;
         }
     }
 
@@ -3755,12 +3753,9 @@ public partial class MainForm : Form
         }
         catch (Exception ex)
         {
+            if (IsDisposed || !_tabs.Contains(tab) || !ReferenceEquals(tab.Page, page)) return null;
             Log($"Web tab initialization failed ({protocol.DisplayName} protocol): {ex.Message}");
-            if (_tabs.Contains(tab))
-            {
-                RemoveTabAndDispose(tab);
-            }
-
+            RemoveTabAndDispose(tab);
             ShowTabCreationFailure(protocol, ex);
             UpdateTabLayout();
             return null;
@@ -3791,7 +3786,7 @@ public partial class MainForm : Form
 
     private void ShowTabCreationFailure(WebProtocol protocol, Exception error)
     {
-        string message = protocol is WebView2WebProtocol || protocol.Id == WebProtocolCatalog.WebView2Id
+        string message = error is WebView2RuntimeNotFoundException
             ? "A browser tab could not be created. Install Microsoft Edge WebView2 Runtime on the Windows host, " +
               "or choose another Web View protocol in Settings -> General."
             : $"A browser tab could not be created with the {protocol.DisplayName} protocol:\n{error.Message}\n\n" +
@@ -5582,26 +5577,7 @@ public partial class MainForm : Form
         _cookieCheckInProgress = true;
         try
         {
-            IReadOnlyList<CoreWebView2Cookie> cookies = await core.CookieManager.GetCookiesAsync(null);
-            int registered = 0;
-            foreach (CoreWebView2Cookie cookie in cookies)
-            {
-                if (_knownCookieKeys.Add($"{cookie.Name}\n{cookie.Domain}\n{cookie.Path}"))
-                {
-                    registered++;
-                }
-            }
-
-            if (registered > 0 && !IsDisposed)
-            {
-                Log(registered == 1 ? "1 cookie was registered" : $"{registered} cookies were registered");
-            }
-
-            // With Settings -> Save cookies across sessions on, the saved cookies follow the cookie store.
-            if (!IsDisposed)
-            {
-                WriteSavedCookies(cookies);
-            }
+            await RefreshCookiesAsync(core, countRegistered: true);
         }
         catch (Exception ex) when (ex is InvalidOperationException or ObjectDisposedException or System.Runtime.InteropServices.COMException)
         {
@@ -5615,6 +5591,7 @@ public partial class MainForm : Form
 
     private void CleanupWebSession()
     {
+        _cookieGeneration++;
         if (NextUser is not null) LogForNextUser = _logBox.Text;
         _updateCheckCancellation.Cancel();
         SaveSettings();
@@ -5676,6 +5653,7 @@ public partial class MainForm : Form
             _extensionUiToolTip.Dispose();
             _updateBannerToolTip.Dispose();
             _headerToolTip.Dispose();
+            _userMenu.Dispose();
             _resourceSaverToolTip.Dispose();
             _updateBannerSnoozeMenu.Dispose();
             _clockTimer.Dispose();
@@ -5739,24 +5717,11 @@ public partial class MainForm : Form
     /// </summary>
     protected override bool ProcessCmdKey(ref Message msg, Keys keyData)
     {
-        if (_webViewModeEnabled && _activeTab is not null)
+        if (GetBrowserShortcut(keyData) is Action command)
         {
-            if (keyData is (Keys.Alt | Keys.Left) or Keys.BrowserBack)
-            {
-                GoBack();
-                return true;
-            }
-
-            if (keyData is (Keys.Alt | Keys.Right) or Keys.BrowserForward)
-            {
-                GoForward();
-                return true;
-            }
-        }
-
-        // Ctrl+L, Ctrl+T, Ctrl+W, F5, Ctrl+H...: they also reach what a top bar style leaves out (MainForm.TopBar.cs).
-        if (HandleTopBarShortcut(keyData))
-        {
+            // WebView2 forwards accelerators synchronously. In particular, closing its
+            // controller here can block input while the browser waits for this call to return.
+            BeginInvoke(command);
             return true;
         }
 

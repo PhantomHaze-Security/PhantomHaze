@@ -71,7 +71,7 @@ internal interface IWebProtocolHost
     /// Runs once a WebView2 page's CoreWebView2 exists and before its first navigation: request filters, web.block,
     /// saved cookies.
     /// </summary>
-    Task OnWebView2CoreCreatedAsync(WebView2ProtocolPage page, CoreWebView2 core);
+    Task OnWebView2CoreCreatedAsync(WebView2ProtocolPage page);
 
     /// <summary>
     /// Asks PhantomHaze to exclude every top-level window that opens on the UI thread from screen capture while

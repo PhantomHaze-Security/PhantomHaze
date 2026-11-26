@@ -45,6 +45,8 @@ public partial class MainForm
     // When each saved cookie (name, domain, path) was first saved, kept from one save to the next.
     private Dictionary<(string Name, string Domain, string Path), DateTimeOffset>? _savedCookieTimes;
     private bool _finalCookieSaveDone;
+    private readonly SemaphoreSlim _cookieSnapshotGate = new(1, 1);
+    private int _cookieGeneration;
 
     private static OptionItem<int>[] BuildRetentionOptions() =>
     [
@@ -103,18 +105,23 @@ public partial class MainForm
     }
 
     /// <summary>Puts the saved cookies into a fresh WebView2 session (called once per session, before its first page).</summary>
-    private void RestoreSavedCookies(CoreWebView2CookieManager manager)
+    private async Task RestoreSavedCookiesAsync(CoreWebView2CookieManager manager)
     {
         if (!_settings.PersistCookiesAcrossSessions)
         {
             return;
         }
 
-        List<SavedCookie> saved = LoadSavedCookies();
+        int generation = _cookieGeneration;
+        List<SavedCookie> saved = await Task.Run(LoadSavedCookies);
+        if (generation != _cookieGeneration || IsDisposed) return;
         _savedCookieTimes = saved.ToDictionary(cookie => (cookie.Name, cookie.Domain, cookie.Path), cookie => cookie.SavedAtUtc);
         int restored = 0;
-        foreach (SavedCookie savedCookie in saved)
+        for (int i = 0; i < saved.Count; i++)
         {
+            if (i > 0 && i % 32 == 0) await Task.Delay(1);
+            if (generation != _cookieGeneration || IsDisposed) return;
+            SavedCookie savedCookie = saved[i];
             try
             {
                 CoreWebView2Cookie cookie = manager.CreateCookie(savedCookie.Name, savedCookie.Value, savedCookie.Domain, savedCookie.Path);
@@ -152,64 +159,80 @@ public partial class MainForm
     /// responses (with the cookies already read for the cookie notice), before WebView2 tabs close, and when
     /// PhantomHaze closes.
     /// </summary>
-    private void WriteSavedCookies(IReadOnlyList<CoreWebView2Cookie> liveCookies)
+    private async Task RefreshCookiesAsync(CoreWebView2 core, bool countRegistered)
     {
-        if (!_settings.PersistCookiesAcrossSessions)
-        {
-            return;
-        }
-
-        _savedCookieTimes ??= LoadSavedCookies().ToDictionary(cookie => (cookie.Name, cookie.Domain, cookie.Path), cookie => cookie.SavedAtUtc);
-        DateTimeOffset now = DateTimeOffset.UtcNow;
-        var file = new SavedCookieFile();
-        var times = new Dictionary<(string Name, string Domain, string Path), DateTimeOffset>();
-        foreach (CoreWebView2Cookie live in liveCookies)
-        {
-            SavedCookie cookie;
-            try
-            {
-                var path = live.Path;
-                var key = (live.Name, live.Domain, Path: string.IsNullOrEmpty(path) ? "/" : path);
-                cookie = new SavedCookie
-                {
-                    Name = key.Name,
-                    Value = live.Value,
-                    Domain = key.Domain,
-                    Path = key.Path,
-                    ExpiresUtc = live.IsSession ? null : ToUniversalTime(live.Expires),
-                    IsSecure = live.IsSecure,
-                    IsHttpOnly = live.IsHttpOnly,
-                    SameSite = (int)live.SameSite,
-                    SavedAtUtc = _savedCookieTimes.TryGetValue(key, out DateTimeOffset savedAt) ? savedAt : now,
-                };
-            }
-            catch (Exception ex) when (ex is COMException or InvalidOperationException or ArgumentException)
-            {
-                continue;
-            }
-
-            times[(cookie.Name, cookie.Domain, cookie.Path)] = cookie.SavedAtUtc;
-            if (!IsCookieStillSaved(cookie))
-            {
-                // Past its retention period: it is used for the rest of this session but no longer saved.
-                continue;
-            }
-
-            file.Cookies.Add(cookie);
-        }
-
+        int generation = _cookieGeneration;
+        await _cookieSnapshotGate.WaitAsync();
         try
         {
-            file.Cookies = UniqueSavedCookies(file.Cookies).ToList();
-            byte[] json = JsonSerializer.SerializeToUtf8Bytes(file);
-            byte[] protectedBytes = ProtectedData.Protect(json, SavedCookiesEntropy, DataProtectionScope.CurrentUser);
-            WriteBytesAtomically(_cookiesFilePath, protectedBytes);
-            _savedCookieTimes = times;
+            if (generation != _cookieGeneration || IsDisposed) return;
+            var cookies = await core.CookieManager.GetCookiesAsync(null);
+            bool persist = _settings.PersistCookiesAcrossSessions;
+            if (persist && _savedCookieTimes is null)
+            {
+                var saved = await Task.Run(LoadSavedCookies);
+                if (generation != _cookieGeneration || IsDisposed) return;
+                _savedCookieTimes = saved.ToDictionary(c => (c.Name, c.Domain, c.Path), c => c.SavedAtUtc);
+            }
+
+            int registered = 0;
+            var times = new Dictionary<(string Name, string Domain, string Path), DateTimeOffset>();
+            var file = new SavedCookieFile();
+            DateTimeOffset now = DateTimeOffset.UtcNow;
+            for (int i = 0; i < cookies.Count; i++)
+            {
+                // WebView2 cookies are apartment-bound. Give WinForms time for input
+                // between batches while keeping COM property reads on the UI thread.
+                if (i > 0 && i % 32 == 0) await Task.Delay(1);
+                if (generation != _cookieGeneration || IsDisposed) return;
+                try
+                {
+                    var live = cookies[i];
+                    string path = live.Path;
+                    var key = (live.Name, live.Domain, Path: string.IsNullOrEmpty(path) ? "/" : path);
+                    if (countRegistered && _knownCookieKeys.Add($"{key.Name}\n{key.Domain}\n{key.Path}"))
+                        registered++;
+                    if (!persist) continue;
+
+                    var cookie = new SavedCookie
+                    {
+                        Name = key.Name, Domain = key.Domain, Path = key.Path, Value = live.Value,
+                        ExpiresUtc = live.IsSession ? null : ToUniversalTime(live.Expires),
+                        IsSecure = live.IsSecure, IsHttpOnly = live.IsHttpOnly, SameSite = (int)live.SameSite,
+                        SavedAtUtc = _savedCookieTimes!.TryGetValue(key, out var firstSaved) ? firstSaved : now,
+                    };
+                    times[key] = cookie.SavedAtUtc;
+                    if (IsCookieStillSaved(cookie)) file.Cookies.Add(cookie);
+                }
+                catch (Exception ex) when (ex is COMException or InvalidOperationException or ArgumentException)
+                {
+                    // WebView2 no longer has this cookie.
+                }
+            }
+
+            if (registered > 0) Log(registered == 1 ? "1 cookie was registered" : $"{registered} cookies were registered");
+            if (!persist || generation != _cookieGeneration || IsDisposed) return;
+            string temp = BuildSidecarFilePath(_cookiesFilePath, ".tmp");
+            try
+            {
+                await Task.Run(() =>
+                {
+                    file.Cookies = UniqueSavedCookies(file.Cookies).ToList();
+                    byte[] json = JsonSerializer.SerializeToUtf8Bytes(file);
+                    File.WriteAllBytes(temp, ProtectedData.Protect(json, SavedCookiesEntropy, DataProtectionScope.CurrentUser));
+                });
+                // Clear cookies or switching users during the write invalidates this snapshot.
+                if (generation != _cookieGeneration || IsDisposed) return;
+                File.Move(temp, _cookiesFilePath, overwrite: true);
+                _savedCookieTimes = times;
+            }
+            finally { TryDeleteFile(temp); }
         }
         catch (Exception ex) when (ex is CryptographicException or IOException or UnauthorizedAccessException or NotSupportedException)
         {
             Log($"The cookies could not be saved: {ex.Message}");
         }
+        finally { _cookieSnapshotGate.Release(); }
     }
 
     private static DateTimeOffset ToUniversalTime(DateTime value)
@@ -229,8 +252,7 @@ public partial class MainForm
 
         try
         {
-            IReadOnlyList<CoreWebView2Cookie> cookies = await core.CookieManager.GetCookiesAsync(null);
-            WriteSavedCookies(cookies);
+            await RefreshCookiesAsync(core, countRegistered: false);
         }
         catch (Exception ex) when (ex is InvalidOperationException or ObjectDisposedException or COMException)
         {
@@ -249,6 +271,7 @@ public partial class MainForm
 
     private void DeleteSavedCookiesFile()
     {
+        _cookieGeneration++;
         _savedCookieTimes = null;
         TryDeleteFile(_cookiesFilePath);
     }
@@ -274,20 +297,6 @@ public partial class MainForm
         // HTMLRenderer and HazeGate pages keep their own cookies and localStorage (in memory).
         RenderedPageSessionData.ClearAll();
         Log("All cookies were cleared, including the saved ones.");
-    }
-
-    private static void WriteBytesAtomically(string filePath, byte[] contents)
-    {
-        string tempPath = BuildSidecarFilePath(filePath, ".tmp");
-        try
-        {
-            File.WriteAllBytes(tempPath, contents);
-            File.Move(tempPath, filePath, overwrite: true);
-        }
-        finally
-        {
-            TryDeleteFile(tempPath);
-        }
     }
 
     /// <summary>
