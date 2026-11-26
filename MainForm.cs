@@ -66,6 +66,8 @@ public partial class MainForm : Form
 
         /// <summary>HTMLRenderer and HazeGate pages run their JavaScript (Settings -> General).</summary>
         public bool RenderedPageScriptsEnabled { get; set; } = true;
+        public bool InspectHtml { get; set; }
+        public bool ShowFavoritesBar { get; set; } = true;
 
         /// <summary>How the top bar looks (Settings -> Appearance -> Top bar).</summary>
         public TopBarStyle TopBarStyle { get; set; } = TopBarStyle.Comfortable;
@@ -101,6 +103,8 @@ public partial class MainForm : Form
                 CookieRetentionDays = CookieRetentionDays,
                 WebViewProtocol = WebViewProtocol,
                 RenderedPageScriptsEnabled = RenderedPageScriptsEnabled,
+                InspectHtml = InspectHtml,
+                ShowFavoritesBar = ShowFavoritesBar,
                 TopBarStyle = TopBarStyle,
                 DefaultSearchEngine = DefaultSearchEngine,
                 StartingPage = StartingPage,
@@ -321,6 +325,9 @@ public partial class MainForm : Form
 
         /// <summary>What shows the tab's web page; replaced when the Web View protocol changes.</summary>
         public WebProtocolPage Page { get; set; }
+        public WebProtocolPage? OriginalPage { get; set; }
+        public WebProtocolPage Browser => OriginalPage ?? Page;
+        public string? InspectorDraft { get; set; }
 
         public Panel HeaderPanel { get; }
         public PictureBox FaviconBox { get; }
@@ -347,6 +354,7 @@ public partial class MainForm : Form
         // Incremented on every NavigationStarting so async work started for one document can detect that the
         // tab has moved on before touching the new document.
         public int NavigationSequence { get; set; }
+        public int FaviconSequence { get; set; } = -1;
     }
 
     // The rounded top bar ("header"): the menu row, the Web View address and tab rows and the protection banner.
@@ -448,7 +456,7 @@ public partial class MainForm : Form
     private readonly string _extensionsRootPath;
     private readonly string _updateReminderFilePath;
     private readonly List<HistoryEntry> _historyEntries = new();
-    private readonly List<string> _favoriteUrls = new();
+    private readonly List<Favorite> _favorites = new();
     private readonly List<BrowserTab> _tabs = new();
     private readonly List<LoadedExtension> _loadedExtensions = new();
     private readonly Dictionary<string, LoadedExtension> _loadedExtensionById = new(StringComparer.OrdinalIgnoreCase);
@@ -525,8 +533,18 @@ public partial class MainForm : Form
         "LPT0", "LPT1", "LPT2", "LPT3", "LPT4", "LPT5", "LPT6", "LPT7", "LPT8", "LPT9",
     };
 
-    public MainForm()
+    private readonly PhantomUserStore _userStore;
+    private readonly Guid _userId;
+    private readonly FileStream? _userLease;
+    internal PhantomUser? NextUser { get; private set; }
+    internal string? LogForNextUser { get; private set; }
+
+    internal MainForm(PhantomUserStore userStore, PhantomUser user, FileStream? lease = null, string? sessionLog = null)
     {
+        _userStore = userStore;
+        _userId = user.Id;
+        _userLease = lease;
+        _logBox.Text = sessionLog ?? string.Empty;
         // The version and release channel come from PhantomHaze.csproj (see AppVersionInfo).
         Text = AppVersionInfo.WindowTitle;
         Width = 980;
@@ -539,16 +557,17 @@ public partial class MainForm : Form
         KeyDown += OnMainFormKeyDown;
         TrySetWindowIcon();
 
-        _logDirectory = InitializeLogDirectory();
-        _fontCacheDirectory = Path.Combine(GetAppDataDirectory(), "fonts");
+        _logDirectory = InitializeLogDirectory(userStore.Root);
+        string dataDirectory = userStore.DirectoryFor(user.Id);
+        _fontCacheDirectory = Path.Combine(dataDirectory, "fonts");
         _webSessionPath = InitializeWebSessionPath();
         _webSessionLock = LockWebSessionFolder(_webSessionPath);
-        _favoritesFilePath = InitializeFavoritesFilePath();
-        _historyFilePath = InitializeHistoryFilePath();
-        _cookiesFilePath = InitializeAppDataFilePath(SavedCookiesFileName);
-        _settingsFilePath = InitializeSettingsFilePath();
-        _extensionsRootPath = InitializeExtensionsDirectoryPath();
-        _updateReminderFilePath = InitializeAppDataFilePath("update-reminder.json");
+        _favoritesFilePath = Path.Combine(dataDirectory, "favorites.json");
+        _historyFilePath = Path.Combine(dataDirectory, "history.json");
+        _cookiesFilePath = Path.Combine(dataDirectory, SavedCookiesFileName);
+        _settingsFilePath = Path.Combine(dataDirectory, "settings.json");
+        _extensionsRootPath = Directory.CreateDirectory(Path.Combine(dataDirectory, "extensions")).FullName;
+        _updateReminderFilePath = Path.Combine(dataDirectory, "update-reminder.json");
         _faviconHttpClient.Timeout = TimeSpan.FromSeconds(5);
         // Favicons are downloaded for every page, so a site must not be able to make PhantomHaze buffer an
         // arbitrarily large response (the default limit is 2 GB). Real favicons are a few kilobytes.
@@ -641,7 +660,8 @@ public partial class MainForm : Form
 
     // The rounded top bar's sizes (the margin around it, its corner radius, the padding inside it, its rows) depend on
     // its style: see TopBarMetrics in MainForm.TopBar.cs.
-    private int AddressPanelHeight => ScaleByDpi(AddressRowHeight + TabsRowHeight);
+    private int FavoritesBarHeight => _settings.ShowFavoritesBar && _favorites.Count > 0 ? ScaleByDpi(28) : 0;
+    private int AddressPanelHeight => ScaleByDpi(AddressRowHeight + TabsRowHeight) + FavoritesBarHeight;
 
     /// <summary>The width of the ring around the pills extensions add to the top bar.</summary>
     private int ExtensionPillRingWidth => Math.Max(1, ScaleByDpi(2));
@@ -699,6 +719,7 @@ public partial class MainForm : Form
         if (_addressRootLayout is not null && _addressRootLayout.RowStyles.Count > 0)
         {
             _addressRootLayout.RowStyles[0].Height = ScaleByDpi(AddressRowHeight);
+            _addressRootLayout.RowStyles[2].Height = FavoritesBarHeight;
         }
 
         if (_addressStripLayout is not null && _addressStripLayout.RowStyles.Count > 0)
@@ -780,9 +801,9 @@ public partial class MainForm : Form
     /// really holds everything since PhantomHaze was installed. Until v1.3.5 they were written to %TEMP%, which
     /// Windows clears on its own; any logs still there are moved here.
     /// </summary>
-    private static string InitializeLogDirectory()
+    private static string InitializeLogDirectory(string root)
     {
-        string logDirectory = Path.Combine(GetAppDataDirectory(), "logs");
+        string logDirectory = Path.Combine(root, "logs");
         try
         {
             Directory.CreateDirectory(logDirectory);
@@ -867,11 +888,6 @@ public partial class MainForm : Form
         {
             return new List<PhantomLogFile>();
         }
-    }
-
-    private static string GetAppDataDirectory()
-    {
-        return Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "PhantomHaze");
     }
 
     private static string InitializeWebSessionPath()
@@ -991,33 +1007,6 @@ public partial class MainForm : Form
         }
 
         return deleted;
-    }
-
-    private static string InitializeFavoritesFilePath() => InitializeAppDataFilePath("favorites.json");
-
-    private static string InitializeHistoryFilePath() => InitializeAppDataFilePath("history.json");
-
-    private static string InitializeSettingsFilePath() => InitializeAppDataFilePath("settings.json");
-
-    private static string InitializeExtensionsDirectoryPath()
-    {
-        string extensionsDir = Path.Combine(
-            Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
-            "PhantomHaze",
-            "extensions");
-
-        Directory.CreateDirectory(extensionsDir);
-        return extensionsDir;
-    }
-
-    private static string InitializeAppDataFilePath(string fileName)
-    {
-        string appDataDir = Path.Combine(
-            Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
-            "PhantomHaze");
-
-        Directory.CreateDirectory(appDataDir);
-        return Path.Combine(appDataDir, fileName);
     }
 
     private void LoadSettings()
@@ -2405,6 +2394,7 @@ public partial class MainForm : Form
         };
 
         Controls.Add(_contentHostPanel);
+        BuildInspector();
         // Under the top bar, outside Web View: the protection status and button.
         Controls.Add(_protectionStripPanel);
         // The top bar holds the menu, the Web View address and tab rows and (in Web View) the protection banner.
@@ -3095,10 +3085,12 @@ public partial class MainForm : Form
             Padding = new Padding(0),
         };
         TableLayoutPanel rootLayout = _addressRootLayout;
+        rootLayout.RowCount = 3;
         rootLayout.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100f));
         rootLayout.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 0));
         rootLayout.RowStyles.Add(new RowStyle(SizeType.Absolute, ScaleByDpi(AddressRowHeight)));
         rootLayout.RowStyles.Add(new RowStyle(SizeType.Percent, 100f));
+        rootLayout.RowStyles.Add(new RowStyle(SizeType.Absolute, FavoritesBarHeight));
 
         // Columns: address box (stretches) | Back (←) | Forward (→) | Go | Refresh | History.
         _addressStripLayout = new TableLayoutPanel
@@ -3284,6 +3276,9 @@ public partial class MainForm : Form
         rootLayout.Controls.Add(tabsLayout, 0, 1);
         rootLayout.SetColumnSpan(stripLayout, 2);
         rootLayout.SetColumnSpan(tabsLayout, 2);
+        rootLayout.Controls.Add(_favoritesBar, 0, 2);
+        rootLayout.SetColumnSpan(_favoritesBar, 2);
+        ProtectPopupMenuFromCapture(_favoritesBar.OverflowButton.DropDown);
 
         _addressBarPanel.Controls.Add(rootLayout);
         UpdateAddressStripLayout();
@@ -3520,6 +3515,7 @@ public partial class MainForm : Form
         _webViewModeSwitchVersion++;
         HideWebViewLoadingOverlay();
         _webViewModeEnabled = false;
+        RefreshInspector();
         _historyPanel.Visible = false;
         _historyButton.BackColor = GetCommandButtonBackColor();
         HideFindPanel(clearHighlights: true);
@@ -3912,6 +3908,7 @@ public partial class MainForm : Form
         }
 
         _activeTab = tab;
+        RefreshInspector();
         RefreshTabTitle(tab);
         UpdateTabVisibilityAndRendering();
 
@@ -4013,6 +4010,7 @@ public partial class MainForm : Form
             _ = ClearFindHighlightsAsync(tab);
         }
 
+        RestoreNativePage(tab);
         WebProtocolPage page = tab.Page;
         CoreWebView2Environment? environment = DetachPageFromTab(page);
         _tabs.Remove(tab);
@@ -4147,6 +4145,7 @@ public partial class MainForm : Form
 
     private void NavigateTabToUrl(BrowserTab tab, string normalizedUrl, string reason)
     {
+        RestoreNativePage(tab);
         if (!tab.Page.IsReady)
         {
             Log("Tab navigation requested before Web View was initialized.");
@@ -4453,11 +4452,12 @@ public partial class MainForm : Form
             return;
         }
 
-        if (!_activeTab.Page.CanGoBack)
+        if (!_activeTab.Browser.CanGoBack)
         {
             return;
         }
 
+        RestoreNativePage(_activeTab);
         _activeTab.Page.GoBack();
         Log("Web back navigation requested.");
     }
@@ -4470,11 +4470,12 @@ public partial class MainForm : Form
             return;
         }
 
-        if (!_activeTab.Page.CanGoForward)
+        if (!_activeTab.Browser.CanGoForward)
         {
             return;
         }
 
+        RestoreNativePage(_activeTab);
         _activeTab.Page.GoForward();
         Log("Web forward navigation requested.");
     }
@@ -4487,6 +4488,7 @@ public partial class MainForm : Form
             return;
         }
 
+        RestoreNativePage(_activeTab);
         _activeTab.Page.Reload();
         Log("Web page refresh requested.");
     }
@@ -4601,8 +4603,8 @@ public partial class MainForm : Form
     private void UpdateNavigationButtons()
     {
         bool ready = _webViewModeEnabled && _activeTab is not null && _activeTab.Page.IsReady;
-        _backButton.Enabled = ready && _activeTab!.Page.CanGoBack;
-        _forwardButton.Enabled = ready && _activeTab!.Page.CanGoForward;
+        _backButton.Enabled = ready && _activeTab!.Browser.CanGoBack;
+        _forwardButton.Enabled = ready && _activeTab!.Browser.CanGoForward;
     }
 
     private void RefreshHistoryPanelItems()
@@ -4623,16 +4625,17 @@ public partial class MainForm : Form
 
     private void RefreshFavoritesPanelItems()
     {
+        RefreshFavoritesBar();
         _favoritesListBox.Items.Clear();
-        if (_favoriteUrls.Count == 0)
+        if (_favorites.Count == 0)
         {
             _favoritesListBox.Items.Add("(No favourites saved)");
             return;
         }
 
-        for (int i = _favoriteUrls.Count - 1; i >= 0; i--)
+        for (int i = _favorites.Count - 1; i >= 0; i--)
         {
-            _favoritesListBox.Items.Add(_favoriteUrls[i]);
+            _favoritesListBox.Items.Add(_favorites[i].Url);
         }
     }
 
@@ -4641,6 +4644,8 @@ public partial class MainForm : Form
         tab.CurrentUrl = e.Url;
         tab.IsNavigationPending = true;
         tab.NavigationSequence++;
+        tab.InspectorDraft = null;
+        if (ReferenceEquals(_activeTab, tab)) RefreshInspector();
         if (_webViewModeEnabled && ReferenceEquals(_activeTab, tab))
         {
             _addressBarTextBox.Text = e.Url;
@@ -4654,6 +4659,7 @@ public partial class MainForm : Form
     {
         tab.IsNavigationPending = false;
         int navigationSequence = tab.NavigationSequence;
+        if (ReferenceEquals(_activeTab, tab)) RefreshInspector();
         WebProtocolPage page = tab.Page;
 
         try
@@ -4733,6 +4739,7 @@ public partial class MainForm : Form
     private void OnPageTitleChanged(BrowserTab tab)
     {
         RefreshTabTitle(tab);
+        UpdateSavedFavorite(tab);
         Log($"Tab {tab.Id} title: {tab.Title}");
     }
 
@@ -4821,18 +4828,23 @@ public partial class MainForm : Form
 
         // Pages that download their parts themselves (HTMLRenderer, HazeGate) download their icon the same way: through
         // their proxy server or gateway, checked against web.block.
-        if (tab.Page.DownloadsOwnFavicon)
+        var page = tab.Page;
+        int sequence = tab.NavigationSequence;
+        bool Current() => _tabs.Contains(tab) && ReferenceEquals(tab.Page, page) && tab.NavigationSequence == sequence;
+        if (page.DownloadsOwnFavicon)
         {
-            WebProtocolPage page = tab.Page;
             Image? ownIcon = await page.DownloadFaviconAsync();
-            if (!_tabs.Contains(tab) || !ReferenceEquals(tab.Page, page))
+            if (!Current())
             {
                 ownIcon?.Dispose();
                 return;
             }
 
-            SetTabFavicon(tab, ownIcon ?? DefaultTabIcon, ownsImage: ownIcon is not null);
-            return;
+            if (ownIcon is not null || !tab.Protocol.LoadsPagesDirectly || page.InnermostPage is not WebView2ProtocolPage)
+            {
+                SetTabFavicon(tab, ownIcon ?? DefaultTabIcon, ownsImage: ownIcon is not null);
+                return;
+            }
         }
 
         // Icons are downloaded by PhantomHaze itself, which would contact the site directly and go around the gateway or
@@ -4844,6 +4856,7 @@ public partial class MainForm : Form
         }
 
         string? faviconUrl = await tab.Page.GetDeclaredFaviconUrlAsync();
+        if (!Current()) return;
         if (string.IsNullOrWhiteSpace(faviconUrl))
         {
             faviconUrl = BuildFallbackFaviconUrl(tab.CurrentUrl);
@@ -4856,6 +4869,11 @@ public partial class MainForm : Form
         }
 
         Image? favicon = await TryDownloadImageAsync(faviconUrl);
+        if (!Current())
+        {
+            favicon?.Dispose();
+            return;
+        }
         if (favicon is null)
         {
             SetTabFavicon(tab, DefaultTabIcon, ownsImage: false);
@@ -5263,17 +5281,16 @@ public partial class MainForm : Form
             return;
         }
 
-        int existingIndex = _favoriteUrls.FindIndex(url =>
-            url.Equals(normalizedUrl, StringComparison.OrdinalIgnoreCase));
+        int existingIndex = FindFavorite(normalizedUrl);
 
         if (existingIndex >= 0)
         {
-            _favoriteUrls.RemoveAt(existingIndex);
+            _favorites.RemoveAt(existingIndex);
             Log($"Favourite removed: {normalizedUrl}");
         }
         else
         {
-            _favoriteUrls.Add(normalizedUrl);
+            _favorites.Add(FavoriteFromTab(_activeTab!, normalizedUrl));
             Log($"Favourite added: {normalizedUrl}");
         }
 
@@ -5315,7 +5332,7 @@ public partial class MainForm : Form
         {
             string? currentUrl = GetActiveTabUrl();
             isFavorite = TryNormalizeUrl(currentUrl, out string normalizedCurrentUrl) &&
-                _favoriteUrls.Any(url => url.Equals(normalizedCurrentUrl, StringComparison.OrdinalIgnoreCase));
+                FindFavorite(normalizedCurrentUrl) >= 0;
         }
 
         _favoriteButton.BackColor = isFavorite ? Color.Gold : idleBackColor;
@@ -5332,7 +5349,7 @@ public partial class MainForm : Form
 
     private void LoadFavorites()
     {
-        _favoriteUrls.Clear();
+        _favorites.Clear();
 
         try
         {
@@ -5343,26 +5360,23 @@ public partial class MainForm : Form
             }
 
             string rawJson = File.ReadAllText(_favoritesFilePath);
-            List<string>? loaded = JsonSerializer.Deserialize<List<string>>(rawJson);
-            if (loaded is null)
+            using JsonDocument loaded = JsonDocument.Parse(rawJson);
+            foreach (JsonElement item in loaded.RootElement.EnumerateArray())
             {
-                RefreshFavoritesPanelItems();
-                return;
-            }
-
-            foreach (string item in loaded)
-            {
-                if (!TryNormalizeUrl(item, out string normalized))
+                Favorite? favorite = item.ValueKind switch
+                {
+                    JsonValueKind.String => new Favorite(item.GetString() ?? "", "", null),
+                    JsonValueKind.Object => item.Deserialize<Favorite>(),
+                    _ => null,
+                };
+                if (favorite is null || !TryNormalizeUrl(favorite.Url, out string normalized))
                 {
                     continue;
                 }
 
-                bool exists = _favoriteUrls.Any(url =>
-                    url.Equals(normalized, StringComparison.OrdinalIgnoreCase));
-
-                if (!exists)
+                if (FindFavorite(normalized) < 0)
                 {
-                    _favoriteUrls.Add(normalized);
+                    _favorites.Add(favorite with { Url = normalized });
                 }
             }
         }
@@ -5382,7 +5396,7 @@ public partial class MainForm : Form
         try
         {
             string json = JsonSerializer.Serialize(
-                _favoriteUrls,
+                _favorites,
                 new JsonSerializerOptions { WriteIndented = true });
 
             WriteFileAtomically(_favoritesFilePath, json);
@@ -5395,6 +5409,7 @@ public partial class MainForm : Form
 
     private void SetTabFavicon(BrowserTab tab, Image image, bool ownsImage)
     {
+        tab.FaviconSequence = tab.NavigationSequence;
         if (tab.OwnedFaviconImage is not null)
         {
             tab.OwnedFaviconImage.Dispose();
@@ -5406,6 +5421,7 @@ public partial class MainForm : Form
         {
             tab.OwnedFaviconImage = image;
         }
+        UpdateSavedFavorite(tab);
     }
 
     private void AddHistoryEntry(string url)
@@ -5517,7 +5533,7 @@ public partial class MainForm : Form
         // Every WebView2 tab of the shared environment uses one cookie store, so any of them can be asked. (Proxy
         // protocols have cookie stores of their own, which are neither counted nor saved.)
         CoreWebView2? core = _cookieCheckTab is { } preferred && _tabs.Contains(preferred) &&
-                             preferred.Page.InnermostPage is WebView2ProtocolPage { UsesIsolatedEnvironment: false } preferredPage
+                             preferred.Browser.InnermostPage is WebView2ProtocolPage { UsesIsolatedEnvironment: false } preferredPage
             ? preferredPage.Core
             : null;
         core ??= FindSharedWebView2Core();
@@ -5563,6 +5579,7 @@ public partial class MainForm : Form
 
     private void CleanupWebSession()
     {
+        if (NextUser is not null) LogForNextUser = _logBox.Text;
         _updateCheckCancellation.Cancel();
         SaveSettings();
         SaveHistory();
@@ -6315,7 +6332,8 @@ public partial class MainForm : Form
             MinimizeBox = false,
             MaximizeBox = false,
             ShowInTaskbar = false,
-            ClientSize = new Size(ScaleByDpi(760), ScaleByDpi(580)),
+            ClientSize = new Size(Math.Min(ScaleByDpi(760), Screen.FromControl(this).WorkingArea.Width - ScaleByDpi(24)),
+                Math.Min(ScaleByDpi(580), Screen.FromControl(this).WorkingArea.Height - ScaleByDpi(60))),
             AutoScaleMode = AutoScaleMode.Dpi,
         };
 
@@ -6351,6 +6369,7 @@ public partial class MainForm : Form
         settingsTabs.TabPages.Add(generalTab);
         settingsTabs.TabPages.Add(appearanceTab.Page);
         settingsTabs.TabPages.Add(extensionsTab);
+        settingsTabs.TabPages.Add(BuildUsersTab(settingsWindow));
         settingsTabs.TabPages.Add(backupTab.Page);
         settingsTabs.TabPages.Add(aboutTab.Page);
         settingsTabs.SelectedIndexChanged += (_, _) =>
@@ -6379,7 +6398,7 @@ public partial class MainForm : Form
         generalLayout.RowStyles.Add(new RowStyle(SizeType.Absolute, ScaleByDpi(36)));
         generalLayout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
         generalLayout.RowStyles.Add(new RowStyle(SizeType.Absolute, ScaleByDpi(36)));
-        generalLayout.RowStyles.Add(new RowStyle(SizeType.Percent, 100f));
+        generalLayout.RowStyles.Add(new RowStyle(SizeType.Absolute, ScaleByDpi(36)));
 
         // How long a tab keeps rendering after it goes into the background (replaces "Render web pages in the
         // background": Forever is that setting turned on).
@@ -6648,7 +6667,10 @@ public partial class MainForm : Form
         generalLayout.Controls.Add(renderedScriptsCheckBox, 0, 11);
         generalLayout.SetColumnSpan(renderedScriptsCheckBox, 2);
 
-        generalTab.Controls.Add(generalLayout);
+        var inspect = new CheckBox { Text = "Inspect and edit page HTML in Web View", Checked = draftSettings.InspectHtml, AutoSize = true };
+        generalLayout.Controls.Add(inspect, 0, 12);
+        generalLayout.SetColumnSpan(inspect, 2);
+        AddScrollingSettingsLayout(generalTab, generalLayout);
 
         // A built-in protocol that cannot run here is not saved (a missing extension's protocol is kept, see above).
         string? ValidateProtocolSelection()
@@ -7265,6 +7287,11 @@ public partial class MainForm : Form
         RegisterProtectedAuxiliaryWindow(settingsWindow, "Settings");
 
         DialogResult result = settingsWindow.ShowDialog(this);
+        if (NextUser is not null)
+        {
+            Close();
+            return;
+        }
         if (settingsImported || result != DialogResult.OK)
         {
             return;
@@ -7278,6 +7305,7 @@ public partial class MainForm : Form
         }
 
         draftSettings.ResourceSaverEnabled = resourceSaverCheckBox.Checked;
+        draftSettings.InspectHtml = inspect.Checked;
         draftSettings.PersistHistoryAcrossSessions = persistHistoryCheckBox.Checked;
 
         if (retentionComboBox.SelectedItem is OptionItem<int> retentionOption)
@@ -7361,6 +7389,8 @@ public partial class MainForm : Form
         int previousCookieRetention = _settings.CookieRetentionDays;
 
         _settings = newSettings;
+        RefreshFavoritesBar();
+        RefreshInspector();
         LoadInstalledExtensions(extension =>
             !previouslyActiveExtensionIds.Contains(extension.Definition.Id) ||
             updated.Contains(extension.Definition.Id));

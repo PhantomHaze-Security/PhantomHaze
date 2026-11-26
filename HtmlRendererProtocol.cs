@@ -1393,48 +1393,6 @@ internal static class HtmlRendererDocumentBuilder
         return builder.ToString();
     }
 
-    /// <summary>Rewrites url(...) references in a downloaded stylesheet so they are resolved against the stylesheet's own address.</summary>
-    public static string MakeCssUrlsAbsolute(string css, Uri styleSheetUri)
-    {
-        var output = new StringBuilder(css.Length + 64);
-        int i = 0;
-        while (i < css.Length)
-        {
-            int start = css.IndexOf("url(", i, StringComparison.OrdinalIgnoreCase);
-            if (start < 0)
-            {
-                output.Append(css, i, css.Length - i);
-                break;
-            }
-
-            int valueStart = start + 4;
-            int end = css.IndexOf(')', valueStart);
-            if (end < 0)
-            {
-                output.Append(css, i, css.Length - i);
-                break;
-            }
-
-            output.Append(css, i, valueStart - i);
-            string value = css[valueStart..end].Trim().Trim('"', '\'').Trim();
-            if (value.Length > 0 &&
-                !value.StartsWith("data:", StringComparison.OrdinalIgnoreCase) &&
-                Uri.TryCreate(styleSheetUri, value, out Uri? absolute) &&
-                WebProtocolPage.IsWebAddress(absolute.AbsoluteUri))
-            {
-                output.Append('"').Append(absolute.AbsoluteUri.Replace("\"", "%22", StringComparison.Ordinal)).Append('"');
-            }
-            else
-            {
-                output.Append(css, valueStart, end - valueStart);
-            }
-
-            output.Append(')');
-            i = end + 1;
-        }
-
-        return output.ToString();
-    }
 
     /// <summary>Wraps every match of <paramref name="query"/> in the visible text of a prepared page in a highlight.</summary>
     public static (string Html, int Count) HighlightMatches(string html, string query)

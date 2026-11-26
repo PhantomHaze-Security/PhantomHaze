@@ -35,7 +35,7 @@ internal enum PageResourceKind
     Data,
 }
 
-internal sealed class PageResourceRequest
+internal sealed record PageResourceRequest
 {
     public PageResourceRequest(string url, PageResourceKind kind)
     {
@@ -43,7 +43,7 @@ internal sealed class PageResourceRequest
         Kind = kind;
     }
 
-    public string Url { get; }
+    public string Url { get; init; }
     public PageResourceKind Kind { get; }
     public string Method { get; init; } = "GET";
     public byte[]? Body { get; init; }
@@ -60,7 +60,7 @@ internal sealed class PageResourceRequest
     public int MaximumBytes { get; init; } = 8 * 1024 * 1024;
 }
 
-internal sealed class PageResource
+internal sealed record PageResource
 {
     public PageResource(string url, int status, string contentType, byte[] body)
     {
@@ -71,7 +71,7 @@ internal sealed class PageResource
     }
 
     /// <summary>The address after redirects.</summary>
-    public string Url { get; }
+    public string Url { get; init; }
     public int Status { get; }
     public string ContentType { get; }
     public byte[] Body { get; }
@@ -1012,7 +1012,7 @@ internal sealed class WebPageSession : IDisposable
         return page;
     }
 
-    private async Task<string?> DownloadStyleSheetAsync(Uri url, CancellationToken cancellationToken)
+    private async Task<DownloadedStyleSheet?> DownloadStyleSheetAsync(Uri url, CancellationToken cancellationToken)
     {
         if (_host.IsBlocked(url.AbsoluteUri, out _))
         {
@@ -1038,7 +1038,7 @@ internal sealed class WebPageSession : IDisposable
             return null;
         }
 
-        return PageText.Decode(resource.Body, resource.ContentType, isHtml: false);
+        return new DownloadedStyleSheet(PageText.Decode(resource.Body, resource.ContentType, isHtml: false), new Uri(resource.Url));
     }
 
     /// <summary>
@@ -1953,7 +1953,7 @@ internal sealed class PageStyleCache
         List<StyleSheetReference> references,
         IReadOnlyList<string> extensionStyles,
         CssMediaContext media,
-        Func<Uri, CancellationToken, Task<string?>> download,
+        Func<Uri, CancellationToken, Task<DownloadedStyleSheet?>> download,
         CancellationToken cancellationToken)
     {
         await _gate.WaitAsync(cancellationToken).ConfigureAwait(false);
@@ -2036,14 +2036,17 @@ internal sealed class PageStyleCache
 
     private static async Task<ParsedCssSheet?> LoadAsync(
         StyleSheetReference reference,
-        Func<Uri, CancellationToken, Task<string?>> download,
+        Func<Uri, CancellationToken, Task<DownloadedStyleSheet?>> download,
         CssImportBudget budget,
         CancellationToken cancellationToken)
     {
         string? text = reference.Text;
+        Uri baseUri = reference.BaseUri;
         if (reference.Url is not null)
         {
-            text = await download(reference.Url, cancellationToken).ConfigureAwait(false);
+            var response = await download(reference.Url, cancellationToken).ConfigureAwait(false);
+            text = response?.Text;
+            baseUri = response?.FinalUri ?? baseUri;
         }
 
         if (text is null)
@@ -2051,7 +2054,7 @@ internal sealed class PageStyleCache
             return null;
         }
 
-        var source = new CssSheetSource(text, reference.BaseUri, reference.Media, CssOrigin.Author);
+        var source = new CssSheetSource(text, baseUri, reference.Media, CssOrigin.Author);
         return await CssSheetLoader.LoadAsync(source, download, budget, cancellationToken).ConfigureAwait(false);
     }
 }

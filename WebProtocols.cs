@@ -263,6 +263,14 @@ internal abstract class WebProtocolPage : IDisposable
 
     public abstract void Reload();
 
+    public virtual Task<string?> ReadHtmlAsync() => Task.FromResult<string?>(null);
+
+    // A rendered preview borrows its originating native browser's resource loader.
+    public virtual Task<PageResource?> ReadResourceAsync(PageResourceRequest request, CancellationToken token) =>
+        throw new NotSupportedException();
+
+    public virtual void NavigateRequest(PageRequest request) => Navigate(request.Url);
+
     /// <summary>Sets the zoom (50 to 200 percent). Only called when <see cref="Features"/> include <see cref="WebProtocolFeatures.Zoom"/>.</summary>
     public virtual void SetZoom(int percent)
     {
@@ -311,6 +319,8 @@ internal abstract class WebProtocolPage : IDisposable
     public event EventHandler? SourceChanged;
 
     public event EventHandler? TitleChanged;
+    public event EventHandler? FaviconChanged;
+    protected void OnFaviconChanged() => FaviconChanged?.Invoke(this, EventArgs.Empty);
 
     /// <summary>Back or Forward became available or unavailable.</summary>
     public event EventHandler? HistoryChanged;
@@ -671,6 +681,11 @@ internal sealed class TemplateWebProtocolPage : WebProtocolPage
     private readonly WebProtocolPage _inner;
     private readonly WebProtocolAddressTemplate _template;
 
+    public WebProtocolPage WrapPreview(RenderedWebProtocolPage preview) =>
+        new TemplateWebProtocolPage(Protocol, Host, preview, _template);
+
+    public WebProtocolAddressTemplate AddressTemplate => _template;
+
     public TemplateWebProtocolPage(WebProtocol protocol, IWebProtocolHost host, WebProtocolPage inner, WebProtocolAddressTemplate template)
         : base(protocol, host)
     {
@@ -680,6 +695,7 @@ internal sealed class TemplateWebProtocolPage : WebProtocolPage
         _inner.NavigationCompleted += (_, e) => OnNavigationCompleted(e.IsSuccess, e.ErrorDescription);
         _inner.SourceChanged += (_, _) => OnSourceChanged();
         _inner.TitleChanged += (_, _) => OnTitleChanged();
+        _inner.FaviconChanged += (_, _) => OnFaviconChanged();
         _inner.HistoryChanged += (_, _) => OnHistoryChanged();
         _inner.NewWindowRequested += (_, e) => OnNewWindowRequested(_template.ToPageUrl(e.Url), e.IsUserInitiated);
         _inner.FindRequested += (_, _) => OnFindRequested();
@@ -716,14 +732,16 @@ internal sealed class TemplateWebProtocolPage : WebProtocolPage
 
     public override void Reload() => _inner.Reload();
 
+    public override Task<string?> ReadHtmlAsync() => _inner.ReadHtmlAsync();
+
     public override void SetZoom(int percent) => _inner.SetZoom(percent);
 
     public override Task<int> FindAsync(string query) => _inner.FindAsync(query);
 
     public override Task<string?> GetDeclaredFaviconUrlAsync() => _inner.GetDeclaredFaviconUrlAsync();
 
-    // Through a gateway, the inner page's icon would be the gateway's; with a proxy server it is downloaded through it.
-    public override bool DownloadsOwnFavicon => _template.IsDirect && _inner.DownloadsOwnFavicon;
+    // Use the icon supplied by the page shown through the selected gateway or proxy.
+    public override bool DownloadsOwnFavicon => _inner.DownloadsOwnFavicon;
 
     public override Task<Image?> DownloadFaviconAsync() => _inner.DownloadFaviconAsync();
 

@@ -91,7 +91,7 @@ public partial class MainForm
             }
         };
 
-        page.Controls.Add(layout);
+        AddScrollingSettingsLayout(page, layout);
         return new SettingsTab(page);
     }
 

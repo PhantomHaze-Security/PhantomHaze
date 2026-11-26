@@ -141,6 +141,7 @@ public partial class MainForm
 
         page.NavigationStarting += (sender, e) =>
         {
+            if (ReferenceEquals(tab.OriginalPage, page)) RestoreNativePage(tab);
             if (IsCurrent(sender))
             {
                 OnPageNavigationStarting(tab, e);
@@ -166,6 +167,10 @@ public partial class MainForm
             {
                 OnPageTitleChanged(tab);
             }
+        };
+        page.FaviconChanged += async (sender, _) =>
+        {
+            if (IsCurrent(sender) && !tab.IsNavigationPending) await RefreshTabFaviconAsync(tab);
         };
         page.HistoryChanged += (sender, _) =>
         {
@@ -238,7 +243,7 @@ public partial class MainForm
         bool stillUsed = false;
         foreach (BrowserTab remaining in _tabs)
         {
-            if (remaining.Page.InnermostPage is not WebView2ProtocolPage { Core: CoreWebView2 core })
+            if (remaining.Browser.InnermostPage is not WebView2ProtocolPage { Core: CoreWebView2 core })
             {
                 continue;
             }
@@ -434,7 +439,7 @@ public partial class MainForm
     {
         foreach (BrowserTab tab in _tabs)
         {
-            if (tab.Page.InnermostPage is WebView2ProtocolPage { UsesIsolatedEnvironment: false, Core: CoreWebView2 core })
+            if (tab.Browser.InnermostPage is WebView2ProtocolPage { UsesIsolatedEnvironment: false, Core: CoreWebView2 core })
             {
                 return core;
             }
@@ -538,7 +543,7 @@ public partial class MainForm
                 Log($"Web View protocol changed to {NormalizeForLog(protocol.DisplayName)}; reopening {outdated.Count} tab(s).");
 
                 // The session's cookies live in the WebView2 browser process, which closes with its last tab.
-                if (outdated.Any(tab => tab.Page.InnermostPage is WebView2ProtocolPage { UsesIsolatedEnvironment: false }))
+                if (outdated.Any(tab => tab.Browser.InnermostPage is WebView2ProtocolPage { UsesIsolatedEnvironment: false }))
                 {
                     await SaveCookiesNowAsync();
                 }
@@ -586,6 +591,7 @@ public partial class MainForm
     /// <summary>Gives a tab a new page made with <paramref name="protocol"/>, at the same address. Returns why it failed, or null.</summary>
     private async Task<string?> ReplaceTabPageAsync(BrowserTab tab, WebProtocol protocol)
     {
+        RestoreNativePage(tab);
         string url = TryNormalizeUrl(tab.CurrentUrl, out string current) ? current : GetConfiguredStartPage();
         WebProtocolPage newPage;
         try

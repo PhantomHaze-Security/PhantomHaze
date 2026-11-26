@@ -46,13 +46,14 @@ internal sealed class WebView2WebProtocol : WebProtocol
 }
 
 /// <summary>A tab shown with WebView2.</summary>
-internal sealed class WebView2ProtocolPage : WebProtocolPage
+internal sealed partial class WebView2ProtocolPage : WebProtocolPage
 {
     private const string FindShortcutMessage = "__PH_FIND__";
 
     private readonly WebView2 _webView;
     private readonly string? _proxyServer;
     private CoreWebView2? _core;
+    private bool _hasFaviconEvents;
     private int _zoomPercent = 100;
 
     public WebView2ProtocolPage(WebProtocol protocol, IWebProtocolHost host, string? proxyServer)
@@ -94,6 +95,42 @@ internal sealed class WebView2ProtocolPage : WebProtocolPage
 
     public override string Title => Core?.DocumentTitle ?? string.Empty;
 
+    public override bool DownloadsOwnFavicon => true;
+    public override async Task<Image?> DownloadFaviconAsync()
+    {
+        if (Core is not { } core) return null;
+        try
+        {
+            using Stream? icon = await core.GetFaviconAsync(CoreWebView2FaviconImageFormat.Png);
+            if (icon is null || icon.Length == 0) return null;
+            using var bitmap = new Bitmap(icon);
+            return new Bitmap(bitmap);
+        }
+        catch (Exception ex) when (ex is NotImplementedException or InvalidOperationException or COMException or ArgumentException)
+        {
+            return null;
+        }
+    }
+
+    private void OnCoreFaviconChanged(object? sender, object e) => OnFaviconChanged();
+
+    public override async Task<string?> ReadHtmlAsync()
+    {
+        if (Core is not { } core) return null;
+        string result = await core.ExecuteScriptAsync(
+            "document.documentElement && ((document.doctype ? new XMLSerializer().serializeToString(document.doctype) + '\\n' : '') + document.documentElement.outerHTML)");
+        return JsonSerializer.Deserialize<string?>(result);
+    }
+
+    public override void NavigateRequest(PageRequest request)
+    {
+        if (Core is not { } core) return;
+        if (request.Method == "GET") { Navigate(request.Url); return; }
+        var resource = core.Environment.CreateWebResourceRequest(request.Url, request.Method,
+            new MemoryStream(request.Body ?? []), "Content-Type: " + request.ContentType);
+        core.NavigateWithWebResourceRequest(resource);
+    }
+
     public override bool CanGoBack => Core?.CanGoBack == true;
 
     public override bool CanGoForward => Core?.CanGoForward == true;
@@ -125,6 +162,12 @@ internal sealed class WebView2ProtocolPage : WebProtocolPage
         core.NavigationCompleted += OnCoreNavigationCompleted;
         core.SourceChanged += OnCoreSourceChanged;
         core.DocumentTitleChanged += OnCoreDocumentTitleChanged;
+        try
+        {
+            core.FaviconChanged += OnCoreFaviconChanged;
+            _hasFaviconEvents = true;
+        }
+        catch (NotImplementedException) { /* Older runtimes use the existing icon lookup. */ }
         core.HistoryChanged += OnCoreHistoryChanged;
         core.NewWindowRequested += OnCoreNewWindowRequested;
         core.WebMessageReceived += OnCoreWebMessageReceived;
@@ -329,6 +372,7 @@ internal sealed class WebView2ProtocolPage : WebProtocolPage
                 core.NavigationCompleted -= OnCoreNavigationCompleted;
                 core.SourceChanged -= OnCoreSourceChanged;
                 core.DocumentTitleChanged -= OnCoreDocumentTitleChanged;
+                if (_hasFaviconEvents) core.FaviconChanged -= OnCoreFaviconChanged;
                 core.HistoryChanged -= OnCoreHistoryChanged;
                 core.NewWindowRequested -= OnCoreNewWindowRequested;
                 core.WebMessageReceived -= OnCoreWebMessageReceived;

@@ -400,6 +400,8 @@ internal sealed class HazeGatePageTransport : IRenderedPageTransport
     public void UseRules(WebRequestRules rules)
     {
         _rules = rules;
+        // An inspector save starts a new document without downloading a bundle. Its resources use the current rules.
+        _bundle = new Dictionary<string, PageResource>(StringComparer.Ordinal);
     }
 
     public void CancelDocument()

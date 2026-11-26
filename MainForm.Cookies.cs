@@ -230,7 +230,7 @@ public partial class MainForm
     private bool IsLastSharedWebView2Tab(BrowserTab tab)
     {
         static bool IsSharedWebView2(BrowserTab candidate) =>
-            candidate.Page.InnermostPage is WebView2ProtocolPage { UsesIsolatedEnvironment: false, Core: not null };
+            candidate.Browser.InnermostPage is WebView2ProtocolPage { UsesIsolatedEnvironment: false, Core: not null };
 
         return IsSharedWebView2(tab) && !_tabs.Any(other => !ReferenceEquals(other, tab) && IsSharedWebView2(other));
     }

@@ -133,6 +133,11 @@ internal static class LegacyBrowserSupport
     /// <summary>Removes the Internet Explorer 11 mode setting PhantomHaze added (called when PhantomHaze closes).</summary>
     public static void Cleanup()
     {
+        if (s_configured)
+        {
+            NativeMethods.EndInternetSession();
+            s_configured = false;
+        }
         if (s_createdEmulationValue is not string name)
         {
             return;
@@ -211,6 +216,20 @@ internal sealed class LegacyProtocolPage : WebProtocolPage
     public override string CurrentUrl => _currentUrl;
 
     public override string Title => _title;
+
+    public override Task<string?> ReadHtmlAsync() => Task.FromResult<string?>(_showingMessagePage ? null : _browser.DocumentText);
+
+    public override Task<PageResource?> ReadResourceAsync(PageResourceRequest request, CancellationToken token)
+    {
+        var rules = Host.GetRequestRules();
+        return Task.Run(() => LegacyInspectorResources.Read(request, rules, token), token);
+    }
+
+    public override void NavigateRequest(PageRequest request)
+    {
+        if (request.Method == "GET") Navigate(request.Url);
+        else _browser.Navigate(request.Url, null, request.Body, "Content-Type: " + request.ContentType + "\r\n");
+    }
 
     public override bool CanGoBack => !IsDisposed && _browser.CanGoBack;
 

@@ -429,6 +429,8 @@ public partial class MainForm
         _protectionStripPanel.BackColor = palette.AppBack;
         _contentHostPanel.BackColor = palette.AppBack;
         _webViewHostPanel.BackColor = palette.AppBack;
+        _favoritesBar.BackColor = palette.MenuBack;
+        _favoritesBar.ForeColor = ResolveTextColor(palette.FavoriteIdleText);
         _extensionPageHostPanel.BackColor = palette.AppBack;
         _webViewLoadingOverlayPanel.BackColor = palette.OverlayBack;
         _historyPanel.BackColor = palette.PanelBack;
@@ -1465,7 +1467,9 @@ public partial class MainForm
 
         UpdateRowVisibility();
         initializing = false;
-        page.Controls.Add(layout);
+        var favoritesBar = new CheckBox { Text = "Show favourites bar below tabs", AutoSize = true, Checked = draft.ShowFavoritesBar };
+        AddRow("Favourites", favoritesBar);
+        AddScrollingSettingsLayout(page, layout);
 
         return new SettingsTab(page)
         {
@@ -1483,6 +1487,7 @@ public partial class MainForm
             ApplyTo = settings =>
             {
                 settings.Theme = theme;
+                settings.ShowFavoritesBar = favoritesBar.Checked;
                 settings.CustomThemeColor = PhantomColorParser.ToHex(themeColor);
                 settings.GradientStartColor = PhantomColorParser.ToHex(gradientStart);
                 settings.GradientEndColor = PhantomColorParser.ToHex(gradientEnd);

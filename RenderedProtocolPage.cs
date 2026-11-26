@@ -140,7 +140,15 @@ internal sealed class RenderedWebProtocolPage : WebProtocolPage
     private CancellationTokenSource? _loadCancellation;
     private WebPageSession? _session;
     private RenderedPage? _rendered;
-    private double _renderedWidth;
+    private (double Width, double Height) _renderedViewport;
+    private string? _sourceHtml;
+    public bool IsInspectorPreview { get; private set; }
+    private IPageResourceFetcher _documentResources;
+    public Action<PageRequest>? ReturnToBrowser { get; init; }
+    public override Task<string?> ReadHtmlAsync() => Task.FromResult(_sourceHtml);
+
+    public void ShowEditedHtml(string url, string html, WebProtocolAddressTemplate? template = null) =>
+        StartLoad(new PageRequest(url), HistoryUpdate.ReplaceCurrent, html, template);
     private int _loadSequence;
     private int _renderSequence;
     private bool _initialized;
@@ -151,6 +159,7 @@ internal sealed class RenderedWebProtocolPage : WebProtocolPage
         : base(protocol, host)
     {
         _transport = transport;
+        _documentResources = transport;
         _scriptsEnabled = scriptsEnabled;
         _ui = SynchronizationContext.Current;
         _panel = new HtmlPanel
@@ -181,6 +190,7 @@ internal sealed class RenderedWebProtocolPage : WebProtocolPage
     }
 
     public override Control View => _panel;
+    public override WebProtocolFeatures Features => GetFeatures(_scriptsEnabled);
 
     public override bool IsReady => _initialized && !IsDisposed;
 
@@ -285,7 +295,7 @@ internal sealed class RenderedWebProtocolPage : WebProtocolPage
 
         try
         {
-            PageResource? resource = await _transport.FetchAsync(
+            PageResource? resource = await _documentResources.FetchAsync(
                 new PageResourceRequest(url, PageResourceKind.Image) { MaximumBytes = 1024 * 1024, Referrer = _currentUrl },
                 _documentCancellation.Token);
             return resource is null || resource.Status is < 200 or >= 300 ? null : await Task.Run(() => HtmlRendererResources.DecodeImage(resource.Body));
@@ -322,10 +332,16 @@ internal sealed class RenderedWebProtocolPage : WebProtocolPage
 
     // ---- Loading ------------------------------------------------------------------------------------------------
 
-    private void StartLoad(PageRequest request, HistoryUpdate historyUpdate)
+    private void StartLoad(PageRequest request, HistoryUpdate historyUpdate, string? editedHtml = null, WebProtocolAddressTemplate? template = null)
     {
         if (IsDisposed)
         {
+            return;
+        }
+
+        if (editedHtml is null && ReturnToBrowser is not null)
+        {
+            ReturnToBrowser(request);
             return;
         }
 
@@ -338,7 +354,9 @@ internal sealed class RenderedWebProtocolPage : WebProtocolPage
         _rules = Host.GetRequestRules();
         _transport.UseRules(_rules);
         OnNavigationStarting(request.Url);
-        _ = LoadAsync(request, historyUpdate, sequence, cancellation.Token);
+        IPageResourceFetcher resources = template is { IsDirect: false }
+            ? new InspectorGatewayResources(_transport, template, new Uri(request.Url), _rules) : _transport;
+        _ = LoadAsync(request, historyUpdate, sequence, cancellation.Token, editedHtml, resources);
     }
 
     private void CancelLoad()
@@ -351,13 +369,14 @@ internal sealed class RenderedWebProtocolPage : WebProtocolPage
 
     private bool IsCurrentLoad(int sequence) => !IsDisposed && sequence == _loadSequence;
 
-    private async Task LoadAsync(PageRequest request, HistoryUpdate historyUpdate, int sequence, CancellationToken cancellationToken)
+    private async Task LoadAsync(PageRequest request, HistoryUpdate historyUpdate, int sequence, CancellationToken cancellationToken, string? editedHtml, IPageResourceFetcher resources)
     {
         string folder = Path.Combine(Host.SessionDirectory, "htmlrenderer", _folderName);
         FetchedDocument fetched;
         try
         {
-            fetched = await _transport.FetchDocumentAsync(request, Host, folder, cancellationToken);
+            fetched = editedHtml is null ? await _transport.FetchDocumentAsync(request, Host, folder, cancellationToken)
+                : new FetchedDocument(request.Url, 200, "text/html; charset=utf-8", System.Text.Encoding.UTF8.GetBytes(editedHtml));
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {
@@ -379,16 +398,18 @@ internal sealed class RenderedWebProtocolPage : WebProtocolPage
 
         if (fetched.Message is HtmlRendererDocument message)
         {
+            _sourceHtml = null;
+            IsInspectorPreview = false;
             ShowStaticDocument(message, historyUpdate);
             return;
         }
 
-        if (IsHtml(fetched) && Uri.TryCreate(fetched.Url, UriKind.Absolute, out Uri? address))
+        string? html = editedHtml ?? (IsHtml(fetched) ? PageText.Decode(fetched.Body, fetched.ContentType, isHtml: true) : null);
+        if (html is not null && Uri.TryCreate(fetched.Url, UriKind.Absolute, out Uri? address))
         {
             WebPageSession? session = null;
             try
             {
-                string html = PageText.Decode(fetched.Body, fetched.ContentType, isHtml: true);
                 (double width, double height) = Viewport;
                 var options = new PageEngineOptions
                 {
@@ -401,7 +422,7 @@ internal sealed class RenderedWebProtocolPage : WebProtocolPage
                     IsFontInstalled = RenderedPageEnvironment.IsFontInstalled,
                 };
                 var engineHost = new EngineHost(Host, _rules);
-                session = await WebPageSession.CreateAsync(new PageLoadInput(address, html), options, engineHost, _transport, _transport.Cookies, _transport.Storage, cancellationToken);
+                session = await WebPageSession.CreateAsync(new PageLoadInput(address, html), options, engineHost, resources, _transport.Cookies, _transport.Storage, cancellationToken);
                 RenderedPage page = await session.RenderAsync(width, height, cancellationToken);
                 if (!IsCurrentLoad(sequence))
                 {
@@ -409,7 +430,11 @@ internal sealed class RenderedWebProtocolPage : WebProtocolPage
                     return;
                 }
 
-                ShowSession(session, page, fetched, historyUpdate, width);
+                _sourceHtml = html;
+                IsInspectorPreview = editedHtml is not null;
+                _documentResources = resources;
+                _renderedViewport = (width, height);
+                ShowSession(session, page, fetched, historyUpdate);
                 return;
             }
             catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
@@ -434,7 +459,7 @@ internal sealed class RenderedWebProtocolPage : WebProtocolPage
                 cancellationToken);
             if (document.StyleSheetLinks.Count > 0)
             {
-                await DownloadStyleSheetsAsync(document, cancellationToken);
+                await DownloadStyleSheetsAsync(document, resources, cancellationToken);
             }
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
@@ -452,6 +477,9 @@ internal sealed class RenderedWebProtocolPage : WebProtocolPage
             return;
         }
 
+        _sourceHtml = html;
+        IsInspectorPreview = editedHtml is not null;
+        _documentResources = resources;
         ShowStaticDocument(document, historyUpdate);
     }
 
@@ -481,14 +509,14 @@ internal sealed class RenderedWebProtocolPage : WebProtocolPage
         return false;
     }
 
-    private async Task DownloadStyleSheetsAsync(HtmlRendererDocument document, CancellationToken cancellationToken)
+    private static async Task DownloadStyleSheetsAsync(HtmlRendererDocument document, IPageResourceFetcher resources, CancellationToken cancellationToken)
     {
         var downloads = document.StyleSheetLinks.Select(async link =>
         {
             PageResource? response;
             try
             {
-                response = await _transport.FetchAsync(
+                response = await resources.FetchAsync(
                     new PageResourceRequest(link.Url, PageResourceKind.StyleSheet) { MaximumBytes = HtmlRendererResources.MaximumStyleSheetBytes, Referrer = document.Url },
                     cancellationToken);
             }
@@ -504,7 +532,7 @@ internal sealed class RenderedWebProtocolPage : WebProtocolPage
             }
 
             string css = PageText.Decode(response.Body, response.ContentType, isHtml: false);
-            return (link.Token, Css: HtmlRendererDocumentBuilder.MakeCssUrlsAbsolute(css, new Uri(response.Url)));
+            return (link.Token, Css: CssValues.MakeUrlsAbsolute(css, new Uri(response.Url)));
         });
 
         foreach ((string token, string css) in await Task.WhenAll(downloads))
@@ -553,13 +581,12 @@ internal sealed class RenderedWebProtocolPage : WebProtocolPage
         FinishShowing(historyUpdate, document.IsSuccess, document.ErrorDescription);
     }
 
-    private void ShowSession(WebPageSession session, RenderedPage page, FetchedDocument fetched, HistoryUpdate historyUpdate, double renderedWidth)
+    private void ShowSession(WebPageSession session, RenderedPage page, FetchedDocument fetched, HistoryUpdate historyUpdate)
     {
         BeginDocument();
         ReplaceSession(session);
         _currentUrl = session.DocumentUri.AbsoluteUri.Length > 0 ? MergeFragment(session.DocumentUri.AbsoluteUri, fetched.Url) : fetched.Url;
         _styleSheets = new Dictionary<string, string>();
-        _renderedWidth = renderedWidth;
         ApplyRenderedPage(page, keepScrollPosition: false);
         bool success = fetched.StatusCode is >= 200 and < 400;
         FinishShowing(historyUpdate, success, success ? null : $"HTTP {fetched.StatusCode}");
@@ -637,7 +664,7 @@ internal sealed class RenderedWebProtocolPage : WebProtocolPage
                 return;
             }
 
-            _renderedWidth = width;
+            _renderedViewport = (width, height);
             ApplyRenderedPage(page, keepScrollPosition: true);
         }
         catch (OperationCanceledException)
@@ -815,7 +842,7 @@ internal sealed class RenderedWebProtocolPage : WebProtocolPage
         }
 
         // Media queries and grid columns depend on the width: the page is drawn again once resizing pauses.
-        if (Math.Abs(Viewport.Width - _renderedWidth) > 40)
+        if (Viewport != _renderedViewport)
         {
             _resizeTimer.Stop();
             _resizeTimer.Start();
@@ -1436,7 +1463,7 @@ internal sealed class RenderedWebProtocolPage : WebProtocolPage
         PageResource? response;
         try
         {
-            response = await _transport.FetchAsync(
+            response = await _documentResources.FetchAsync(
                 new PageResourceRequest(url, PageResourceKind.Image) { MaximumBytes = HtmlRendererResources.MaximumImageBytes, Referrer = _currentUrl },
                 cancellationToken);
         }

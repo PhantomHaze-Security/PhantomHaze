@@ -716,8 +716,11 @@ internal sealed class ParsedCssSheet
 /// <summary>Limits how much @import can pull in for one page.</summary>
 internal sealed class CssImportBudget
 {
-    public int Remaining { get; set; } = 30;
+    private int _remaining = 30;
+    public bool TryTake() => Interlocked.Decrement(ref _remaining) >= 0;
 }
+
+internal sealed record DownloadedStyleSheet(string Text, Uri FinalUri);
 
 internal static class CssSheetLoader
 {
@@ -729,7 +732,7 @@ internal static class CssSheetLoader
     /// <summary>Parses a stylesheet and downloads the stylesheets it imports (in parallel, within the budget).</summary>
     public static async Task<ParsedCssSheet> LoadAsync(
         CssSheetSource source,
-        Func<Uri, CancellationToken, Task<string?>>? fetch,
+        Func<Uri, CancellationToken, Task<DownloadedStyleSheet?>>? fetch,
         CssImportBudget budget,
         CancellationToken cancellationToken,
         int depth = 0)
@@ -743,12 +746,12 @@ internal static class CssSheetLoader
         var downloads = new List<(CssAtNode Node, Task<ParsedCssSheet?> Sheet)>();
         foreach (CssNode node in sheet.Nodes)
         {
-            if (node is not CssAtNode { Name: "import" } import || budget.Remaining <= 0)
+            if (node is not CssAtNode { Name: "import" } import)
             {
                 continue;
             }
 
-            (string? address, string? media) = ParseImportPrelude(import.Prelude);
+            (string? address, string? media, _) = ParseImportPrelude(import.Prelude);
             if (address is null ||
                 !Uri.TryCreate(source.BaseUri, address, out Uri? target) ||
                 !(target.Scheme == Uri.UriSchemeHttp || target.Scheme == Uri.UriSchemeHttps) ||
@@ -757,7 +760,7 @@ internal static class CssSheetLoader
                 continue;
             }
 
-            budget.Remaining--;
+            if (!budget.TryTake()) break;
             downloads.Add((import, LoadImportAsync(target, media, source.Origin, fetch, budget, depth, cancellationToken)));
         }
 
@@ -777,20 +780,20 @@ internal static class CssSheetLoader
         Uri target,
         string? media,
         CssOrigin origin,
-        Func<Uri, CancellationToken, Task<string?>> fetch,
+        Func<Uri, CancellationToken, Task<DownloadedStyleSheet?>> fetch,
         CssImportBudget budget,
         int depth,
         CancellationToken cancellationToken)
     {
         try
         {
-            string? text = await fetch(target, cancellationToken).ConfigureAwait(false);
-            if (text is null)
+            var response = await fetch(target, cancellationToken).ConfigureAwait(false);
+            if (response is null)
             {
                 return null;
             }
 
-            return await LoadAsync(new CssSheetSource(text, target, media, origin), fetch, budget, cancellationToken, depth + 1).ConfigureAwait(false);
+            return await LoadAsync(new CssSheetSource(response.Text, response.FinalUri, media, origin), fetch, budget, cancellationToken, depth + 1).ConfigureAwait(false);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
@@ -799,20 +802,20 @@ internal static class CssSheetLoader
     }
 
     /// <summary>The address and media list of an @import prelude (url("a.css") screen, "a.css" layer(x), ...).</summary>
-    public static (string? Address, string? Media) ParseImportPrelude(string prelude)
+    public static (string? Address, string? Media, string? Layer) ParseImportPrelude(string prelude)
     {
         string text = prelude.Trim();
         string? address = null;
         int rest;
         if (text.StartsWith("url(", StringComparison.OrdinalIgnoreCase))
         {
-            int close = text.IndexOf(')');
+            int close = CssValues.FindClosingParenthesis(text, 3);
             if (close < 0)
             {
-                return (null, null);
+                return (null, null, null);
             }
 
-            address = text[4..close].Trim().Trim('"', '\'').Trim();
+            address = CssValues.UnescapeString(text[4..close].Trim().Trim('"', '\''));
             rest = close + 1;
         }
         else if (text.Length > 0 && text[0] is '"' or '\'')
@@ -823,62 +826,30 @@ internal static class CssSheetLoader
         }
         else
         {
-            return (null, null);
+            return (null, null, null);
         }
 
         string media = text[Math.Min(rest, text.Length)..].Trim();
-        // layer(...) and supports(...) come before the media list.
-        while (media.StartsWith("layer", StringComparison.OrdinalIgnoreCase) || media.StartsWith("supports(", StringComparison.OrdinalIgnoreCase))
+        string? layer = null;
+        if (media.StartsWith("layer(", StringComparison.OrdinalIgnoreCase))
         {
-            int open = media.IndexOf('(');
-            if (media.StartsWith("layer", StringComparison.OrdinalIgnoreCase) && (open < 0 || open > 5))
-            {
-                media = media[5..].Trim();
-                continue;
-            }
-
-            int close = FindClosingParenthesis(media, open);
-            if (close < 0)
-            {
-                break;
-            }
-
-            if (media.StartsWith("supports(", StringComparison.OrdinalIgnoreCase) && !CssSupportsEvaluator.Matches(media[(open + 1)..close]))
-            {
-                return (null, null);
-            }
-
+            int close = CssValues.FindClosingParenthesis(media, 5);
+            if (close < 0) return (null, null, null);
+            layer = media[6..close].Trim();
             media = media[(close + 1)..].Trim();
         }
-
-        return (address, media.Length == 0 ? null : media);
-    }
-
-    private static int FindClosingParenthesis(string text, int open)
-    {
-        if (open < 0)
+        else if (media.StartsWith("layer", StringComparison.OrdinalIgnoreCase) && (media.Length == 5 || char.IsWhiteSpace(media[5])))
         {
-            return -1;
+            layer = "";
+            media = media[5..].Trim();
         }
-
-        int depth = 0;
-        for (int i = open; i < text.Length; i++)
+        if (media.StartsWith("supports(", StringComparison.OrdinalIgnoreCase))
         {
-            if (text[i] == '(')
-            {
-                depth++;
-            }
-            else if (text[i] == ')')
-            {
-                depth--;
-                if (depth == 0)
-                {
-                    return i;
-                }
-            }
+            int close = CssValues.FindClosingParenthesis(media, 8);
+            if (close < 0 || !CssSupportsEvaluator.Matches(media[9..close])) return (null, null, null);
+            media = media[(close + 1)..].Trim();
         }
-
-        return -1;
+        return (address, media.Length == 0 ? null : media, layer);
     }
 }
 
@@ -983,12 +954,15 @@ internal sealed class CssRuleCollector
                     CssMediaQueryEvaluator.Matches(imported.Source.Media, _media))
                 {
                     int importLayer = layerRank;
-                    if (at.Prelude.Contains("layer", StringComparison.OrdinalIgnoreCase))
+                    string path = layerPath;
+                    if (CssSheetLoader.ParseImportPrelude(at.Prelude).Layer is string name)
                     {
-                        importLayer = GetLayerRank(layerPath, ExtractImportLayerName(at.Prelude));
+                        if (name.Length == 0) name = "\u0001import" + (_anonymousLayers++).ToString(CultureInfo.InvariantCulture);
+                        importLayer = GetLayerRank(layerPath, name);
+                        path = layerPath.Length == 0 ? name : layerPath + "." + name;
                     }
 
-                    AddNodes(imported, imported.Nodes, null, importLayer, layerPath);
+                    AddNodes(imported, imported.Nodes, null, importLayer, path);
                 }
 
                 return;
@@ -1080,18 +1054,6 @@ internal sealed class CssRuleCollector
         }
 
         return rank;
-    }
-
-    private static string ExtractImportLayerName(string prelude)
-    {
-        int index = prelude.IndexOf("layer(", StringComparison.OrdinalIgnoreCase);
-        if (index < 0)
-        {
-            return "\u0001import";
-        }
-
-        int close = prelude.IndexOf(')', index);
-        return close < 0 ? "\u0001import" : prelude[(index + 6)..close].Trim();
     }
 
     /// <summary>The selectors of a rule; nested rules are combined with their parent (CSS nesting, "&amp;").</summary>
@@ -1882,7 +1844,7 @@ internal static class CssValues
         int i = 0;
         while (i < css.Length)
         {
-            int start = css.IndexOf("url(", i, StringComparison.OrdinalIgnoreCase);
+            int start = IndexOfFunction(css, "url(", i);
             if (start < 0)
             {
                 output.Append(css, i, css.Length - i);
@@ -1890,7 +1852,7 @@ internal static class CssValues
             }
 
             int valueStart = start + 4;
-            int end = css.IndexOf(')', valueStart);
+            int end = FindClosingParenthesis(css, start + 3);
             if (end < 0)
             {
                 output.Append(css, i, css.Length - i);
@@ -1898,7 +1860,7 @@ internal static class CssValues
             }
 
             output.Append(css, i, valueStart - i);
-            string value = css[valueStart..end].Trim().Trim('"', '\'').Trim();
+            string value = UnescapeString(css[valueStart..end].Trim().Trim('"', '\''));
             if (value.Length > 0 &&
                 !value.StartsWith("data:", StringComparison.OrdinalIgnoreCase) &&
                 !value.StartsWith('#') &&
@@ -2037,13 +1999,20 @@ internal static class CssValues
 
     public static int IndexOfFunction(string value, string function, int start)
     {
-        int index = value.IndexOf(function, start, StringComparison.OrdinalIgnoreCase);
-        while (index > 0 && (char.IsLetterOrDigit(value[index - 1]) || value[index - 1] is '-' or '_'))
+        for (int i = start; i < value.Length; i++)
         {
-            index = value.IndexOf(function, index + 1, StringComparison.OrdinalIgnoreCase);
+            if (value[i] is '"' or '\'') i = CssSheetParser.SkipString(value, i, value.Length) - 1;
+            else if (value[i] == '\\') i++;
+            else if (value[i] == '/' && i + 1 < value.Length && value[i + 1] == '*')
+            {
+                int end = value.IndexOf("*/", i + 2, StringComparison.Ordinal);
+                if (end < 0) return -1;
+                i = end + 1;
+            }
+            else if ((i == 0 || !(char.IsLetterOrDigit(value[i - 1]) || value[i - 1] is '-' or '_')) &&
+                value.AsSpan(i).StartsWith(function, StringComparison.OrdinalIgnoreCase)) return i;
         }
-
-        return index;
+        return -1;
     }
 
     public static int FindClosingParenthesis(string value, int open)
@@ -2052,6 +2021,7 @@ internal static class CssValues
         for (int i = open; i < value.Length; i++)
         {
             char character = value[i];
+            if (character == '\\') { i++; continue; }
             if (character is '"' or '\'')
             {
                 i = CssSheetParser.SkipString(value, i, value.Length) - 1;
@@ -2799,6 +2769,7 @@ internal sealed class CssCascadeIndex
         for (int i = 0; i < selector.Length; i++)
         {
             char character = selector[i];
+            if (character == '\\') { i++; continue; }
             if (character is '"' or '\'')
             {
                 i = CssSheetParser.SkipString(selector, i, selector.Length) - 1;
@@ -2844,8 +2815,8 @@ internal sealed class CssCascadeIndex
             _ => (PseudoElementKind)(-1),
         };
 
-        selector = selector[..pseudoStart].TrimEnd();
-        if (kind != (PseudoElementKind)(-1) && (selector.Length == 0 || selector.EndsWith(' ') || selector[^1] is '>' or '+' or '~'))
+        selector = selector[..pseudoStart];
+        if (kind != (PseudoElementKind)(-1) && (selector.Length == 0 || char.IsWhiteSpace(selector[^1]) || selector[^1] is '>' or '+' or '~'))
         {
             selector += "*";
         }
@@ -2866,6 +2837,8 @@ internal sealed class CssCascadeIndex
         for (int i = 0; i < selector.Length; i++)
         {
             char character = selector[i];
+            if (character == '\\') { i++; continue; }
+            if (character is '"' or '\'') { i = CssSheetParser.SkipString(selector, i, selector.Length) - 1; continue; }
             if (character == '(')
             {
                 depth++;

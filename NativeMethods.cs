@@ -204,6 +204,12 @@ internal static class NativeMethods
     [return: MarshalAs(UnmanagedType.Bool)]
     private static extern bool InternetSetOption(IntPtr hInternet, int dwOption, IntPtr lpBuffer, int dwBufferLength);
 
+    public static void EndInternetSession()
+    {
+        const int INTERNET_OPTION_END_BROWSER_SESSION = 42;
+        InternetSetOption(IntPtr.Zero, INTERNET_OPTION_END_BROWSER_SESSION, IntPtr.Zero, 0);
+    }
+
     [DllImport("urlmon.dll")]
     private static extern int CoInternetSetFeatureEnabled(int featureEntry, int dwFlags, [MarshalAs(UnmanagedType.Bool)] bool fEnable);
 
