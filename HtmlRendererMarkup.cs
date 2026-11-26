@@ -46,7 +46,7 @@ internal sealed class PageMarkupWriter
     private static readonly HashSet<string> SkippedTags = new(StringComparer.Ordinal)
     {
         "script", "style", "template", "head", "title", "meta", "link", "base", "basefont", "param", "source", "track",
-        "datalist", "noembed", "noframes", "area", "map", "audio", "embed", "applet", "frameset", "frame", "dialog", "slot",
+        "datalist", "noembed", "noframes", "area", "map", "audio", "embed", "applet", "frameset", "frame", "slot",
         "math", "portal", "wbr",
     };
 
@@ -74,6 +74,7 @@ internal sealed class PageMarkupWriter
     private readonly bool _scriptsAlive;
     private readonly double _scale;
     private readonly StringBuilder _out = new(64 * 1024);
+    private readonly List<PageFrame> _frames = [];
     private readonly List<PageFormField> _fields = new();
     private readonly Dictionary<int, PageSvgImage> _svgs = new();
     private readonly Dictionary<string, bool> _fontChecks = new(StringComparer.OrdinalIgnoreCase);
@@ -163,6 +164,7 @@ internal sealed class PageMarkupWriter
             BaseUri = _baseUri,
             FaviconUrl = FindFavicon(),
             Fields = _fields,
+            Frames = _frames,
             SvgImages = _svgs,
             CanvasColor = canvasColor,
         };
@@ -917,6 +919,13 @@ internal sealed class PageMarkupWriter
             return;
         }
 
+        if (depth > MaximumDepth)
+        {
+            // Too deep for HTML Renderer's recursive layout: the content is kept as plain text.
+            WriteText(CollapseWhitespace(element.TextContent) + " ", box);
+            return;
+        }
+
         if (box.Display == "contents")
         {
             var carried = new ElementBox
@@ -933,15 +942,8 @@ internal sealed class PageMarkupWriter
                 Carry = MergeCarry(parentBox.Carry, box.Style),
             };
             WritePseudo(element, box, PseudoElementKind.Before);
-            WriteChildren(element, carried, depth);
+            WriteChildren(element, carried, depth + 1);
             WritePseudo(element, box, PseudoElementKind.After);
-            return;
-        }
-
-        if (depth > MaximumDepth)
-        {
-            // Too deep for HTML Renderer's recursive layout: the content is kept as plain text.
-            WriteText(CollapseWhitespace(element.TextContent) + " ", box);
             return;
         }
 
@@ -3145,11 +3147,20 @@ internal sealed class PageMarkupWriter
     private void WriteFrame(IElement element, ElementBox box, CascadedStyle? itemStyle)
     {
         string? source = element.GetAttribute("src") ?? element.GetAttribute("data-src");
-        if (string.IsNullOrWhiteSpace(source) || !TryResolveUrl(source, out string url))
+        string? srcdoc = element.GetAttribute("srcdoc");
+        bool hasSource = TryResolveUrl(source, out string url);
+        bool sameOrigin = hasSource && Uri.TryCreate(_document.Url, UriKind.Absolute, out Uri? parent) &&
+            Uri.Compare(parent, new Uri(url), UriComponents.SchemeAndServer, UriFormat.SafeUnescaped, StringComparison.OrdinalIgnoreCase) == 0;
+        if (_options.DrawFrames && _frames.Count < 8 &&
+            (srcdoc is { Length: <= 262144 } || (srcdoc is null && sameOrigin)))
         {
-            return;
+            var embedded = new PageFrame(_ids.GetId(element), srcdoc is null ? url : _baseUri.AbsoluteUri,
+                srcdoc, element.GetAttribute("title") ?? "Embedded page");
+            _frames.Add(embedded);
+            WritePlaceholder(element, box, embedded.ElementId, 300, 150, itemStyle);
         }
 
+        if (!hasSource || srcdoc is not null) return;
         string label = "Embedded page: " + (Uri.TryCreate(url, UriKind.Absolute, out Uri? frame) ? frame.Host : url);
         // A YouTube player becomes a link to the video.
         if (frame is not null && frame.Host.Contains("youtube", StringComparison.OrdinalIgnoreCase) && frame.AbsolutePath.StartsWith("/embed/", StringComparison.OrdinalIgnoreCase))
@@ -3544,6 +3555,11 @@ internal sealed class PageMarkupWriter
     private void WriteFieldPlaceholder(IElement element, ElementBox box, PageFormField field, double defaultWidth, double defaultHeight, CascadedStyle? itemStyle)
     {
         _fields.Add(field);
+        WritePlaceholder(element, box, field.ElementId, defaultWidth, defaultHeight, itemStyle);
+    }
+
+    private void WritePlaceholder(IElement element, ElementBox box, string id, double defaultWidth, double defaultHeight, CascadedStyle? itemStyle)
+    {
         var extra = new CascadedStyle();
         if (!box.Style.Has("width") && !box.Style.Has("inline-size"))
         {
@@ -3565,7 +3581,7 @@ internal sealed class PageMarkupWriter
 
         string display = box.EmittedDisplay is "inline" or "inline-block" ? "inline-block" : box.EmittedDisplay;
         _out.Append("<span");
-        AppendAttribute("id", field.ElementId);
+        AppendAttribute("id", id);
         AppendAttribute("style", BuildStyle(element, box, "span", display, inheritedOnly: false, extra));
         _out.Append(">&nbsp;</span>");
     }

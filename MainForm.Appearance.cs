@@ -230,7 +230,7 @@ public partial class MainForm
     /// <summary>The pill-shaped buttons of the top bar (Logs, Web and extension buttons are coloured as views).</summary>
     private Button[] HeaderPillButtons =>
     [
-        _backButton, _forwardButton, _goButton, _refreshButton, _historyButton, _newTabButton, _settingsButton,
+        _backButton, _forwardButton, _goButton, _refreshButton, _historyButton, _newTabButton, _usersButton, _settingsButton,
         _extensionMenuOverflowButton, _topBarRevealButton,
     ];
 
@@ -847,7 +847,7 @@ public partial class MainForm
     {
         foreach (Control control in EnumerateControlTree(root).ToList())
         {
-            if (control is WebView2 || _uiBoundControls.Contains(control) ||
+            if (control is WebView2 || control == _usersButton || _uiBoundControls.Contains(control) ||
                 ReferenceEquals(control.Tag, TabCloseButtonTag) || control.Tag is ExtensionMenuEntry)
             {
                 continue;
@@ -1513,6 +1513,10 @@ public partial class MainForm
         {
             return;
         }
+
+        _brandIcon?.Dispose();
+        _brandLogo?.Dispose();
+        if (!ReferenceEquals(_defaultLogoImage, DefaultTabIcon)) _defaultLogoImage?.Dispose();
 
         // After the controls are gone, nothing can draw with these fonts any more.
         foreach (Font font in new[]

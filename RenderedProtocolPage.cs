@@ -107,7 +107,7 @@ internal static class RenderedPageSessionData
 }
 
 /// <summary>A tab shown with HTML Renderer: the page engine's document, drawn, with real controls over its form fields.</summary>
-internal sealed class RenderedWebProtocolPage : WebProtocolPage
+internal sealed partial class RenderedWebProtocolPage : WebProtocolPage
 {
     // Unknown (HTML5) elements are inline in HTML Renderer; these are blocks, as in every browser.
     private const string BaseStyleSheet =
@@ -154,6 +154,7 @@ internal sealed class RenderedWebProtocolPage : WebProtocolPage
     private bool _initialized;
     private bool _windowGuard;
     private bool _positioningFields;
+    private bool _fieldLayoutPending;
 
     public RenderedWebProtocolPage(WebProtocol protocol, IWebProtocolHost host, IRenderedPageTransport transport, bool scriptsEnabled)
         : base(protocol, host)
@@ -219,6 +220,7 @@ internal sealed class RenderedWebProtocolPage : WebProtocolPage
             double scale = PixelScale;
             int width = _panel.ClientSize.Width;
             int height = _panel.ClientSize.Height;
+            if (_isEmbeddedFrame) return (Math.Max(1, width / scale), Math.Max(1, height / scale));
             if (width < 320 && _panel.Parent is Control parent)
             {
                 width = parent.ClientSize.Width;
@@ -339,6 +341,8 @@ internal sealed class RenderedWebProtocolPage : WebProtocolPage
             return;
         }
 
+        if (_isEmbeddedFrame) return;
+
         if (editedHtml is null && ReturnToBrowser is not null)
         {
             ReturnToBrowser(request);
@@ -364,7 +368,7 @@ internal sealed class RenderedWebProtocolPage : WebProtocolPage
         _loadCancellation?.Cancel();
         _loadCancellation?.Dispose();
         _loadCancellation = null;
-        _transport.CancelDocument();
+        if (!_isEmbeddedFrame) _transport.CancelDocument();
     }
 
     private bool IsCurrentLoad(int sequence) => !IsDisposed && sequence == _loadSequence;
@@ -415,6 +419,7 @@ internal sealed class RenderedWebProtocolPage : WebProtocolPage
                 {
                     ProtocolName = _transport.ProtocolName,
                     ScriptsEnabled = _scriptsEnabled,
+                    DrawFrames = !_isEmbeddedFrame,
                     Language = RenderedPageEnvironment.Language,
                     ViewportWidth = width,
                     ViewportHeight = height,
@@ -554,6 +559,7 @@ internal sealed class RenderedWebProtocolPage : WebProtocolPage
         DisposeImagesLater(previousImages);
         ReplaceSession(null);
         ClearFieldControls();
+        ClearFrames();
         _pendingValues.Clear();
         _valueTimer.Stop();
         _resizeTimer.Stop();
@@ -636,6 +642,7 @@ internal sealed class RenderedWebProtocolPage : WebProtocolPage
         _findVersion++;
         _panel.BackColor = ColorTranslator.FromHtml(page.CanvasColor);
         SetPanelHtml(page.Html, keepScrollPosition);
+        UpdateFrames(page.Frames);
         UpdateFieldControls(page.Fields);
         string title = page.Title;
         if (!string.Equals(title, _title, StringComparison.Ordinal))
@@ -852,9 +859,14 @@ internal sealed class RenderedWebProtocolPage : WebProtocolPage
     private void OnPanelLayout(object? sender, LayoutEventArgs e)
     {
         // Images that arrive later move what is below them, fields included.
-        if (_fieldControls.Count > 0 && !_positioningFields)
+        if ((_fieldControls.Count > 0 || _frames.Count > 0) && !_positioningFields && !_fieldLayoutPending)
         {
-            PostToUi(PositionFieldControls);
+            _fieldLayoutPending = true;
+            PostToUi(() =>
+            {
+                _fieldLayoutPending = false;
+                PositionFieldControls();
+            });
         }
     }
 
@@ -1041,13 +1053,13 @@ internal sealed class RenderedWebProtocolPage : WebProtocolPage
         return (control.Tag as FieldTag)?.Kind == field.Kind;
     }
 
-    private sealed record FieldTag(int NodeId, PageFormFieldKind Kind, string ElementId);
+    private sealed record FieldTag(int NodeId, PageFormFieldKind Kind, string ElementId, Font OwnedFont);
 
     private Control CreateFieldControl(PageFormField field)
     {
-        var tag = new FieldTag(field.NodeId, field.Kind, field.ElementId);
         float fontSize = (float)Math.Clamp(field.FontSizePx * 0.75, 6, 30);
         var font = new Font("Segoe UI", fontSize, FontStyle.Regular, GraphicsUnit.Point);
+        var tag = new FieldTag(field.NodeId, field.Kind, field.ElementId, font);
         switch (field.Kind)
         {
             case PageFormFieldKind.Select:
@@ -1078,6 +1090,7 @@ internal sealed class RenderedWebProtocolPage : WebProtocolPage
                 ButtonBase box = field.Kind == PageFormFieldKind.Radio
                     ? new RadioButton { AutoCheck = false, Tag = tag }
                     : new CheckBox { AutoCheck = true, Tag = tag };
+                box.Font = font;
                 box.Text = string.Empty;
                 box.BackColor = Color.Transparent;
                 box.Click += (_, _) =>
@@ -1214,7 +1227,7 @@ internal sealed class RenderedWebProtocolPage : WebProtocolPage
     /// <summary>Puts every field control over its placeholder in the drawn page (and hides it when the field is not drawn).</summary>
     private void PositionFieldControls()
     {
-        if (_fieldControls.Count == 0 || IsDisposed || _positioningFields)
+        if ((_fieldControls.Count == 0 && _frames.Count == 0) || IsDisposed || _positioningFields)
         {
             return;
         }
@@ -1223,6 +1236,7 @@ internal sealed class RenderedWebProtocolPage : WebProtocolPage
         try
         {
             Point scroll = _panel.AutoScrollPosition;
+            PositionFrames(scroll);
             int inset = (int)Math.Ceiling(2 * PixelScale);
             foreach (Control control in _fieldControls.Values)
             {
@@ -1316,9 +1330,9 @@ internal sealed class RenderedWebProtocolPage : WebProtocolPage
         if (_fieldControls.Remove(nodeId, out Control? control))
         {
             _panel.Controls.Remove(control);
-            Font font = control.Font;
+            var tag = (FieldTag)control.Tag!;
             control.Dispose();
-            font.Dispose();
+            tag.OwnedFont.Dispose();
         }
     }
 
@@ -1616,6 +1630,7 @@ internal sealed class RenderedWebProtocolPage : WebProtocolPage
         _panel.Layout -= OnPanelLayout;
         _panel.Resize -= OnPanelResize;
         ClearFieldControls();
+        ClearFrames();
         if (_windowGuard)
         {
             _windowGuard = false;
@@ -1631,8 +1646,10 @@ internal sealed class RenderedWebProtocolPage : WebProtocolPage
             // Best effort cleanup only.
         }
 
+        _documentCancellation.Dispose();
         DisposeImagesLater(_images);
         _images = new Dictionary<string, Task<Image?>>(StringComparer.Ordinal);
+        if (_isEmbeddedFrame) return;
         try
         {
             Directory.Delete(Path.Combine(Host.SessionDirectory, "htmlrenderer", _folderName), recursive: true);

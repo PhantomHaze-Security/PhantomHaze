@@ -525,7 +525,7 @@ internal sealed class HazeGatePageTransport : IRenderedPageTransport
     public async Task<PageResource?> FetchAsync(PageResourceRequest request, CancellationToken cancellationToken)
     {
         // Stylesheets and scripts usually came with the page.
-        if (request.Kind != PageResourceKind.Data && request.Method == "GET" && request.Body is null &&
+        if (request.Kind is not (PageResourceKind.Data or PageResourceKind.Frame) && request.Method == "GET" && request.Body is null &&
             _bundle.TryGetValue(request.Url, out PageResource? bundled))
         {
             return bundled.Body.Length <= request.MaximumBytes ? bundled : null;
@@ -602,7 +602,7 @@ internal sealed class HazeGatePageTransport : IRenderedPageTransport
                 return new PageResource(uri.AbsoluteUri, response.Status, response.ContentType, response.Body)
                 {
                     StatusText = response.StatusText,
-                    Headers = request.Kind == PageResourceKind.Data ? response.Headers : Array.Empty<KeyValuePair<string, string>>(),
+                    Headers = request.Kind is PageResourceKind.Data or PageResourceKind.Frame ? response.Headers : Array.Empty<KeyValuePair<string, string>>(),
                 };
             }
 

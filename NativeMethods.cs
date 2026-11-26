@@ -9,6 +9,17 @@ namespace PhantomHaze;
 /// </summary>
 internal static class NativeMethods
 {
+    [DllImport("user32.dll")]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool DestroyIcon(IntPtr icon);
+
+    internal static Icon CreateWindowIcon(Bitmap bitmap)
+    {
+        IntPtr handle = bitmap.GetHicon();
+        try { return (Icon)Icon.FromHandle(handle).Clone(); }
+        finally { DestroyIcon(handle); }
+    }
+
     // Values from winuser.h
     public const uint WDA_NONE = 0x00000000;
     public const uint WDA_MONITOR = 0x00000001;

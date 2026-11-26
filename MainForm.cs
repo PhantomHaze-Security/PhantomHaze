@@ -388,6 +388,7 @@ public partial class MainForm : Form
     // The protection banner's tooltip (extension tooltips, and the Settings gear's, use _extensionUiToolTip).
     private readonly ToolTip _headerToolTip = new();
     private readonly PillButton _webViewToggleButton = new();
+    private readonly PillButton _usersButton = new();
     private readonly PillButton _settingsButton = new();
     private readonly ContextMenuStrip _disableProtectionMenu = new();
     private readonly System.Windows.Forms.Timer _protectionRestoreTimer = new();
@@ -546,7 +547,7 @@ public partial class MainForm : Form
         _userLease = lease;
         _logBox.Text = sessionLog ?? string.Empty;
         // The version and release channel come from PhantomHaze.csproj (see AppVersionInfo).
-        Text = AppVersionInfo.WindowTitle;
+        Text = AppVersionInfo.WindowTitle(_appDisplayName);
         Width = 980;
         Height = 620;
         MinimumSize = new Size(860, 560);
@@ -556,6 +557,8 @@ public partial class MainForm : Form
         KeyPreview = true;
         KeyDown += OnMainFormKeyDown;
         TrySetWindowIcon();
+        _defaultWindowIcon = Icon;
+        Shown += (_, _) => ShowBrandingConflict();
 
         _logDirectory = InitializeLogDirectory(userStore.Root);
         string dataDirectory = userStore.DirectoryFor(user.Id);
@@ -675,6 +678,7 @@ public partial class MainForm : Form
         _menuBarPanel.Padding = ScalePadding(outer, outer - 2, outer, outer - 2);
         int menuLogoSize = ScaleByDpi(24);
         _menuLogoPictureBox.Size = new Size(menuLogoSize, menuLogoSize);
+        _menuLogoLabel.MaximumSize = new Size(ScaleByDpi(180), 0);
         _menuLogoPictureBox.Margin = ScalePadding(2, 2, 8, 2);
         _menuLogoLabel.Margin = ScalePadding(0, 0, 12, 0);
         _updateBannerPanel.Height = ScaleByDpi(36);
@@ -689,7 +693,7 @@ public partial class MainForm : Form
         _logsViewButton.MinimumSize = new Size(ScaleByDpi(metrics.MenuButtonMinWidth), ScaleByDpi(HeaderButtonHeight));
         _webViewToggleButton.MinimumSize = new Size(ScaleByDpi(metrics.MenuButtonMinWidth), ScaleByDpi(HeaderButtonHeight));
         // The gear is a circle; a longer text set by an extension makes it a pill.
-        _settingsButton.MinimumSize = new Size(ScaleByDpi(HeaderButtonHeight), ScaleByDpi(HeaderButtonHeight));
+        _usersButton.MinimumSize = _settingsButton.MinimumSize = new Size(ScaleByDpi(HeaderButtonHeight), ScaleByDpi(HeaderButtonHeight));
         Padding menuButtonPadding = ScalePadding(metrics.MenuButtonPaddingX, metrics.MenuButtonPaddingY, metrics.MenuButtonPaddingX, metrics.MenuButtonPaddingY);
         _logsViewButton.Padding = menuButtonPadding;
         _webViewToggleButton.Padding = menuButtonPadding;
@@ -1663,6 +1667,7 @@ public partial class MainForm : Form
 
     private void RefreshExtensionSurface()
     {
+        ApplyExtensionBranding();
         RebuildExtensionMenuButtons();
         RebuildExtensionLauncherButtons();
         PositionExtensionLauncherPanel();
@@ -2439,7 +2444,7 @@ public partial class MainForm : Form
         var menuLayout = new TableLayoutPanel
         {
             Dock = DockStyle.Fill,
-            ColumnCount = 8,
+            ColumnCount = 9,
             RowCount = 1,
             Margin = new Padding(0),
             Padding = new Padding(0),
@@ -2455,6 +2460,8 @@ public partial class MainForm : Form
         menuLayout.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
         menuLayout.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
         menuLayout.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
+        menuLayout.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
+
         menuLayout.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
 
         var logoLayout = new TableLayoutPanel
@@ -2480,6 +2487,7 @@ public partial class MainForm : Form
 
         _menuLogoLabel.Text = "PhantomHaze";
         // Without AutoSize a Label keeps its default 100px width, which cut the bold name off at "Phantom".
+        _menuLogoLabel.AutoEllipsis = true;
         _menuLogoLabel.AutoSize = true;
         _menuLogoLabel.Dock = DockStyle.Fill;
         _menuLogoLabel.Font = _menuTitleFont;
@@ -2527,6 +2535,17 @@ public partial class MainForm : Form
         _settingsButton.AccessibleName = "Settings";
         // Its "Settings" tooltip is set with the extension customisations (BuildUiTargetBindings), so it never shows twice.
         _settingsButton.Click += (_, _) => OpenSettingsWindow();
+        _usersButton.Text = "👤";
+        _usersButton.Font = _settingsGlyphFont;
+        _usersButton.AutoSize = true;
+        _usersButton.AutoSizeMode = AutoSizeMode.GrowAndShrink;
+        _usersButton.Anchor = AnchorStyles.Left;
+        _usersButton.Padding = _settingsButton.Padding;
+        _usersButton.Margin = Padding.Empty;
+        _usersButton.MinimumSize = _settingsButton.MinimumSize;
+        _usersButton.AccessibleName = "Switch user";
+        _headerToolTip.SetToolTip(_usersButton, "Switch user");
+        _usersButton.Click += (_, _) => OpenSettingsWindow(showUsers: true);
 
         // A live clock (with seconds) from the computer's clock, to the left of Settings.
         _menuClockLabel.AutoSize = true;
@@ -2549,8 +2568,9 @@ public partial class MainForm : Form
 
         menuLayout.Controls.Add(_menuClockLabel, 4, 0);
         menuLayout.Controls.Add(_protectionSwitch, 5, 0);
-        menuLayout.Controls.Add(_settingsButton, 6, 0);
-        menuLayout.Controls.Add(_topBarRevealButton, 7, 0);
+        menuLayout.Controls.Add(_usersButton, 6, 0);
+        menuLayout.Controls.Add(_settingsButton, 7, 0);
+        menuLayout.Controls.Add(_topBarRevealButton, 8, 0);
     }
 
     /// <summary>The gear symbol shown on the Settings button.</summary>
@@ -3348,6 +3368,13 @@ public partial class MainForm : Form
                 e.SuppressKeyPress = true;
                 NavigateFromFavoritesSelection();
             }
+            else if (e.KeyData is Keys.Delete or Keys.Back && _favoritesListBox.SelectedItem is string url && FindFavorite(url) >= 0)
+            {
+                e.SuppressKeyPress = true;
+                int row = _favoritesListBox.SelectedIndex;
+                RemoveFavorite(url);
+                if (_favorites.Count > 0) _favoritesListBox.SelectedIndex = Math.Min(row, _favorites.Count - 1);
+            }
         };
 
         _historyLayout = new TableLayoutPanel
@@ -3770,7 +3797,7 @@ public partial class MainForm : Form
             : $"A browser tab could not be created with the {protocol.DisplayName} protocol:\n{error.Message}\n\n" +
               "Choose another Web View protocol in Settings -> General.";
         ShowCaptureProtectedDialog(() => MessageBox.Show(
-            message,
+            this, message,
             "PhantomHaze",
             MessageBoxButtons.OK,
             MessageBoxIcon.Warning));
@@ -5285,15 +5312,24 @@ public partial class MainForm : Form
 
         if (existingIndex >= 0)
         {
-            _favorites.RemoveAt(existingIndex);
-            Log($"Favourite removed: {normalizedUrl}");
-        }
-        else
-        {
-            _favorites.Add(FavoriteFromTab(_activeTab!, normalizedUrl));
-            Log($"Favourite added: {normalizedUrl}");
+            RemoveFavorite(normalizedUrl);
+            return;
         }
 
+        _favorites.Add(FavoriteFromTab(_activeTab!, normalizedUrl));
+        Log($"Favourite added: {normalizedUrl}");
+
+        SaveFavorites();
+        RefreshFavoritesPanelItems();
+        UpdateFavoriteButtonState();
+    }
+
+    private void RemoveFavorite(string url)
+    {
+        int index = FindFavorite(url);
+        if (index < 0) return;
+        _favorites.RemoveAt(index);
+        Log($"Favourite removed: {url}");
         SaveFavorites();
         RefreshFavoritesPanelItems();
         UpdateFavoriteButtonState();
@@ -5496,7 +5532,7 @@ public partial class MainForm : Form
         {
             CoreWebView2WebResourceResponseView? response = e.Response;
             if (response is not null &&
-                response.Headers.Any(header => header.Key.Equals("Set-Cookie", StringComparison.OrdinalIgnoreCase)))
+                response.Headers.Contains("Set-Cookie"))
             {
                 QueueCookieRegistrationCheck(tab);
             }
@@ -6300,7 +6336,7 @@ public partial class MainForm : Form
         return string.IsNullOrWhiteSpace(name) ? "extension.phext" : name;
     }
 
-    private void OpenSettingsWindow()
+    private void OpenSettingsWindow(bool showUsers = false)
     {
         AppSettings draftSettings = _settings.Clone();
         List<InstalledExtensionEntry> previousExtensions = _settings.Extensions
@@ -6369,7 +6405,9 @@ public partial class MainForm : Form
         settingsTabs.TabPages.Add(generalTab);
         settingsTabs.TabPages.Add(appearanceTab.Page);
         settingsTabs.TabPages.Add(extensionsTab);
-        settingsTabs.TabPages.Add(BuildUsersTab(settingsWindow));
+        var usersTab = BuildUsersTab(settingsWindow);
+        settingsTabs.TabPages.Add(usersTab);
+        if (showUsers) settingsTabs.SelectedTab = usersTab;
         settingsTabs.TabPages.Add(backupTab.Page);
         settingsTabs.TabPages.Add(aboutTab.Page);
         settingsTabs.SelectedIndexChanged += (_, _) =>

@@ -65,9 +65,9 @@ internal static class AppVersionInfo
     public static ReleaseTag? Tag { get; } = ReleaseTag.TryParse(InformationalVersion, out ReleaseTag tag) ? tag : null;
 
     /// <summary>"PhantomHaze v1.3.5" for a stable build and "PhantomHaze v1.3.5 Beta" for a beta build.</summary>
-    public static string WindowTitle => Tag is ReleaseTag current
-        ? $"PhantomHaze v{current.VersionNumber}{(current.Channel == ReleaseChannel.Beta ? " Beta" : string.Empty)}"
-        : $"PhantomHaze {InformationalVersion}";
+    public static string WindowTitle(string appName) => Tag is ReleaseTag current
+        ? $"{appName} v{current.VersionNumber}{(current.Channel == ReleaseChannel.Beta ? " Beta" : string.Empty)}"
+        : $"{appName} {InformationalVersion}";
 
     private static string ReadInformationalVersion()
     {

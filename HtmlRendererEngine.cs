@@ -30,6 +30,7 @@ internal enum PageResourceKind
     Script,
     StyleSheet,
     Image,
+    Frame,
 
     /// <summary>fetch() and XMLHttpRequest from the page's scripts.</summary>
     Data,
@@ -103,6 +104,7 @@ internal sealed class PageEngineOptions
     public string ProtocolName { get; init; } = "HTMLRenderer";
 
     public bool ScriptsEnabled { get; init; } = true;
+    public bool DrawFrames { get; init; } = true;
     public string UserAgent { get; init; } = PageEngineDefaults.UserAgent;
     public string Language { get; init; } = "en-US";
 
@@ -2126,9 +2128,15 @@ internal sealed class RenderedPage
 
     /// <summary>Form fields, drawn as placeholders that PhantomHaze covers with real text boxes and lists.</summary>
     public IReadOnlyList<PageFormField> Fields { get; init; } = Array.Empty<PageFormField>();
+    public IReadOnlyList<PageFrame> Frames { get; init; } = [];
 
     /// <summary>Inline SVG graphics by the number of their phsvg: image address.</summary>
     public IReadOnlyDictionary<int, PageSvgImage> SvgImages { get; init; } = new Dictionary<int, PageSvgImage>();
+}
+
+internal sealed record PageFrame(int NodeId, string Address, string? SrcDoc, string Title)
+{
+    public string ElementId => "ph-frame-" + NodeId.ToString(CultureInfo.InvariantCulture);
 }
 
 internal enum PageFormFieldKind

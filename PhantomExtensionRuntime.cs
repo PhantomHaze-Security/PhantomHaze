@@ -486,6 +486,8 @@ internal sealed class PhantomExtensionDefinition
     public string Version { get; set; } = "1.0.0";
     public string Description { get; set; } = string.Empty;
     public string IconToken { get; set; } = "shield";
+    public string? AppName { get; set; }
+    public string? AppIcon { get; set; }
     public string StartPageOverride { get; set; } = string.Empty;
     public PhantomExtensionSearchEngine? SearchEngineOverride { get; set; }
     public PhantomExtensionUiDefinition Ui { get; } = new();
@@ -590,6 +592,20 @@ internal static class PhextParser
                 case "meta.icon":
                     RequireArgCount(args, 2, lineNumber);
                     definition.IconToken = args[1].Trim();
+                    break;
+                case "app.name":
+                case "app.icon":
+                    RequireArgCount(args, 2, lineNumber);
+                    string brandingValue = args[1].Trim();
+                    if (brandingValue.Length == 0)
+                        throw new PhextParseException(lineNumber, $"{command} requires a value.");
+                    if (command == "app.name")
+                    {
+                        if (brandingValue.Length > 64 || brandingValue.Any(char.IsControl))
+                            throw new PhextParseException(lineNumber, "app.name needs a single line of up to 64 characters.");
+                        definition.AppName = brandingValue;
+                    }
+                    else definition.AppIcon = brandingValue;
                     break;
                 case "setting.toggle":
                 {

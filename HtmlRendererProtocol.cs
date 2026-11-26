@@ -665,7 +665,7 @@ internal static class HtmlRendererResources
             }
 
             var headers = new List<KeyValuePair<string, string>>();
-            if (request.Kind == PageResourceKind.Data)
+            if (request.Kind is PageResourceKind.Data or PageResourceKind.Frame)
             {
                 foreach (KeyValuePair<string, IEnumerable<string>> header in response.Headers.Concat(response.Content.Headers))
                 {
@@ -690,6 +690,7 @@ internal static class HtmlRendererResources
     public static string GetAcceptHeader(PageResourceKind kind) => kind switch
     {
         PageResourceKind.Image => PageEngineDefaults.AcceptImages,
+        PageResourceKind.Frame => PageEngineDefaults.AcceptHtml,
         PageResourceKind.StyleSheet => "text/css,*/*;q=0.1",
         _ => "*/*",
     };

@@ -687,8 +687,8 @@ public partial class MainForm
         _newTabButton.AccessibleName = "New tab";
 
         Bind("menu.bar", _menuBarPanel);
-        Bind("menu.logo", _menuLogoPictureBox, image: () => _defaultLogoImage);
-        Bind("menu.title", _menuLogoLabel, text: () => "PhantomHaze", font: () => MapFont(_menuTitleFont));
+        Bind("menu.logo", _menuLogoPictureBox, image: () => _brandLogo ?? _defaultLogoImage);
+        Bind("menu.title", _menuLogoLabel, text: () => _appDisplayName, font: () => MapFont(_menuTitleFont));
         Bind("menu.logs", _logsViewButton, text: () => "Logs", font: () => MapFont(IsLogsViewSelected ? _menuButtonFontBold : _menuButtonFontRegular));
         Bind("menu.webview", _webViewToggleButton, text: () => "Web", font: () => MapFont(_webViewModeEnabled ? _menuButtonFontBold : _menuButtonFontRegular));
         Bind("menu.clock", _menuClockLabel, font: () => MapFont(_menuButtonFontRegular));
@@ -864,6 +864,59 @@ public partial class MainForm
         return overrides;
     }
 
+    private readonly Icon? _defaultWindowIcon;
+    private string _appDisplayName = "PhantomHaze";
+    private string? _brandIconToken;
+    private Bitmap? _brandLogo;
+    private Icon? _brandIcon;
+    private string _brandingConflict = string.Empty;
+    private string _shownBrandingConflict = string.Empty;
+
+    private void ApplyExtensionBranding()
+    {
+        var enabled = GetEnabledExtensions().Select(ext => ext.Definition).ToList();
+        var conflicts = new List<string>();
+        string? Resolve(string property, Func<PhantomExtensionDefinition, string?> read)
+        {
+            var providers = enabled.Where(ext => read(ext) is not null).ToList();
+            var values = providers.Select(read).Distinct(StringComparer.Ordinal).ToArray();
+            if (values.Length <= 1) return values.FirstOrDefault();
+            conflicts.Add($"The app {property} uses its default because these extensions request different values: " +
+                string.Join(", ", providers.Select(ext => ext.Name)));
+            return null;
+        }
+
+        _appDisplayName = Resolve("name", ext => ext.AppName) ?? "PhantomHaze";
+        Text = AppVersionInfo.WindowTitle(_appDisplayName);
+        string? token = Resolve("icon", ext => ext.AppIcon);
+        if (token != _brandIconToken)
+        {
+            using var image = token is null ? null : PhantomExtensionIconFactory.CreateIcon(token);
+            var logo = image is null ? null : new Bitmap(image, 32, 32);
+            var icon = logo is null ? null : NativeMethods.CreateWindowIcon(logo);
+            Icon = icon ?? _defaultWindowIcon;
+            if (_menuLogoPictureBox.Image == _brandLogo) _menuLogoPictureBox.Image = logo ?? _defaultLogoImage;
+            _brandIcon?.Dispose();
+            _brandLogo?.Dispose();
+            _brandIcon = icon;
+            _brandLogo = logo;
+            _brandIconToken = token;
+        }
+
+        _brandingConflict = string.Join(Environment.NewLine, conflicts);
+        if (_brandingConflict.Length == 0) _shownBrandingConflict = string.Empty;
+        else if (Visible && _shownBrandingConflict != _brandingConflict) BeginInvoke(ShowBrandingConflict);
+    }
+
+    private void ShowBrandingConflict()
+    {
+        if (IsDisposed || _brandingConflict.Length == 0 || _shownBrandingConflict == _brandingConflict) return;
+        _shownBrandingConflict = _brandingConflict;
+        Log(_brandingConflict);
+        ShowCaptureProtectedDialog(() => MessageBox.Show(Form.ActiveForm ?? this, _brandingConflict,
+            "Extension conflict", MessageBoxButtons.OK, MessageBoxIcon.Error));
+    }
+
     private void ApplyBuiltInElementState(UiTargetBinding binding, UiOverride? customization)
     {
         Control control = binding.Control;
@@ -1028,6 +1081,8 @@ public partial class MainForm
         _appliedUiVisuals.TryGetValue(control, out AppliedUiVisual? existing);
         if (svg is null && shape is null && existing is null)
         {
+            if (control is PictureBox picture && defaultImage is not null && picture.Image != defaultImage())
+                picture.Image = defaultImage();
             return;
         }
 
@@ -1054,9 +1109,9 @@ public partial class MainForm
     {
         if (svg is null && shape is null)
         {
+            picture.Image = defaultImage?.Invoke();
             if (applied.OwnedImage is not null)
             {
-                picture.Image = defaultImage?.Invoke();
                 applied.OwnedImage.Dispose();
                 applied.OwnedImage = null;
             }

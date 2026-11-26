@@ -69,7 +69,7 @@ public partial class MainForm
             byte[] protectedBytes = File.ReadAllBytes(_cookiesFilePath);
             byte[] json = ProtectedData.Unprotect(protectedBytes, SavedCookiesEntropy, DataProtectionScope.CurrentUser);
             SavedCookieFile? file = JsonSerializer.Deserialize<SavedCookieFile>(json);
-            return (file?.Cookies ?? new List<SavedCookie>()).Where(IsCookieStillSaved).ToList();
+            return UniqueSavedCookies(file?.Cookies ?? []).Where(IsCookieStillSaved).ToList();
         }
         catch (Exception ex) when (ex is CryptographicException or JsonException or IOException or UnauthorizedAccessException or NotSupportedException)
         {
@@ -77,6 +77,16 @@ public partial class MainForm
             Log($"The saved cookies could not be read and were not restored: {ex.Message}");
             return new List<SavedCookie>();
         }
+    }
+
+    // The file format cannot distinguish cookies with the same triple (for example from
+    // different partitions). Never restore an arbitrary value under the shared identity.
+    private static IEnumerable<SavedCookie> UniqueSavedCookies(IEnumerable<SavedCookie> cookies)
+    {
+        return cookies.Where(cookie => cookie is not null)
+            .GroupBy(cookie => (cookie.Name, cookie.Domain, cookie.Path))
+            .Where(group => group.Count() == 1)
+            .Select(group => group.First());
     }
 
     private bool IsCookieStillSaved(SavedCookie cookie)
@@ -158,13 +168,14 @@ public partial class MainForm
             SavedCookie cookie;
             try
             {
-                var key = (live.Name, live.Domain, live.Path);
+                var path = live.Path;
+                var key = (live.Name, live.Domain, Path: string.IsNullOrEmpty(path) ? "/" : path);
                 cookie = new SavedCookie
                 {
-                    Name = live.Name,
+                    Name = key.Name,
                     Value = live.Value,
-                    Domain = live.Domain,
-                    Path = string.IsNullOrEmpty(live.Path) ? "/" : live.Path,
+                    Domain = key.Domain,
+                    Path = key.Path,
                     ExpiresUtc = live.IsSession ? null : ToUniversalTime(live.Expires),
                     IsSecure = live.IsSecure,
                     IsHttpOnly = live.IsHttpOnly,
@@ -177,6 +188,7 @@ public partial class MainForm
                 continue;
             }
 
+            times[(cookie.Name, cookie.Domain, cookie.Path)] = cookie.SavedAtUtc;
             if (!IsCookieStillSaved(cookie))
             {
                 // Past its retention period: it is used for the rest of this session but no longer saved.
@@ -184,11 +196,11 @@ public partial class MainForm
             }
 
             file.Cookies.Add(cookie);
-            times[(cookie.Name, cookie.Domain, cookie.Path)] = cookie.SavedAtUtc;
         }
 
         try
         {
+            file.Cookies = UniqueSavedCookies(file.Cookies).ToList();
             byte[] json = JsonSerializer.SerializeToUtf8Bytes(file);
             byte[] protectedBytes = ProtectedData.Protect(json, SavedCookiesEntropy, DataProtectionScope.CurrentUser);
             WriteBytesAtomically(_cookiesFilePath, protectedBytes);

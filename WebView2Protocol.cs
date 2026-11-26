@@ -54,6 +54,7 @@ internal sealed partial class WebView2ProtocolPage : WebProtocolPage
     private readonly string? _proxyServer;
     private CoreWebView2? _core;
     private bool _hasFaviconEvents;
+    private bool _renderingActive = true;
     private int _zoomPercent = 100;
 
     public WebView2ProtocolPage(WebProtocol protocol, IWebProtocolHost host, string? proxyServer)
@@ -296,6 +297,7 @@ internal sealed partial class WebView2ProtocolPage : WebProtocolPage
             return;
         }
 
+        _renderingActive = active;
         if (active)
         {
             core.Resume();
@@ -306,11 +308,14 @@ internal sealed partial class WebView2ProtocolPage : WebProtocolPage
         }
     }
 
-    private static async Task SuspendQuietlyAsync(CoreWebView2 core)
+    private async Task SuspendQuietlyAsync(CoreWebView2 core)
     {
         try
         {
-            await core.TrySuspendAsync();
+            if (await core.TrySuspendAsync() && _renderingActive && ReferenceEquals(Core, core))
+            {
+                core.Resume();
+            }
         }
         catch (Exception ex) when (ex is InvalidOperationException or ObjectDisposedException or COMException)
         {

@@ -211,6 +211,7 @@ public partial class MainForm
             SetTopBarStyleHidden(_menuLogoPictureBox, compact);
             SetTopBarStyleHidden(_menuLogoLabel, compact || simple);
             SetTopBarStyleHidden(_menuClockLabel, collapsed || simple);
+            SetTopBarStyleHidden(_usersButton, collapsed);
             SetTopBarStyleHidden(_settingsButton, collapsed);
             SetTopBarStyleHidden(_goButton, simple);
             SetTopBarStyleHidden(_refreshButton, simple);
