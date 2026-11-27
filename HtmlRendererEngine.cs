@@ -174,6 +174,11 @@ internal sealed class PageSessionStorage
 
             // A page cannot make PhantomHaze keep more than about 5 MB per site (as browsers do).
             long size = values.Sum(pair => (long)pair.Key.Length + pair.Value.Length);
+            if (values.TryGetValue(key, out string? previous))
+            {
+                size -= (long)key.Length + previous.Length;
+            }
+
             if (size + key.Length + value.Length > 5 * 1024 * 1024)
             {
                 return;

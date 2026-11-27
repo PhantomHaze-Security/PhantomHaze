@@ -53,8 +53,21 @@ test.before(async () => {
       case '/binary':
         send(200, 'image/png', Buffer.from([0x89, 0x50, 0x4e, 0x47, 0xff, 0x00]));
         break;
+      case '/with-redirect?article=1':
+        send(200, 'text/html', '<script src="/cross-origin.js"></script>');
+        break;
+      case '/cross-origin.js':
+        send(302, 'text/plain', '', { location: base.replace('127.0.0.1', 'localhost') + '/app.js' });
+        break;
+      case '/bundle':
+        send(200, 'text/html', '<script src="/one.js"></script><script src="/two.js"></script>');
+        break;
+      case '/one.js':
+      case '/two.js':
+        send(200, 'text/javascript', Buffer.alloc(5 * 1024 * 1024, 32));
+        break;
       case '/big':
-        send(200, 'text/plain', 'x'.repeat(5000));
+        send(200, 'text/plain', 'x'.repeat(5000), { 'content-length': 5000 });
         break;
       case '/echo': {
         const chunks = [];
@@ -183,4 +196,23 @@ test('the Referer follows the browsers\' default policy', () => {
   assert.equal(refererFor('https://a.example/page?q=1', new URL('https://b.example/')), 'https://a.example/');
   assert.equal(refererFor('https://a.example/page', new URL('http://a.example/')), null);
   assert.equal(refererFor('', new URL('https://a.example/')), null);
+});
+
+test('HEAD succeeds when the advertised representation exceeds the body limit', async () => {
+  const answer = await post({ mode: 'resource', method: 'HEAD', url: base + '/big', maxBytes: 100 });
+  assert.equal(answer.json.status, 200);
+  assert.equal(answer.json.text, '');
+});
+
+test('parallel resource downloads share the bundle byte limit', async () => {
+  const answer = await post({ mode: 'page', url: base + '/bundle', bundle: true });
+  const resources = answer.json.resources;
+  assert.equal(resources.filter(resource => resource.text?.length === 5 * 1024 * 1024).length, 1);
+  assert.equal(resources.filter(resource => resource.error).length, 1);
+});
+
+test('bundled resources send only the referring origin across a redirect to another host', async () => {
+  const answer = await post({ mode: 'page', url: base + '/with-redirect?article=1', bundle: true });
+  assert.equal(answer.json.resources[0].status, 200);
+  assert.equal(seen.findLast(request => request.url === '/app.js').headers.referer, base + '/');
 });

@@ -46,3 +46,12 @@ test('static module imports are found, bare names are left out', () => {
   const js = `import a from "./a.js";\nimport { b, c } from '../b.js';\nimport "/side-effect.js";\nexport * from "https://cdn.example/x.js";\nimport React from "react";\nconst later = import("./lazy.js");`;
   assert.deepEqual(findModuleImports(js), ['./a.js', '../b.js', '/side-effect.js', 'https://cdn.example/x.js']);
 });
+
+test('raw text ends only at its matching tag or end of input', () => {
+  const html = 'İ'.repeat(50) + '<STYLE>@import "a.css";</STYLE><script src="b.js"></scripture>' +
+    '<link rel=stylesheet href=inside.css>';
+  assert.deepEqual(findPageResources(html, 'https://example.org/'), [
+    { url: 'https://example.org/a.css', kind: 'style' },
+    { url: 'https://example.org/b.js', kind: 'script' },
+  ]);
+});

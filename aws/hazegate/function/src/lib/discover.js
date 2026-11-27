@@ -136,16 +136,16 @@ function findPageResources(html, pageUrl) {
     }
   };
 
+  const scriptClose = /<\/script(?=[\t\n\f\r />])/gi;
+  const styleClose = /<\/style(?=[\t\n\f\r />])/gi;
   const tag = /<(link|script|style)\b([^>]*)>/gi;
   let match;
   while ((match = tag.exec(source)) !== null) {
     const name = match[1].toLowerCase();
     const attributes = parseAttributes(match[2]);
     if (name === 'script') {
-      const scriptEnd = source.toLowerCase().indexOf('</script', tag.lastIndex);
-      if (scriptEnd >= 0) {
-        tag.lastIndex = scriptEnd; // what a script contains is not markup
-      }
+      scriptClose.lastIndex = tag.lastIndex;
+      tag.lastIndex = scriptClose.exec(source)?.index ?? source.length;
 
       if (!attributes.has('src') || attributes.has('nomodule')) {
         continue;
@@ -173,15 +173,14 @@ function findPageResources(html, pageUrl) {
         add(href, 'module');
       }
     } else {
-      const styleEnd = source.toLowerCase().indexOf('</style', tag.lastIndex);
-      const css = source.slice(tag.lastIndex, styleEnd >= 0 ? styleEnd : source.length);
+      styleClose.lastIndex = tag.lastIndex;
+      const styleEnd = styleClose.exec(source)?.index ?? source.length;
+      const css = source.slice(tag.lastIndex, styleEnd);
       for (const reference of findCssImports(css)) {
         add(reference, 'style');
       }
 
-      if (styleEnd >= 0) {
-        tag.lastIndex = styleEnd;
-      }
+      tag.lastIndex = styleEnd;
     }
   }
 

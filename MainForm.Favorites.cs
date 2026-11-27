@@ -13,7 +13,7 @@ public partial class MainForm
         LayoutStyle = ToolStripLayoutStyle.HorizontalStackWithOverflow,
     };
 
-    private int FindFavorite(string url) => _favorites.FindIndex(f => f.Url.Equals(url, StringComparison.OrdinalIgnoreCase));
+    private int FindFavorite(string url) => _favorites.FindIndex(f => f.Url.Equals(url, StringComparison.Ordinal));
 
     private static Favorite FavoriteFromTab(BrowserTab tab, string url)
     {

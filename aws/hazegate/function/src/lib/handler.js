@@ -5,7 +5,7 @@
 
 const zlib = require('node:zlib');
 const { isUtf8 } = require('node:buffer');
-const { fetchOnce, fetchFollowing, checkUrl, FetchError } = require('./fetcher');
+const { fetchOnce, fetchFollowing, checkUrl, refererFor, FetchError } = require('./fetcher');
 const { findPageResources, findCssImports, findModuleImports } = require('./discover');
 const { version } = require('../../package.json');
 
@@ -82,35 +82,6 @@ function describeFetchError(error) {
   }
 
   return { status: 502, message: 'The page could not be downloaded.' };
-}
-
-/** The Referer browsers send by default (strict-origin-when-cross-origin), or null. */
-function refererFor(referrer, target) {
-  if (typeof referrer !== 'string' || referrer === '') {
-    return null;
-  }
-
-  try {
-    const from = new URL(referrer);
-    if (from.protocol !== 'http:' && from.protocol !== 'https:') {
-      return null;
-    }
-
-    if (from.protocol === 'https:' && target.protocol !== 'https:') {
-      return null;
-    }
-
-    if (from.origin === target.origin) {
-      from.hash = '';
-      from.username = '';
-      from.password = '';
-      return from.href;
-    }
-
-    return `${from.origin}/`;
-  } catch {
-    return null;
-  }
 }
 
 function headerValue(value) {
@@ -243,6 +214,11 @@ async function collectResources(html, pageUrl, request, options, deadline) {
       return;
     }
 
+    // Other workers may have finished since this download started.
+    if (answer.body.length > MAX_BUNDLE_BYTES - bundleBytes) {
+      entry.error = 'skipped';
+      return;
+    }
     bundleBytes += answer.body.length;
     entry.finalUrl = answer.finalUrl;
     entry.redirects = answer.redirects;

@@ -6,7 +6,7 @@
 
 **The lightweight, .NET 10 Windows browser engineered to keep your screen activity strictly confidential during recordings, streams, and shares.**
 
-[![Download Latest Release](https://img.shields.io/badge/Download-PhantomHaze.exe-success?style=for-the-badge&logo=windows)](https://github.com/benandkim57-crypto/PhantomHaze/releases)
+[![Download Latest Release](https://img.shields.io/badge/Download-PhantomHaze.exe-success?style=for-the-badge&logo=windows)](https://github.com/PhantomHaze-Security/PhantomHaze/releases)
 [![Community Chat](https://img.shields.io/badge/WhatsApp-Join_Community-25D366?style=for-the-badge&logo=whatsapp)](https://chat.whatsapp.com/K0PJLcSlP2hAt2HTLXQjd8)
 [![Linktree Profile](https://img.shields.io/badge/Linktree-PhantomHaze57-39E09B?style=for-the-badge&logo=linktree)](https://linktr.ee/PhantomHaze57)
 [![Website Redirect](https://img.shields.io/badge/website-redirect-grey?style=for-the-badge&color=blue)](https://phantomhaze-security.github.io/phantomhaze-web/)
@@ -132,7 +132,7 @@ Choose the installation method that fits your workflow:
 
 ### Option 1: Direct Download (Zero Setup - Recommended)
 
-1. Go to the [PhantomHaze Releases Page](https://github.com/benandkim57-crypto/PhantomHaze/releases).
+1. Go to the [PhantomHaze Releases Page](https://github.com/PhantomHaze-Security/PhantomHaze/releases).
 2. Expand the **Assets** section under the latest release.
 3. Download the executable file (e.g., `PhantomHaze-vX.X.X.exe`).
 4. Double-click the downloaded file to launch immediately. Enjoy your app!
@@ -142,7 +142,7 @@ Choose the installation method that fits your workflow:
 ### Option 2: Installer Download
 *Please note that this method is relatively new and will only be available on newer stable releases. This method may not be compatible with some devices. This installation method is powered by IZArc*
 
-1. Go to the [PhantomHaze Releases Page](https://github.com/benandkim57-crypto/PhantomHaze/releases).
+1. Go to the [PhantomHaze Releases Page](https://github.com/PhantomHaze-Security/PhantomHaze/releases).
 2. Expand the **Assets** section under the latest release.
 3. Download the executable file (e.g., `PhantomHaze-installer-vX.X.X.exe`).
 4. Double-click the downloaded file.

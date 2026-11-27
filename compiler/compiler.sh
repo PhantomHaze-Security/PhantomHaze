@@ -62,7 +62,7 @@ if ! command -v "$DOTNET_CMD" >/dev/null 2>&1; then
   fi
 fi
 
-echo "Using .NET SDK $($DOTNET_CMD --version)"
+echo "Using .NET SDK $("$DOTNET_CMD" --version)"
 echo "Publishing $PROJECT_FILE to $OUTPUT_DIR"
 echo "Temp build paths: bin=$BIN_DIR obj=$OBJ_DIR"
 

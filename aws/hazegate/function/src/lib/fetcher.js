@@ -56,6 +56,35 @@ function checkUrl(value, { allowPrivateNetworks = false } = {}) {
   return url;
 }
 
+/** The Referer browsers send by default (strict-origin-when-cross-origin), or null. */
+function refererFor(referrer, target) {
+  if (typeof referrer !== 'string' || referrer === '') {
+    return null;
+  }
+
+  try {
+    const from = new URL(referrer);
+    if (from.protocol !== 'http:' && from.protocol !== 'https:') {
+      return null;
+    }
+
+    if (from.protocol === 'https:' && target.protocol !== 'https:') {
+      return null;
+    }
+
+    if (from.origin === target.origin) {
+      from.hash = '';
+      from.username = '';
+      from.password = '';
+      return from.href;
+    }
+
+    return `${from.origin}/`;
+  } catch {
+    return null;
+  }
+}
+
 /** A dns.lookup replacement for http.request that refuses host names with any address on a private network. */
 function createLookup(allowPrivateNetworks) {
   return function lookup(hostname, options, callback) {
@@ -232,18 +261,18 @@ function fetchOnce(target, options = {}) {
         body: Buffer.alloc(0),
       };
 
+      if (method === 'HEAD' || status === 204 || status === 304 || location !== null) {
+        response.resume();
+        response.on('end', () => finish(null, result));
+        response.on('error', () => finish(null, result));
+        return;
+      }
+
       const declared = Number(response.headers['content-length']);
       if (Number.isFinite(declared) && declared > maxBytes && !response.headers['content-encoding']) {
         // Settled first: destroying the response reports it as interrupted straight away.
         finish(new FetchError('too-large', 'The file is larger than HazeGate downloads.'));
         response.destroy();
-        return;
-      }
-
-      if (method === 'HEAD' || status === 204 || status === 304 || location !== null) {
-        response.resume();
-        response.on('end', () => finish(null, result));
-        response.on('error', () => finish(null, result));
         return;
       }
 
@@ -286,13 +315,14 @@ function fetchOnce(target, options = {}) {
  */
 async function fetchFollowing(target, options = {}, maxRedirects = 5) {
   const redirects = [];
+  const headers = { ...options.headers };
   let current = checkUrl(target, options);
   let { method = 'GET', body = null } = options;
   for (let step = 0; step <= maxRedirects; step++) {
     const remaining = options.deadline === undefined ? Infinity : options.deadline - Date.now();
     if (remaining <= 0) throw new FetchError('timeout', 'The page bundle took too long to download.');
     const timeoutMs = Math.min(options.timeoutMs ?? 20000, remaining);
-    const answer = await fetchOnce(current, { ...options, method, body, timeoutMs });
+    const answer = await fetchOnce(current, { ...options, method, body, headers, timeoutMs });
     if (answer.location === null) {
       return { ...answer, finalUrl: current.href, redirects };
     }
@@ -307,6 +337,11 @@ async function fetchFollowing(target, options = {}, maxRedirects = 5) {
       body = null;
     }
 
+    if (headers.referer) {
+      const referer = refererFor(headers.referer, next);
+      if (referer) headers.referer = referer;
+      else delete headers.referer;
+    }
     redirects.push(current.href);
     current = next;
   }
@@ -314,4 +349,4 @@ async function fetchFollowing(target, options = {}, maxRedirects = 5) {
   throw new FetchError('too-many-redirects', 'The address redirected too many times.');
 }
 
-module.exports = { fetchOnce, fetchFollowing, checkUrl, FetchError, REDIRECT_STATUSES };
+module.exports = { fetchOnce, fetchFollowing, checkUrl, refererFor, FetchError, REDIRECT_STATUSES };
