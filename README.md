@@ -96,8 +96,7 @@ PhantomHaze sends page and resource requests to an HTTPS API Gateway endpoint. A
 bundles its stylesheets and scripts. PhantomHaze renders the result locally and keeps the session cookies on your PC.
 The AWS implementation is based on the [original HazeGate v1 fetcher](https://github.com/PhantomHaze-Security/azure-cloud-webview-protocol/tree/6d5cb1a65bd4bdba6e9871df745a5426f8c85a79).
 
-Deploy the stack and configure your Windows client using the [HazeGate AWS instructions](./aws/hazegate/README.md).
-Then restart PhantomHaze and select **Settings → General → Web View protocol → HazeGate**.
+The Sydney gateway address and its HazeGate token are built into PhantomHaze. To use them, select **Settings → General → Web View protocol → HazeGate**.
 
 ---
 

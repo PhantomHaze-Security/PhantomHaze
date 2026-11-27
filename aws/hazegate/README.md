@@ -2,7 +2,11 @@
 
 The stack creates an API Gateway HTTP API, a Node.js Lambda function and a Secrets Manager bearer token in the selected Region. The Lambda execution role only needs its basic logging permissions. The function uses HazeGate v1 for pages, resources, redirects and cookies. It checks resolved addresses before connecting and on each bundled-resource redirect.
 
-## Deploy in Sydney
+## Use the built-in gateway
+
+Select **Settings → General → Web View protocol → HazeGate**. The app includes the Sydney gateway URL and its bearer token. Every copy can use the gateway, and the AWS project that hosts it pays for that usage.
+
+## Deploy your own gateway in Sydney
 
 With the AWS CLI and AWS SAM CLI installed, sign in to the intended project. Run these commands from this directory with deployment permissions for CloudFormation, SAM artifacts in S3, Lambda, IAM, API Gateway and Secrets Manager.
 
@@ -13,7 +17,7 @@ sam deploy --template-file template.yaml --stack-name hazegate --resolve-s3 --ca
 
 The stack outputs the endpoint and the ARN of the generated client token. API Gateway and Lambda charge for usage. Secrets Manager charges for the stored secret.
 
-## Connect PhantomHaze
+## Override the built-in gateway
 
 On Windows, a project operator can use the AWS CLI from PowerShell to configure the current Windows user. The profile must be signed in on that computer. Run with access to the stack outputs and the secret.
 
@@ -32,7 +36,7 @@ if ($status.service -ne 'HazeGate' -or $status.protocol -ne 1) { throw 'Unexpect
 [Environment]::SetEnvironmentVariable('HAZEGATE_TOKEN', $token, 'User')
 ```
 
-Restart PhantomHaze from the Windows Start menu and select **Settings → General → Web View protocol → HazeGate**. Other clients need the same two environment variables. Distribute the token privately. It grants access to the fetcher and its usage charges. AWS project credentials are only required for deployment and reading the secret.
+Restart PhantomHaze from the Windows Start menu and select **Settings → General → Web View protocol → HazeGate**. Set both variables on each client that should use your custom gateway. Distribute the token privately. It grants access to the fetcher and its usage charges. AWS project credentials are only required for deployment and reading the secret.
 
 ## Verify the fetch path
 

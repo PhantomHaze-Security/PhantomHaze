@@ -8,8 +8,16 @@ namespace PhantomHaze;
 // API Gateway carries HazeGate v1 requests to the Lambda fetcher in aws/hazegate.
 internal static class HazeGateConnection
 {
-    public static string Address => Environment.GetEnvironmentVariable("HAZEGATE_ENDPOINT")?.Trim() ?? string.Empty;
-    public static string Token => Environment.GetEnvironmentVariable("HAZEGATE_TOKEN")?.Trim() ?? string.Empty;
+    private const string BuiltInEndpoint = "https://60939ctxr8.execute-api.ap-southeast-2.amazonaws.com/hazegate";
+    private const string BuiltInToken = "Qvhv3QAJ83bJmcFVqr9B4BhtxYMjsfkwHhn37YAbP8Ad09tc";
+
+    public static string Address { get; } =
+        Environment.GetEnvironmentVariable("HAZEGATE_ENDPOINT")?.Trim() is { Length: > 0 } endpoint
+            ? endpoint : BuiltInEndpoint;
+
+    // Keep the bundled token paired with its gateway. Other deployments supply their own token.
+    public static string Token => Address == BuiltInEndpoint
+        ? BuiltInToken : Environment.GetEnvironmentVariable("HAZEGATE_TOKEN")?.Trim() ?? string.Empty;
 }
 
 /// <summary>The HazeGate protocol (Settings -> General -> Web View protocol).</summary>
