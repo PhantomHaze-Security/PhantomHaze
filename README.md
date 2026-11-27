@@ -79,7 +79,7 @@ open tabs are reopened with the new protocol when you click **Save**.
 | :--- | :--- | :--- |
 | **WebView2** *(default)* | Microsoft Edge WebView2 (Chromium). | Everything: modern sites, JavaScript, extension scripts and styles, zoom, find in page and saved cookies. |
 | **HTMLRenderer** | Downloads each page with the `curl.exe` built into Windows and draws it with [HTML Renderer](https://github.com/ArthurHub/HTML-Renderer), without WebView2. Pages are parsed like a browser parses them ([AngleSharp](https://anglesharp.github.io/)) and run their JavaScript with [Jint](https://github.com/sebastienros/jint), a JavaScript engine written in C#; PhantomHaze works out modern CSS itself (variables, media queries, `calc()`, modern colours, flex and grid layouts) and turns it into what HTML Renderer can draw. Form fields are real text boxes, lists and checkboxes. | A lighter, WebView2-free browser. jQuery, React and Vue pages work; very complex web apps may look simpler or be slow. Scripts can be turned off in **Settings -> General**. Every download is checked against extensions' `web.block` rules. |
-| **HazeGate** | Like HTMLRenderer, but nothing is downloaded by your PC: each address goes to the HazeGate Azure function, which downloads the page with its stylesheets and scripts and sends everything back. Images and the page's own requests go through it too. | Hiding your IP address and network from the sites you visit. Nothing to set up (see [HazeGate](#hazegate-cloud-web-view-protocol)). |
+| **HazeGate** | Like HTMLRenderer, but nothing is downloaded by your PC: each address goes to the HazeGate AWS Lambda function, which downloads the page with its stylesheets and scripts and sends everything back. Images and the page's own requests go through it too. | Hiding your IP address and network from the sites you visit. See [HazeGate setup](#hazegate-cloud-web-view-protocol). |
 | **Legacy** | The Internet Explorer engine built into Windows (the legacy WebBrowser control). WebView2 is not used. | Old intranet sites and pages made for Internet Explorer. Its dialogs, menus and pop-up windows are suppressed or opened as protected tabs, and its cookies only last until PhantomHaze closes. |
 | **Extension protocols** | Added by extensions with `protocol.add`: one of the engines above, with an optional gateway address and proxy server. | Loading pages through a server or proxy. They appear as *Name (from Extension)*. |
 
@@ -92,16 +92,12 @@ Developers: see [Adding a Web View protocol](#-adding-a-web-view-protocol-develo
 
 ### HazeGate (cloud Web View protocol)
 
-HazeGate pages are downloaded by an [Azure Function](https://learn.microsoft.com/azure/azure-functions/) from the
-[azure-cloud-webview-protocol](https://github.com/PhantomHaze-Security/azure-cloud-webview-protocol) repository and
-drawn by PhantomHaze's HTMLRenderer engine, so the sites you visit only ever see Azure. Just choose **HazeGate** in
-**Settings -> General -> Web View protocol**.
+PhantomHaze sends page and resource requests to an HTTPS API Gateway endpoint. AWS Lambda downloads the page and
+bundles its stylesheets and scripts. PhantomHaze renders the result locally and keeps the session cookies on your PC.
+The AWS implementation is based on the [original HazeGate v1 fetcher](https://github.com/PhantomHaze-Security/azure-cloud-webview-protocol/tree/6d5cb1a65bd4bdba6e9871df745a5426f8c85a79).
 
-In this beta, the function's address and key are built into PhantomHaze (`HazeGateConnection` in
-[`HazeGateProtocol.cs`](./HazeGateProtocol.cs)); they are not shown or changeable in Settings. To point a build at
-another function, or after renewing the key in Azure Portal (**Functions -> hazegate -> Function Keys**), change them
-there and rebuild. HazeGate keeps cookies on your PC (in memory, like the rest of a session) and only sends a site the
-cookies that belong to it; the function itself keeps nothing.
+Deploy the stack and configure your Windows client using the [HazeGate AWS instructions](./aws/hazegate/README.md).
+Then restart PhantomHaze and select **Settings → General → Web View protocol → HazeGate**.
 
 ---
 

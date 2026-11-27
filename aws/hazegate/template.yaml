@@ -1,0 +1,49 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+Description: HazeGate cloud Web View for PhantomHaze
+Resources:
+  ClientToken:
+    Type: AWS::SecretsManager::Secret
+    Properties:
+      Description: HazeGate client bearer token
+      GenerateSecretString:
+        PasswordLength: 48
+        ExcludePunctuation: true
+  Gateway:
+    Type: AWS::Serverless::HttpApi
+    Properties:
+      StageName: '$default'
+      DefaultRouteSettings:
+        ThrottlingBurstLimit: 30
+        ThrottlingRateLimit: 20
+  Fetcher:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: function/
+      Handler: index.handler
+      Runtime: nodejs22.x
+      Timeout: 28
+      MemorySize: 768
+      Environment:
+        Variables:
+          HAZEGATE_TOKEN: !Sub '{{resolve:secretsmanager:${ClientToken}:SecretString}}'
+      Events:
+        Status:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref Gateway
+            Path: /hazegate
+            Method: GET
+            PayloadFormatVersion: '2.0'
+        Fetch:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref Gateway
+            Path: /hazegate
+            Method: POST
+            PayloadFormatVersion: '2.0'
+Outputs:
+  Endpoint:
+    Value: !Sub 'https://${Gateway}.execute-api.${AWS::Region}.${AWS::URLSuffix}/hazegate'
+  ClientTokenArn:
+    Value: !Ref ClientToken

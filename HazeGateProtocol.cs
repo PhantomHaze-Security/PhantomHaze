@@ -5,24 +5,11 @@ using System.Text.Json;
 
 namespace PhantomHaze;
 
-// The HazeGate Web View protocol. Pages are not downloaded by this PC but by a HazeGate Azure function (the
-// azure-cloud-webview-protocol repository): PhantomHaze sends it an address, the function downloads the page together
-// with the stylesheets and scripts it uses and sends everything back in one answer, and PhantomHaze draws the page with
-// its HTMLRenderer page engine (RenderedProtocolPage.cs). Images and the page's own requests (fetch, XMLHttpRequest) go
-// through the function too, so the sites shown only ever see Azure. The function's protocol is described in that
-// repository's README ("The HazeGate protocol").
-
-/// <summary>
-/// The HazeGate function this build uses. Beta builds have it built in (it cannot be seen or changed in Settings), so
-/// testers can use HazeGate straight away. Anyone with this build can find the key: if it is misused, renew the
-/// function's default key in Azure Portal (Functions -> hazegate -> Function Keys) and put the new one here.
-/// </summary>
+// API Gateway carries HazeGate v1 requests to the Lambda fetcher in aws/hazegate.
 internal static class HazeGateConnection
 {
-    public const string Address = "https://website-fetcher-f2gddhfyhrf9etdr.australiasoutheast-01.azurewebsites.net/api/hazegate";
-
-    /// <summary>The function's "default" function key (never the _master key).</summary>
-    public const string Key = "G0oz2xtj4RguVJUkEzkoLA8tBuygQN-pdvTk3A4cxFOMAzFuMoKFWw==";
+    public static string Address => Environment.GetEnvironmentVariable("HAZEGATE_ENDPOINT")?.Trim() ?? string.Empty;
+    public static string Token => Environment.GetEnvironmentVariable("HAZEGATE_TOKEN")?.Trim() ?? string.Empty;
 }
 
 /// <summary>The HazeGate protocol (Settings -> General -> Web View protocol).</summary>
@@ -40,10 +27,10 @@ internal sealed class HazeGateWebProtocol : WebProtocol
     public override string DisplayName => "HazeGate";
 
     public override string Description =>
-        "Sends each address to the HazeGate Azure function, which downloads the page together with its stylesheets and " +
+        "Sends each address to the HazeGate AWS Lambda function, which downloads the page together with its stylesheets and " +
         "scripts and sends everything back; PhantomHaze then draws it like the HTMLRenderer protocol does (with its " +
         "JavaScript and modern CSS support). Images and the page's own requests go through the function too, so the " +
-        "sites you visit only see Azure, never this PC.";
+        "sites you visit see the AWS connection.";
 
     public override WebProtocolFeatures Features => RenderedWebProtocolPage.GetFeatures(ScriptsEnabled);
 
@@ -53,7 +40,7 @@ internal sealed class HazeGateWebProtocol : WebProtocol
     public override bool LoadsPagesDirectly => false;
 
     public override WebProtocolPage CreatePage(IWebProtocolHost host) =>
-        new RenderedWebProtocolPage(this, host, new HazeGatePageTransport(HazeGateConnection.Address, HazeGateConnection.Key), ScriptsEnabled);
+        new RenderedWebProtocolPage(this, host, new HazeGatePageTransport(HazeGateConnection.Address, HazeGateConnection.Token), ScriptsEnabled);
 }
 
 /// <summary>Something went wrong between PhantomHaze and the HazeGate function (the message is for people).</summary>
@@ -280,16 +267,29 @@ internal static class HazeGateClient
         MaxConnectionsPerServer = 12,
     })
     {
-        // A Consumption plan function that has been idle starts first (a "cold start"), which can take a while.
+        // Allow time for the gateway request and a Lambda cold start.
         Timeout = TimeSpan.FromSeconds(100),
         MaxResponseContentBufferSize = MaximumAnswerBytes,
     };
 
-    public static async Task<HazeGateResponse> SendAsync(string address, string key, HazeGateRequest request, CancellationToken cancellationToken)
+    public static async Task<HazeGateResponse> SendAsync(string address, string token, HazeGateRequest request, CancellationToken cancellationToken)
     {
-        using var message = new HttpRequestMessage(HttpMethod.Post, address);
-        AddHeaders(message, key);
-        message.Content = new ByteArrayContent(request.ToJson());
+        if (!Uri.TryCreate(address, UriKind.Absolute, out var endpoint) || endpoint.Scheme != Uri.UriSchemeHttps ||
+            endpoint.UserInfo.Length != 0 || string.IsNullOrEmpty(token))
+        {
+            throw new HazeGateException("Set HAZEGATE_ENDPOINT to the HTTPS gateway address and HAZEGATE_TOKEN to its access token, then restart PhantomHaze.");
+        }
+
+        using var message = new HttpRequestMessage(HttpMethod.Post, endpoint);
+        AddHeaders(message, token);
+        byte[] body = request.ToJson();
+        // Account for JSON escaping when API Gateway embeds the request in a Lambda event.
+        if (body.Length > 4 * 1024 * 1024)
+        {
+            throw new HazeGateException("This request exceeds the HazeGate upload limit.", 413);
+        }
+
+        message.Content = new ByteArrayContent(body);
         message.Content.Headers.ContentType = new MediaTypeHeaderValue("application/json") { CharSet = "utf-8" };
         byte[] answer;
         HttpStatusCode status;
@@ -323,15 +323,11 @@ internal static class HazeGateClient
         }
     }
 
-    private static void AddHeaders(HttpRequestMessage message, string key)
+    private static void AddHeaders(HttpRequestMessage message, string token)
     {
         message.Headers.TryAddWithoutValidation("User-Agent", "PhantomHaze/" + (AppVersionInfo.Tag?.VersionNumber ?? "1"));
         message.Headers.Accept.ParseAdd("application/json");
-        if (key.Length > 0)
-        {
-            // Azure Functions accepts the function key in this header, so it never appears in an address.
-            message.Headers.TryAddWithoutValidation("x-functions-key", key);
-        }
+        message.Headers.Authorization = new AuthenticationHeaderValue("Bearer", token);
     }
 
     private static string DescribeFailure(int status, byte[] answer)
@@ -355,11 +351,10 @@ internal static class HazeGateClient
         return status switch
         {
             401 or 403 when detail is null =>
-                "The HazeGate function refused PhantomHaze: the function key built into this version is no longer valid. " +
-                "A newer version of PhantomHaze may be needed.",
-            404 => "The HazeGate function was not found. It may not be deployed (or was moved); a newer version of PhantomHaze may be needed.",
+                "The gateway refused the request. Check HAZEGATE_ENDPOINT and HAZEGATE_TOKEN.",
+            404 => "The gateway route was not found. Check HAZEGATE_ENDPOINT.",
             429 => "The HazeGate function is busy (too many requests). Try again in a moment.",
-            503 => "The HazeGate function is not running. It may be stopped in Azure Portal, or still starting.",
+            503 => "The HazeGate function is not running. Try again in a moment.",
             _ when detail is not null => detail,
             _ => $"The HazeGate function answered with an error (HTTP {status}).",
         };
@@ -378,16 +373,16 @@ internal sealed class HazeGatePageTransport : IRenderedPageTransport
     private const int MaximumResourceRedirects = 5;
 
     private readonly string _address;
-    private readonly string _key;
+    private readonly string _token;
     private readonly SemaphoreSlim _resourceGate = new(6, 6);
     private volatile WebRequestRules _rules = WebRequestRules.None;
     private volatile Dictionary<string, PageResource> _bundle = new(StringComparer.Ordinal);
     private CancellationTokenSource? _documentCancellation;
 
-    public HazeGatePageTransport(string address, string key)
+    public HazeGatePageTransport(string address, string token)
     {
         _address = address;
-        _key = key;
+        _token = token;
         (Cookies, Storage) = RenderedPageSessionData.Get("hazegate|" + address);
     }
 
@@ -445,7 +440,7 @@ internal sealed class HazeGatePageTransport : IRenderedPageTransport
                 HazeGateResponse response;
                 try
                 {
-                    response = await HazeGateClient.SendAsync(_address, _key, new HazeGateRequest("page", current)
+                    response = await HazeGateClient.SendAsync(_address, _token, new HazeGateRequest("page", current)
                     {
                         Method = method,
                         Body = body,
@@ -549,7 +544,7 @@ internal sealed class HazeGatePageTransport : IRenderedPageTransport
                 HazeGateResponse response;
                 try
                 {
-                    response = await HazeGateClient.SendAsync(_address, _key, new HazeGateRequest("resource", uri.AbsoluteUri)
+                    response = await HazeGateClient.SendAsync(_address, _token, new HazeGateRequest("resource", uri.AbsoluteUri)
                     {
                         Method = method,
                         Body = body,
