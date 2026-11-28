@@ -331,7 +331,7 @@ public partial class MainForm
             ("Extensions", $"{_settings.Extensions.Count} installed, {activeExtensions} active"),
             ("Session started", sessionStarted),
             ("Executable", Environment.ProcessPath ?? "Unknown"),
-            ("Data folder", GetAppDataDirectory()),
+            ("Data folder", _userStore.DirectoryFor(_userId)),
             ("Logs folder", _logDirectory),
         ];
     }
@@ -360,9 +360,10 @@ public partial class MainForm
         long favorites = GetFileSize(_favoritesFilePath);
         long fonts = GetDirectorySize(_fontCacheDirectory);
         long logs = GetDirectorySize(_logDirectory);
-        long appData = GetDirectorySize(GetAppDataDirectory());
+        long appData = GetDirectorySize(_userStore.DirectoryFor(_userId));
         // Everything else in the data folder: settings.json, the update reminder, preserved unreadable files.
-        long settings = Math.Max(0, appData - extensions - history - favorites - fonts - logs);
+        long globalData = _userId == Guid.Empty ? logs + GetDirectorySize(Path.Combine(_userStore.Root, "profiles")) : 0;
+        long settings = Math.Max(0, appData - extensions - history - favorites - fonts - globalData);
         long temporary = GetDirectorySize(Path.Combine(Path.GetTempPath(), "PhantomHaze"));
         return new AboutSizes(appSize, appDescription, extensions, history, favorites, settings, fonts, logs, temporary);
     }

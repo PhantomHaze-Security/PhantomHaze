@@ -10,7 +10,9 @@ internal sealed record PhantomLogFile(string FileName, string FullPath, long Len
 
 internal sealed class PhantomSettingsPackageManifest
 {
+    [System.Text.Json.Serialization.JsonRequired]
     public string Format { get; set; } = PhantomSettingsPackage.FormatName;
+    [System.Text.Json.Serialization.JsonRequired]
     public int FormatVersion { get; set; } = PhantomSettingsPackage.CurrentFormatVersion;
     public string AppVersion { get; set; } = string.Empty;
     public DateTimeOffset ExportedAtUtc { get; set; }
@@ -129,7 +131,7 @@ internal static class PhantomSettingsPackage
                 manifest = null;
             }
 
-            if (manifest is null || !string.Equals(manifest.Format, FormatName, StringComparison.Ordinal))
+            if (manifest is null || manifest.FormatVersion < 1 || !string.Equals(manifest.Format, FormatName, StringComparison.Ordinal))
             {
                 throw new InvalidDataException("This is not a PhantomHaze settings file (its manifest is not recognised).");
             }
@@ -250,7 +252,9 @@ internal static class PhantomSettingsPackage
             {
                 using FileStream source = OpenLogForReading(log.FullPath);
                 ZipArchiveEntry entry = archive.CreateEntry(folder + DailyLogsFolder + log.FileName, CompressionLevel.Optimal);
-                entry.LastWriteTime = new DateTimeOffset(DateTime.SpecifyKind(log.LastWriteUtc, DateTimeKind.Utc));
+                // ZIP timestamps can represent only years 1980 through 2107.
+                if (log.LastWriteUtc.Year is >= 1980 and <= 2107)
+                    entry.LastWriteTime = new DateTimeOffset(DateTime.SpecifyKind(log.LastWriteUtc, DateTimeKind.Utc));
                 using Stream target = entry.Open();
                 source.CopyTo(target);
             }

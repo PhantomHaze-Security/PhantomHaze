@@ -64,6 +64,9 @@ public partial class MainForm
 
         public Func<Font>? DefaultFont { get; init; }
         public Func<Image?>? DefaultImage { get; init; }
+
+        /// <summary>The normal tooltip of a control that shows only a symbol (the Settings gear).</summary>
+        public Func<string>? DefaultTooltip { get; init; }
     }
 
     /// <summary>The combined customisations of one control (later extensions win, property by property).</summary>
@@ -170,7 +173,7 @@ public partial class MainForm
             }
 
             ConfigureMenuButton(_extensionMenuOverflowButton, "»");
-            _extensionMenuOverflowButton.MinimumSize = new Size(ScaleByDpi(40), 0);
+            _extensionMenuOverflowButton.MinimumSize = new Size(ScaleByDpi(44), ScaleByDpi(HeaderButtonHeight));
             _extensionMenuOverflowButton.Visible = false;
             _extensionMenuButtonsPanel.Controls.Add(_extensionMenuOverflowButton);
         }
@@ -185,9 +188,9 @@ public partial class MainForm
 
     private void AddExtensionMenuButton(ExtensionMenuEntry entry)
     {
-        var button = new Button();
+        var button = new PillButton();
         ConfigureMenuButton(button, GetDefaultExtensionButtonText(entry));
-        button.MinimumSize = new Size(ScaleByDpi(64), 0);
+        button.MinimumSize = new Size(ScaleByDpi(Math.Min(64, CurrentTopBarMetrics.MenuButtonMinWidth)), ScaleByDpi(HeaderButtonHeight));
         // Labels come from extensions: show '&' literally instead of turning it into a mnemonic.
         button.UseMnemonic = false;
         button.AccessibleName = string.IsNullOrWhiteSpace(entry.Label) ? entry.ElementId : entry.Label;
@@ -661,7 +664,7 @@ public partial class MainForm
 
     private void BuildUiTargetBindings()
     {
-        void Bind(string name, Control control, Func<string>? text = null, Func<Font>? font = null, Func<Image?>? image = null)
+        void Bind(string name, Control control, Func<string>? text = null, Func<Font>? font = null, Func<Image?>? image = null, Func<string>? tooltip = null)
         {
             PhantomUiCapabilities capabilities = PhantomUiTargets.TryGetBuiltIn(name, out PhantomUiTargetInfo info)
                 ? info.Capabilities
@@ -671,6 +674,7 @@ public partial class MainForm
                 DefaultText = text,
                 DefaultFont = font,
                 DefaultImage = image,
+                DefaultTooltip = tooltip,
             };
 
             if (font is not null)
@@ -683,19 +687,35 @@ public partial class MainForm
         _newTabButton.AccessibleName = "New tab";
 
         Bind("menu.bar", _menuBarPanel);
-        Bind("menu.logo", _menuLogoPictureBox, image: () => _defaultLogoImage);
-        Bind("menu.title", _menuLogoLabel, text: () => "PhantomHaze", font: () => MapFont(_menuTitleFont));
+        Bind("menu.logo", _menuLogoPictureBox, image: () => _brandLogo ?? _defaultLogoImage);
+        Bind("menu.title", _menuLogoLabel, text: () => _appDisplayName, font: () => MapFont(_menuTitleFont));
         Bind("menu.logs", _logsViewButton, text: () => "Logs", font: () => MapFont(IsLogsViewSelected ? _menuButtonFontBold : _menuButtonFontRegular));
-        Bind("menu.webview", _webViewToggleButton, text: () => "Web View", font: () => MapFont(_webViewModeEnabled ? _menuButtonFontBold : _menuButtonFontRegular));
+        Bind("menu.webview", _webViewToggleButton, text: () => "Web", font: () => MapFont(_webViewModeEnabled ? _menuButtonFontBold : _menuButtonFontRegular));
         Bind("menu.clock", _menuClockLabel, font: () => MapFont(_menuButtonFontRegular));
-        // These two inherit the window's font; MapFont(Font) is that same font unless an app font is in use.
-        Bind("menu.settings", _settingsButton, text: () => "Settings", font: () => MapFont(Font));
+        // The gear keeps its symbol font (an app font may not have the symbol); text an extension sets uses the
+        // window's font. The text is applied before the font, so the check sees the text being shown.
+        Bind("menu.settings", _settingsButton, text: () => SettingsGlyph,
+             font: () => _settingsButton.Text == SettingsGlyph ? _settingsGlyphFont : MapFont(Font),
+             tooltip: () => "Settings");
+        // This one inherits the window's font; MapFont(Font) is that same font unless an app font is in use.
         Bind("address.bar", _addressBarTextBox, font: () => MapFont(Font));
         Bind("address.favorite", _favoriteButton, font: () => MapFont(_favoriteButtonFont));
-        Bind("address.back", _backButton, text: () => "Back", font: () => MapFont(_stripButtonFont));
-        Bind("address.go", _goButton, text: () => "Go", font: () => MapFont(_stripButtonFont));
-        Bind("address.refresh", _refreshButton, text: () => "Refresh", font: () => MapFont(_stripButtonFont));
-        Bind("address.history", _historyButton, text: () => "History", font: () => MapFont(_stripButtonFont));
+        // The arrows keep their own font (an app font may not have them); text an extension sets uses the strip font.
+        Bind("address.back", _backButton, text: () => BackGlyph,
+             font: () => _backButton.Text == BackGlyph ? _navigationGlyphFont : MapFont(_stripButtonFont),
+             tooltip: () => "Back");
+        Bind("address.forward", _forwardButton, text: () => ForwardGlyph,
+             font: () => _forwardButton.Text == ForwardGlyph ? _navigationGlyphFont : MapFont(_stripButtonFont),
+             tooltip: () => "Forward");
+        Bind("address.go", _goButton, text: () => GoGlyph,
+             font: () => _goButton.Text == GoGlyph ? _stripGlyphFont : MapFont(_stripButtonFont),
+             tooltip: () => "Go");
+        Bind("address.refresh", _refreshButton, text: () => RefreshGlyph,
+             font: () => _refreshButton.Text == RefreshGlyph ? _stripGlyphFont : MapFont(_stripButtonFont),
+             tooltip: () => "Refresh");
+        Bind("address.history", _historyButton, text: () => HistoryGlyph,
+             font: () => _historyButton.Text == HistoryGlyph ? _stripGlyphFont : MapFont(_stripButtonFont),
+             tooltip: () => "History");
         Bind("address.zoom", _zoomLabel, font: () => MapFont(_zoomLabelFont));
         Bind("tabs.new", _newTabButton, text: () => "+", font: () => MapFont(_newTabButtonFont));
         Bind("log.panel", _logBox, font: () => MapFont(_logFont));
@@ -844,6 +864,48 @@ public partial class MainForm
         return overrides;
     }
 
+    private readonly Icon? _defaultWindowIcon;
+    private string _appDisplayName = "PhantomHaze";
+    private string? _brandIconToken;
+    private Bitmap? _brandLogo;
+    private Icon? _brandIcon;
+    private string _brandingConflict = string.Empty;
+    private string _shownBrandingConflict = string.Empty;
+
+    private void ApplyExtensionBranding()
+    {
+        var enabled = GetEnabledExtensions().Select(ext => ext.Definition).ToList();
+        var (name, token, conflict) = PhantomExtensionDefinition.ResolveAppBranding(enabled);
+        _appDisplayName = name;
+        Text = AppVersionInfo.WindowTitle(name);
+        if (token != _brandIconToken)
+        {
+            using var image = token is null ? null : PhantomExtensionIconFactory.CreateIcon(token);
+            var logo = image is null ? null : new Bitmap(image, 32, 32);
+            var icon = logo is null ? null : NativeMethods.CreateWindowIcon(logo);
+            Icon = icon ?? _defaultWindowIcon;
+            if (_menuLogoPictureBox.Image == _brandLogo) _menuLogoPictureBox.Image = logo ?? _defaultLogoImage;
+            _brandIcon?.Dispose();
+            _brandLogo?.Dispose();
+            _brandIcon = icon;
+            _brandLogo = logo;
+            _brandIconToken = token;
+        }
+
+        _brandingConflict = conflict;
+        if (_brandingConflict.Length == 0) _shownBrandingConflict = string.Empty;
+        else if (Visible && _shownBrandingConflict != _brandingConflict) BeginInvoke(ShowBrandingConflict);
+    }
+
+    private void ShowBrandingConflict()
+    {
+        if (IsDisposed || _brandingConflict.Length == 0 || _shownBrandingConflict == _brandingConflict) return;
+        _shownBrandingConflict = _brandingConflict;
+        Log(_brandingConflict);
+        ShowCaptureProtectedDialog(() => MessageBox.Show(Form.ActiveForm ?? this, _brandingConflict,
+            "Extension conflict", MessageBoxButtons.OK, MessageBoxIcon.Error));
+    }
+
     private void ApplyBuiltInElementState(UiTargetBinding binding, UiOverride? customization)
     {
         Control control = binding.Control;
@@ -867,22 +929,20 @@ public partial class MainForm
         }
 
         // Only elements that may be hidden are touched, and only when an extension hides or stops hiding them:
-        // Control.Visible reports false for every control in a hidden panel (the address bar in the Logs view).
+        // Control.Visible reports false for every control in a hidden panel (the address bar in the Logs view). The top
+        // bar's style can leave the control out as well, so both decide (ApplyCombinedVisibility).
         if ((binding.Capabilities & PhantomUiCapabilities.Visible) != 0)
         {
             bool visible = customization?.Visible ?? true;
-            if (!visible && _extensionHiddenControls.Add(control))
+            bool changed = visible ? _extensionHiddenControls.Remove(control) : _extensionHiddenControls.Add(control);
+            if (changed)
             {
-                control.Visible = false;
-            }
-            else if (visible && _extensionHiddenControls.Remove(control))
-            {
-                control.Visible = true;
+                ApplyCombinedVisibility(control);
             }
         }
 
         // A control that shows only an icon is still labelled when hovered.
-        string? tooltip = customization?.Tooltip;
+        string? tooltip = customization?.Tooltip ?? binding.DefaultTooltip?.Invoke();
         if (tooltip is null && customization?.Svg is not null && customization.Text is null)
         {
             tooltip = binding.DefaultText?.Invoke() ?? control.AccessibleName;
@@ -1010,6 +1070,8 @@ public partial class MainForm
         _appliedUiVisuals.TryGetValue(control, out AppliedUiVisual? existing);
         if (svg is null && shape is null && existing is null)
         {
+            if (control is PictureBox picture && defaultImage is not null && picture.Image != defaultImage())
+                picture.Image = defaultImage();
             return;
         }
 
@@ -1036,9 +1098,9 @@ public partial class MainForm
     {
         if (svg is null && shape is null)
         {
+            picture.Image = defaultImage?.Invoke();
             if (applied.OwnedImage is not null)
             {
-                picture.Image = defaultImage?.Invoke();
                 applied.OwnedImage.Dispose();
                 applied.OwnedImage = null;
             }

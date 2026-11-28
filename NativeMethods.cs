@@ -9,6 +9,17 @@ namespace PhantomHaze;
 /// </summary>
 internal static class NativeMethods
 {
+    [DllImport("user32.dll")]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool DestroyIcon(IntPtr icon);
+
+    internal static Icon CreateWindowIcon(Bitmap bitmap)
+    {
+        IntPtr handle = bitmap.GetHicon();
+        try { return (Icon)Icon.FromHandle(handle).Clone(); }
+        finally { DestroyIcon(handle); }
+    }
+
     // Values from winuser.h
     public const uint WDA_NONE = 0x00000000;
     public const uint WDA_MONITOR = 0x00000001;
@@ -119,6 +130,136 @@ internal static class NativeMethods
         int length = GetClassName(hWnd, buffer, buffer.Length);
         return length == StandardDialogClassName.Length &&
                new string(buffer, 0, length).Equals(StandardDialogClassName, StringComparison.Ordinal);
+    }
+
+    private const int HCBT_CREATEWND = 3;
+
+    /// <summary>
+    /// A CBT hook on the current (UI) thread that reports every window created or activated on it, before the window is
+    /// first drawn. The Legacy Web View protocol uses it: the Internet Explorer engine runs on the UI thread and can open
+    /// windows of its own (showModalDialog and sign-in prompts, which are activated, and tooltips and drop-down lists,
+    /// which never are), and they must be excluded from capture like the app's windows.
+    /// </summary>
+    public sealed class ThreadWindowHook : IDisposable
+    {
+        private readonly CbtHookProc _callback;
+        private IntPtr _hook;
+
+        internal ThreadWindowHook(Action<IntPtr> onWindow)
+        {
+            _callback = (nCode, wParam, lParam) =>
+            {
+                if (nCode is HCBT_CREATEWND or HCBT_ACTIVATE)
+                {
+                    try
+                    {
+                        onWindow(wParam);
+                    }
+                    catch
+                    {
+                        // An exception must never cross back into native code.
+                    }
+                }
+
+                return CallNextHookEx(_hook, nCode, wParam, lParam);
+            };
+
+            _hook = SetWindowsHookEx(WH_CBT, _callback, IntPtr.Zero, GetCurrentThreadId());
+        }
+
+        public bool IsInstalled => _hook != IntPtr.Zero;
+
+        public void Dispose()
+        {
+            if (_hook != IntPtr.Zero)
+            {
+                UnhookWindowsHookEx(_hook);
+                _hook = IntPtr.Zero;
+            }
+
+            // The delegate must stay alive for as long as Windows can call it.
+            GC.KeepAlive(_callback);
+        }
+    }
+
+    public static ThreadWindowHook InstallThreadWindowHook(Action<IntPtr> onWindow) => new(onWindow);
+
+    [DllImport("user32.dll")]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool IsWindow(IntPtr hWnd);
+
+    [DllImport("user32.dll", EntryPoint = "GetWindowLongW")]
+    private static extern int GetWindowLong32(IntPtr hWnd, int nIndex);
+
+    [DllImport("user32.dll", EntryPoint = "GetWindowLongPtrW")]
+    private static extern IntPtr GetWindowLongPtr64(IntPtr hWnd, int nIndex);
+
+    public static bool IsExistingWindow(IntPtr hWnd) => hWnd != IntPtr.Zero && IsWindow(hWnd);
+
+    /// <summary>True for a window that exists and is not a child window (only those can be excluded from capture).</summary>
+    public static bool IsTopLevelWindow(IntPtr hWnd)
+    {
+        const int GWL_STYLE = -16;
+        const long WS_CHILD = 0x40000000L;
+        if (!IsExistingWindow(hWnd))
+        {
+            return false;
+        }
+
+        long style = IntPtr.Size == 8 ? GetWindowLongPtr64(hWnd, GWL_STYLE).ToInt64() : GetWindowLong32(hWnd, GWL_STYLE);
+        return (style & WS_CHILD) == 0;
+    }
+
+    // Internet Explorer engine settings for this process (Legacy Web View protocol).
+    [DllImport("wininet.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool InternetSetOption(IntPtr hInternet, int dwOption, IntPtr lpBuffer, int dwBufferLength);
+
+    public static void EndInternetSession()
+    {
+        const int INTERNET_OPTION_END_BROWSER_SESSION = 42;
+        InternetSetOption(IntPtr.Zero, INTERNET_OPTION_END_BROWSER_SESSION, IntPtr.Zero, 0);
+    }
+
+    [DllImport("urlmon.dll")]
+    private static extern int CoInternetSetFeatureEnabled(int featureEntry, int dwFlags, [MarshalAs(UnmanagedType.Bool)] bool fEnable);
+
+    /// <summary>
+    /// Makes every cookie the Internet Explorer engine receives in this process a session cookie, so nothing is written
+    /// to the cookie store Windows shares with Internet Explorer (INTERNET_SUPPRESS_COOKIE_PERSIST).
+    /// </summary>
+    public static bool SuppressPersistentInternetCookies()
+    {
+        const int INTERNET_OPTION_SUPPRESS_BEHAVIOR = 81;
+        const int INTERNET_SUPPRESS_COOKIE_PERSIST = 3;
+        IntPtr buffer = Marshal.AllocHGlobal(sizeof(int));
+        try
+        {
+            Marshal.WriteInt32(buffer, INTERNET_SUPPRESS_COOKIE_PERSIST);
+            return InternetSetOption(IntPtr.Zero, INTERNET_OPTION_SUPPRESS_BEHAVIOR, buffer, sizeof(int));
+        }
+        catch (Exception ex) when (ex is DllNotFoundException or EntryPointNotFoundException)
+        {
+            return false;
+        }
+        finally
+        {
+            Marshal.FreeHGlobal(buffer);
+        }
+    }
+
+    /// <summary>Turns an Internet Explorer engine feature (INTERNETFEATURELIST) on or off for this process only.</summary>
+    public static bool SetProcessInternetFeature(int feature, bool enable)
+    {
+        const int SET_FEATURE_ON_PROCESS = 0x00000002;
+        try
+        {
+            return CoInternetSetFeatureEnabled(feature, SET_FEATURE_ON_PROCESS, enable) == 0;
+        }
+        catch (Exception ex) when (ex is DllNotFoundException or EntryPointNotFoundException)
+        {
+            return false;
+        }
     }
 
     // .NET's Environment.OSVersion / the classic GetVersionEx API get lied to

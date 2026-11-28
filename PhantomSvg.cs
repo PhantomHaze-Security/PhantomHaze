@@ -1627,6 +1627,18 @@ internal static class PhantomShapeGeometry
         return path;
     }
 
+    /// <summary>A rectangle with rounded corners; a radius of half the shorter side (or more) gives a pill.</summary>
+    public static GraphicsPath CreateRoundedRectangle(RectangleF bounds, float radius)
+    {
+        var path = new GraphicsPath();
+        if (bounds.Width > 0 && bounds.Height > 0)
+        {
+            AddRoundedRectangle(path, bounds, radius);
+        }
+
+        return path;
+    }
+
     private static void AddRoundedRectangle(GraphicsPath path, RectangleF bounds, float radius)
     {
         radius = Math.Max(0.5f, Math.Min(radius, Math.Min(bounds.Width, bounds.Height) / 2f));

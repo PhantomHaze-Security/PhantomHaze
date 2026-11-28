@@ -65,9 +65,9 @@ internal static class AppVersionInfo
     public static ReleaseTag? Tag { get; } = ReleaseTag.TryParse(InformationalVersion, out ReleaseTag tag) ? tag : null;
 
     /// <summary>"PhantomHaze v1.3.5" for a stable build and "PhantomHaze v1.3.5 Beta" for a beta build.</summary>
-    public static string WindowTitle => Tag is ReleaseTag current
-        ? $"PhantomHaze v{current.VersionNumber}{(current.Channel == ReleaseChannel.Beta ? " Beta" : string.Empty)}"
-        : $"PhantomHaze {InformationalVersion}";
+    public static string WindowTitle(string appName) => Tag is ReleaseTag current
+        ? $"{appName} v{current.VersionNumber}{(current.Channel == ReleaseChannel.Beta ? " Beta" : string.Empty)}"
+        : $"{appName} {InformationalVersion}";
 
     private static string ReadInformationalVersion()
     {
@@ -179,8 +179,26 @@ internal static class UpdateReminder
         return true;
     }
 
-    /// <summary>The banner is shown whenever this build does not match the release listed for its channel.</summary>
-    public static bool ShouldShowBanner(ReleaseTag current, ReleaseTag latestOnChannel) => current != latestOnChannel;
+    /// <summary>
+    /// The banner is shown when the release listed for this build's channel is newer than this build. A build that is
+    /// newer than the listed release (a new version before ver-banner.csv is updated, or a test build) is never asked to
+    /// "update" to the older release.
+    /// </summary>
+    public static bool ShouldShowBanner(ReleaseTag current, ReleaseTag latestOnChannel) =>
+        latestOnChannel.Channel == current.Channel && CompareVersions(latestOnChannel, current) > 0;
+
+    /// <summary>Compares the version numbers of two tags (the channel is ignored).</summary>
+    public static int CompareVersions(ReleaseTag first, ReleaseTag second)
+    {
+        int major = first.Major.CompareTo(second.Major);
+        if (major != 0)
+        {
+            return major;
+        }
+
+        int minor = first.Minor.CompareTo(second.Minor);
+        return minor != 0 ? minor : first.Patch.CompareTo(second.Patch);
+    }
 
     private static string DescribeForLog(string value)
     {

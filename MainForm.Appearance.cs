@@ -61,8 +61,22 @@ public partial class MainForm
 
         public Color AppBack { get; init; }
         public Color PanelBack { get; init; }
+
+        /// <summary>The rounded top bar (menu row, Web View address and tab rows, protection banner).</summary>
         public Color MenuBack { get; init; }
+
         public Color Text { get; init; }
+
+        /// <summary>The pill-shaped buttons and the address box in the top bar.</summary>
+        public Color PillBack { get; init; }
+
+        public Color PillText { get; init; }
+
+        /// <summary>A pill that is switched on (the History button while the panel is open).</summary>
+        public Color PillSelectedBack { get; init; }
+
+        /// <summary>The ring around buttons that extensions add, so they can be told apart from PhantomHaze's own.</summary>
+        public Color ExtensionOutline { get; init; }
         public Color InputBack { get; init; }
         public Color InputText { get; init; }
         public Color ButtonBack { get; init; }
@@ -99,36 +113,41 @@ public partial class MainForm
         public ThemeGradient? Gradient { get; init; }
     }
 
-    // The Light and Dark palettes reproduce the colours PhantomHaze has always used.
+    // Light: the grey top bar with blue-grey pills of the v1.3.6 design. Dark keeps the colours PhantomHaze has always
+    // used, with pills derived from them.
     private static readonly ThemePalette LightPalette = new()
     {
         IsDark = false,
         UseSystemDialogColors = true,
-        AppBack = Color.FromArgb(246, 249, 253),
+        AppBack = Color.FromArgb(200, 208, 218),
         PanelBack = Color.FromArgb(243, 247, 252),
-        MenuBack = Color.FromArgb(224, 228, 235),
-        Text = Color.FromArgb(25, 25, 25),
+        MenuBack = Color.FromArgb(166, 166, 166),
+        Text = Color.FromArgb(20, 20, 20),
+        PillBack = Color.FromArgb(200, 208, 218),
+        PillText = Color.FromArgb(17, 17, 17),
+        PillSelectedBack = Color.FromArgb(234, 238, 244),
+        ExtensionOutline = Color.FromArgb(92, 225, 230),
         InputBack = Color.White,
         InputText = Color.Black,
         ButtonBack = SystemColors.Control,
         ButtonText = SystemColors.ControlText,
         ButtonBorder = Color.FromArgb(158, 177, 201),
-        HistoryButtonActive = Color.LightSteelBlue,
-        ViewSelectedBack = Color.FromArgb(201, 214, 232),
-        ViewNormalBack = Color.FromArgb(224, 228, 235),
-        ViewSelectedText = Color.FromArgb(30, 36, 43),
-        ViewNormalText = Color.FromArgb(72, 77, 86),
-        TabActiveBack = Color.FromArgb(221, 233, 255),
-        TabInactiveBack = Color.FromArgb(235, 240, 247),
-        TabCloseActiveBack = Color.FromArgb(228, 235, 247),
-        TabCloseInactiveBack = Color.FromArgb(243, 244, 247),
+        HistoryButtonActive = Color.FromArgb(234, 238, 244),
+        ViewSelectedBack = Color.FromArgb(234, 238, 244),
+        ViewNormalBack = Color.FromArgb(200, 208, 218),
+        ViewSelectedText = Color.FromArgb(17, 17, 17),
+        ViewNormalText = Color.FromArgb(30, 30, 30),
+        TabActiveBack = Color.FromArgb(234, 238, 244),
+        TabInactiveBack = Color.FromArgb(200, 208, 218),
+        TabCloseActiveBack = Color.FromArgb(234, 238, 244),
+        TabCloseInactiveBack = Color.FromArgb(200, 208, 218),
         TabActiveText = Color.Black,
-        TabInactiveText = Color.FromArgb(35, 35, 35),
+        TabInactiveText = Color.FromArgb(30, 30, 30),
         LogBack = Color.White,
         LogText = Color.Black,
-        OverlayBack = Color.FromArgb(246, 249, 253),
-        FavoriteIdleBack = SystemColors.Control,
-        FavoriteIdleText = SystemColors.ControlText,
+        OverlayBack = Color.FromArgb(200, 208, 218),
+        FavoriteIdleBack = Color.FromArgb(200, 208, 218),
+        FavoriteIdleText = Color.FromArgb(40, 40, 40),
         ExtensionWindowBack = Color.White,
         FallbackBack = Color.White,
         FallbackText = Color.Black,
@@ -149,27 +168,31 @@ public partial class MainForm
         PanelBack = Color.FromArgb(40, 45, 53),
         MenuBack = Color.FromArgb(52, 60, 72),
         Text = Color.FromArgb(224, 233, 245),
+        PillBack = Color.FromArgb(74, 85, 101),
+        PillText = Color.FromArgb(232, 238, 246),
+        PillSelectedBack = Color.FromArgb(101, 114, 133),
+        ExtensionOutline = Color.FromArgb(64, 200, 208),
         InputBack = Color.FromArgb(54, 62, 74),
         InputText = Color.FromArgb(234, 241, 252),
         ButtonBack = Color.FromArgb(67, 76, 90),
         ButtonText = Color.FromArgb(225, 233, 244),
         ButtonBorder = Color.FromArgb(105, 116, 132),
-        HistoryButtonActive = Color.FromArgb(86, 96, 111),
-        ViewSelectedBack = Color.FromArgb(73, 84, 100),
-        ViewNormalBack = Color.FromArgb(52, 60, 72),
+        HistoryButtonActive = Color.FromArgb(101, 114, 133),
+        ViewSelectedBack = Color.FromArgb(101, 114, 133),
+        ViewNormalBack = Color.FromArgb(74, 85, 101),
         ViewSelectedText = Color.White,
-        ViewNormalText = Color.FromArgb(210, 220, 232),
-        TabActiveBack = Color.FromArgb(69, 81, 97),
-        TabInactiveBack = Color.FromArgb(53, 61, 73),
-        TabCloseActiveBack = Color.FromArgb(76, 87, 103),
-        TabCloseInactiveBack = Color.FromArgb(63, 72, 85),
+        ViewNormalText = Color.FromArgb(214, 223, 235),
+        TabActiveBack = Color.FromArgb(101, 114, 133),
+        TabInactiveBack = Color.FromArgb(74, 85, 101),
+        TabCloseActiveBack = Color.FromArgb(101, 114, 133),
+        TabCloseInactiveBack = Color.FromArgb(74, 85, 101),
         TabActiveText = Color.FromArgb(240, 245, 252),
-        TabInactiveText = Color.FromArgb(200, 211, 226),
+        TabInactiveText = Color.FromArgb(205, 215, 229),
         LogBack = Color.FromArgb(23, 27, 33),
         LogText = Color.FromArgb(210, 225, 240),
         OverlayBack = Color.FromArgb(31, 36, 43),
-        FavoriteIdleBack = Color.FromArgb(67, 76, 90),
-        FavoriteIdleText = Color.FromArgb(225, 233, 244),
+        FavoriteIdleBack = Color.FromArgb(74, 85, 101),
+        FavoriteIdleText = Color.FromArgb(232, 238, 246),
         ExtensionWindowBack = Color.FromArgb(38, 44, 52),
         FallbackBack = Color.FromArgb(31, 36, 43),
         FallbackText = Color.FromArgb(228, 236, 247),
@@ -204,20 +227,30 @@ public partial class MainForm
 
     private bool IsDarkTheme() => _palette.IsDark;
 
-    private Button[] CommandButtons =>
+    /// <summary>The pill-shaped buttons of the top bar (Logs, Web and extension buttons are coloured as views).</summary>
+    private Button[] HeaderPillButtons =>
     [
-        _toggleButton, _backButton, _goButton, _refreshButton, _historyButton, _newTabButton,
-        _historyClearButton, _findCloseButton, _settingsButton, _updateBannerUpdateButton,
+        _backButton, _forwardButton, _goButton, _refreshButton, _historyButton, _newTabButton, _usersButton, _settingsButton,
+        _extensionMenuOverflowButton, _topBarRevealButton,
     ];
 
-    /// <summary>The panels a gradient theme paints (everything else shows them through a transparent background).</summary>
+    /// <summary>Buttons outside the top bar, which keep the theme's standard button colours.</summary>
+    private Button[] ContentCommandButtons =>
+    [
+        _historyClearButton, _findCloseButton, _updateBannerUpdateButton, _toggleButton, _resourceSaverDisableButton,
+    ];
+
+    /// <summary>
+    /// The panels a gradient theme paints (everything else shows them through a transparent background). The top bar
+    /// has a painter of its own (PaintHeaderBackground), set in BuildUi.
+    /// </summary>
     private ThemedPanel[] ThemeSurfaces =>
     [
-        _menuBarPanel, _addressBarPanel, _historyPanel, _contentHostPanel, _webViewHostPanel, _extensionPageHostPanel,
-        _webViewLoadingOverlayPanel,
+        _menuBarPanel, _historyPanel, _contentHostPanel, _webViewHostPanel, _extensionPageHostPanel,
+        _webViewLoadingOverlayPanel, _protectionStripPanel,
     ];
 
-    private ToolStrip[] PopupMenus => [_disableProtectionMenu, _extensionMenuOverflowMenu, _extensionDropdownMenu, _updateBannerSnoozeMenu];
+    private ToolStrip[] PopupMenus => [_userMenu, _disableProtectionMenu, _extensionMenuOverflowMenu, _extensionDropdownMenu, _updateBannerSnoozeMenu];
 
     private static ThemePalette BuildThemePalette(AppSettings settings)
     {
@@ -250,35 +283,45 @@ public partial class MainForm
         Color selectedText = dark ? Color.White : Color.FromArgb(20, 20, 20);
         Color normalText = dark ? Color.FromArgb(214, 222, 233) : Color.FromArgb(62, 66, 74);
 
+        // The top bar is a step away from the window colour, and its pills a step further (always lighter, so they
+        // stand out from the bar on dark and light colours alike).
+        Color header = Shade(0.16);
+        Color pill = dark ? Blend(baseColor, Color.White, 0.30) : Blend(baseColor, Color.White, 0.55);
+        Color pillSelected = dark ? Blend(baseColor, Color.White, 0.46) : Blend(baseColor, Color.White, 0.80);
+
         return new ThemePalette
         {
             IsDark = dark,
             UseSystemDialogColors = false,
             AppBack = baseColor,
             PanelBack = Shade(0.06),
-            MenuBack = Shade(0.14),
+            MenuBack = header,
             Text = text,
+            PillBack = pill,
+            PillText = selectedText,
+            PillSelectedBack = pillSelected,
+            ExtensionOutline = dark ? Color.FromArgb(92, 225, 230) : Color.FromArgb(0, 158, 168),
             InputBack = inputBack,
             InputText = inputText,
             ButtonBack = Shade(0.20),
             ButtonText = text,
             ButtonBorder = Shade(0.42),
-            HistoryButtonActive = Shade(0.34),
-            ViewSelectedBack = Shade(0.30),
-            ViewNormalBack = Shade(0.14),
+            HistoryButtonActive = pillSelected,
+            ViewSelectedBack = pillSelected,
+            ViewNormalBack = pill,
             ViewSelectedText = selectedText,
             ViewNormalText = normalText,
-            TabActiveBack = Shade(0.26),
-            TabInactiveBack = Shade(0.10),
-            TabCloseActiveBack = Shade(0.32),
-            TabCloseInactiveBack = Shade(0.16),
+            TabActiveBack = pillSelected,
+            TabInactiveBack = pill,
+            TabCloseActiveBack = pillSelected,
+            TabCloseInactiveBack = pill,
             TabActiveText = selectedText,
             TabInactiveText = normalText,
             LogBack = dark ? Blend(baseColor, Color.Black, 0.35) : Blend(baseColor, Color.White, 0.93),
             LogText = dark ? Color.FromArgb(222, 231, 243) : Color.Black,
             OverlayBack = baseColor,
-            FavoriteIdleBack = Shade(0.20),
-            FavoriteIdleText = text,
+            FavoriteIdleBack = pill,
+            FavoriteIdleText = selectedText,
             ExtensionWindowBack = Shade(0.06),
             FallbackBack = Shade(0.06),
             FallbackText = text,
@@ -370,9 +413,10 @@ public partial class MainForm
         return IsDarkColor(text) ? Color.FromArgb(246, 248, 251) : Color.FromArgb(43, 47, 54);
     }
 
-    private Color GetCommandButtonBackColor() => ResolveSurfaceBack(_palette.ButtonBack, ResolveTextColor(_palette.ButtonText));
+    // Only used for the History button, a pill of the top bar.
+    private Color GetCommandButtonBackColor() => ResolveSurfaceBack(_palette.PillBack, ResolveTextColor(_palette.PillText));
 
-    private Color GetHistoryButtonActiveBackColor() => ResolveSurfaceBack(_palette.HistoryButtonActive, ResolveTextColor(_palette.ButtonText));
+    private Color GetHistoryButtonActiveBackColor() => ResolveSurfaceBack(_palette.PillSelectedBack, ResolveTextColor(_palette.PillText));
 
     private void ApplyTheme()
     {
@@ -382,32 +426,49 @@ public partial class MainForm
 
         BackColor = palette.AppBack;
         _menuBarPanel.BackColor = palette.MenuBack;
-        _addressBarPanel.BackColor = palette.PanelBack;
+        _protectionStripPanel.BackColor = palette.AppBack;
         _contentHostPanel.BackColor = palette.AppBack;
         _webViewHostPanel.BackColor = palette.AppBack;
+        _favoritesBar.BackColor = palette.MenuBack;
+        _favoritesBar.ForeColor = ResolveTextColor(palette.FavoriteIdleText);
         _extensionPageHostPanel.BackColor = palette.AppBack;
         _webViewLoadingOverlayPanel.BackColor = palette.OverlayBack;
         _historyPanel.BackColor = palette.PanelBack;
         _findPanel.BackColor = palette.PanelBack;
         _extensionLauncherPanel.BackColor = palette.PanelBack;
 
-        foreach (Button button in CommandButtons)
+        // Pills have no outline of their own; an extension's border colour (ui.element ... border) still draws one.
+        foreach (Button button in HeaderPillButtons)
+        {
+            button.FlatAppearance.BorderColor = Color.Empty;
+            button.FlatAppearance.BorderSize = 1;
+        }
+
+        foreach (Button button in ContentCommandButtons)
         {
             button.FlatAppearance.BorderColor = palette.ButtonBorder;
         }
 
-        _favoriteButton.FlatAppearance.BorderColor = palette.ButtonBorder;
-        _webViewToggleButton.FlatAppearance.BorderColor = palette.ButtonBorder;
-        _logsViewButton.FlatAppearance.BorderColor = palette.ButtonBorder;
+        foreach (Button button in new Button[] { _favoriteButton, _webViewToggleButton, _logsViewButton })
+        {
+            button.FlatAppearance.BorderColor = Color.Empty;
+            button.FlatAppearance.BorderSize = 1;
+        }
 
         ApplyGradientTransparency(palette.Gradient is not null);
         UpdateProtectionStatusVisual();
         ApplyThemeToUpdateBanner();
+        ApplyThemeToResourceSaverBanner();
         ApplyTextColors();
         if (hadGradient || palette.Gradient is not null)
         {
             // Colour changes repaint solid themes by themselves; a gradient is painted across several surfaces.
             InvalidateThemeSurfaces();
+        }
+        else
+        {
+            // The top bar shows the window colour around its rounded shape, which its own colour change does not cover.
+            _menuBarPanel.Invalidate(false);
         }
     }
 
@@ -427,22 +488,34 @@ public partial class MainForm
             label.ForeColor = text;
         }
 
-        foreach (Control input in new Control[] { _addressBarTextBox, _historyListBox, _favoritesListBox, _findTextBox })
+        foreach (Control input in new Control[] { _historyListBox, _favoritesListBox, _findTextBox })
         {
             input.BackColor = inputBack;
             input.ForeColor = inputText;
         }
 
+        // The address box is one of the top bar's pills (the pill around it follows the text box's colour).
+        Color pillText = ResolveTextColor(palette.PillText);
+        Color pillBack = ResolveSurfaceBack(palette.PillBack, pillText);
+        _addressBarTextBox.BackColor = pillBack;
+        _addressBarTextBox.ForeColor = pillText;
+
         _logBox.BackColor = ResolveSurfaceBack(palette.LogBack, logText);
         _logBox.ForeColor = logText;
 
-        foreach (Button button in CommandButtons)
+        foreach (Button button in HeaderPillButtons)
+        {
+            button.BackColor = pillBack;
+            button.ForeColor = pillText;
+        }
+
+        foreach (Button button in ContentCommandButtons)
         {
             button.BackColor = buttonBack;
             button.ForeColor = buttonText;
         }
 
-        _historyButton.BackColor = _historyPanel.Visible ? GetHistoryButtonActiveBackColor() : buttonBack;
+        _historyButton.BackColor = _historyPanel.Visible ? GetHistoryButtonActiveBackColor() : pillBack;
 
         UpdateTabHeaderVisuals();
         UpdateFavoriteButtonState();
@@ -452,10 +525,13 @@ public partial class MainForm
 
     private void ApplyGradientTransparency(bool gradient)
     {
+        // The top bar's containers show the bar's shaded gradient (PaintHeaderBackground) through them.
         Control?[] containers =
         [
+            _headerLayout, _headerLeftLayout, _addressBarPanel,
             _menuLayout, _menuLogoLayout, _extensionMenuButtonsPanel, _menuLogoLabel, _menuLogoPictureBox, _menuClockLabel,
-            _addressRootLayout, _addressStripLayout, _addressInputLayout, _tabsLayout, _tabsFlowPanel, _zoomLabel,
+            // (_addressInputLayout is always transparent, so the address pill's rounded ends show.)
+            _addressRootLayout, _addressStripLayout, _tabsLayout, _tabsFlowPanel, _zoomLabel,
             _historyLayout, _historyTitleLabel, _favoritesTitleLabel, _webViewLoadingLabel,
         ];
 
@@ -508,7 +584,13 @@ public partial class MainForm
     /// </summary>
     private bool PaintThemeGradient(Control surface, PaintEventArgs e)
     {
-        if (_palette.Gradient is not ThemeGradient gradient || _surfacesWithBackgroundOverride.Contains(surface))
+        return !_surfacesWithBackgroundOverride.Contains(surface) && PaintWindowGradient(surface, e.Graphics);
+    }
+
+    /// <summary>Fills <paramref name="surface"/> with its part of the window-wide gradient; false for themes without one.</summary>
+    private bool PaintWindowGradient(Control surface, Graphics graphics)
+    {
+        if (_palette.Gradient is not ThemeGradient gradient)
         {
             return false;
         }
@@ -521,9 +603,63 @@ public partial class MainForm
 
         Point origin = ReferenceEquals(surface, this) ? Point.Empty : surface.PointToClient(PointToScreen(Point.Empty));
         using var brush = new LinearGradientBrush(new Rectangle(origin, windowSize), gradient.Start, gradient.End, gradient.Mode);
-        e.Graphics.FillRectangle(brush, surface.ClientRectangle);
+        graphics.FillRectangle(brush, surface.ClientRectangle);
         return true;
     }
+
+    /// <summary>
+    /// Paints the top bar: the window background (colour or gradient) with the bar's rounded shape on it, filled with
+    /// the menu bar colour (or an extension's menu.bar background). In gradient themes the shape shows the gradient,
+    /// shaded the way the menu bar colour is derived from a solid theme colour.
+    /// </summary>
+    private bool PaintHeaderBackground(Control surface, PaintEventArgs e)
+    {
+        Graphics graphics = e.Graphics;
+        Rectangle bounds = surface.ClientRectangle;
+        if (bounds.Width <= 0 || bounds.Height <= 0)
+        {
+            return true;
+        }
+
+        if (!PaintWindowGradient(surface, graphics))
+        {
+            using var windowBrush = new SolidBrush(BackColor);
+            graphics.FillRectangle(windowBrush, bounds);
+        }
+
+        int margin = ScaleByDpi(HeaderOuterMargin);
+        var shape = new RectangleF(margin, margin, bounds.Width - (margin * 2f), bounds.Height - (margin * 2f));
+        if (shape.Width <= 2 || shape.Height <= 2)
+        {
+            return true;
+        }
+
+        Color fill = surface.BackColor;
+        if (_palette.Gradient is ThemeGradient gradient && !_surfacesWithBackgroundOverride.Contains(surface))
+        {
+            fill = IsDarkColor(Blend(gradient.Start, gradient.End, 0.5))
+                ? Color.FromArgb(HeaderGradientShadeAlpha, Color.White)
+                : Color.FromArgb(HeaderGradientShadeAlpha, Color.Black);
+        }
+
+        SmoothingMode previousSmoothing = graphics.SmoothingMode;
+        graphics.SmoothingMode = SmoothingMode.AntiAlias;
+        try
+        {
+            using GraphicsPath path = PhantomShapeGeometry.CreateRoundedRectangle(shape, ScaleByDpi(HeaderCornerRadius));
+            using var brush = new SolidBrush(fill);
+            graphics.FillPath(brush, path);
+        }
+        finally
+        {
+            graphics.SmoothingMode = previousSmoothing;
+        }
+
+        return true;
+    }
+
+    // How strongly the top bar shades a gradient (0-255): about the same step as the menu bar colour of a solid theme.
+    private const int HeaderGradientShadeAlpha = 44;
 
     private void InvalidateThemeSurfaces()
     {
@@ -711,7 +847,7 @@ public partial class MainForm
     {
         foreach (Control control in EnumerateControlTree(root).ToList())
         {
-            if (control is WebView2 || _uiBoundControls.Contains(control) ||
+            if (control is WebView2 || control == _usersButton || _uiBoundControls.Contains(control) ||
                 ReferenceEquals(control.Tag, TabCloseButtonTag) || control.Tag is ExtensionMenuEntry)
             {
                 continue;
@@ -1290,9 +1426,50 @@ public partial class MainForm
             RefreshPreview();
         };
 
+        // Top bar style (MainForm.TopBar.cs).
+        var topBarComboBox = new ComboBox { DropDownStyle = ComboBoxStyle.DropDownList, Width = ScaleByDpi(220), AccessibleName = "Top bar" };
+        OptionItem<TopBarStyle>[] topBarOptions =
+        [
+            new(TopBarStyle.Comfortable, "Comfortable (default)"),
+            new(TopBarStyle.Comfy, "Comfy"),
+            new(TopBarStyle.Compact, "Compact"),
+            new(TopBarStyle.Simple, "Simple"),
+        ];
+        topBarComboBox.Items.AddRange(topBarOptions);
+        topBarComboBox.SelectedItem = topBarOptions.FirstOrDefault(option => option.Value == draft.TopBarStyle) ?? topBarOptions[0];
+        AddRow("Top bar", topBarComboBox);
+        var topBarDescriptionLabel = new Label
+        {
+            AutoSize = true,
+            MaximumSize = new Size(ScaleByDpi(420), 0),
+            UseMnemonic = false,
+        };
+        AddRow(null, topBarDescriptionLabel);
+
+        void UpdateTopBarDescription()
+        {
+            TopBarStyle selected = topBarComboBox.SelectedItem is OptionItem<TopBarStyle> option ? option.Value : TopBarStyle.Comfortable;
+            topBarDescriptionLabel.Text = selected switch
+            {
+                TopBarStyle.Comfy => "Every control stays, closer together and a little smaller, to save space.",
+                TopBarStyle.Compact =>
+                    "Only Logs, Web and extension buttons. The ▾ button at the right shows the protection and Web View controls and " +
+                    "Settings; its dot is green while protection is on and red while it is off.",
+                TopBarStyle.Simple =>
+                    "An ON/OFF protection switch next to Settings, and in Web View only Back, Forward, the address box and small " +
+                    "tabs, in one row. Ctrl+T (or a double-click next to the tabs) opens a tab, F5 reloads, Ctrl+H shows the history.",
+                _ => "The full top bar, with every control.",
+            };
+        }
+
+        topBarComboBox.SelectedIndexChanged += (_, _) => UpdateTopBarDescription();
+        UpdateTopBarDescription();
+
         UpdateRowVisibility();
         initializing = false;
-        page.Controls.Add(layout);
+        var favoritesBar = new CheckBox { Text = "Show favourites bar below tabs", AutoSize = true, Checked = draft.ShowFavoritesBar };
+        AddRow("Favourites", favoritesBar);
+        AddScrollingSettingsLayout(page, layout);
 
         return new SettingsTab(page)
         {
@@ -1310,6 +1487,7 @@ public partial class MainForm
             ApplyTo = settings =>
             {
                 settings.Theme = theme;
+                settings.ShowFavoritesBar = favoritesBar.Checked;
                 settings.CustomThemeColor = PhantomColorParser.ToHex(themeColor);
                 settings.GradientStartColor = PhantomColorParser.ToHex(gradientStart);
                 settings.GradientEndColor = PhantomColorParser.ToHex(gradientEnd);
@@ -1320,6 +1498,10 @@ public partial class MainForm
                 settings.CustomFontUrl = fontText.Length > 0 && GoogleFontLoader.TryNormalizeFontUrl(fontText, out string cssUrl, out _)
                     ? cssUrl
                     : string.Empty;
+                if (topBarComboBox.SelectedItem is OptionItem<TopBarStyle> topBarOption)
+                {
+                    settings.TopBarStyle = topBarOption.Value;
+                }
             },
         };
     }
@@ -1332,11 +1514,16 @@ public partial class MainForm
             return;
         }
 
+        _brandIcon?.Dispose();
+        _brandLogo?.Dispose();
+        if (!ReferenceEquals(_defaultLogoImage, DefaultTabIcon)) _defaultLogoImage?.Dispose();
+
         // After the controls are gone, nothing can draw with these fonts any more.
         foreach (Font font in new[]
                  {
                      _tabCloseFontRegular, _tabCloseFontCompact, _menuButtonFontRegular, _menuButtonFontBold, _menuTitleFont,
                      _tabTitleFont, _stripButtonFont, _favoriteButtonFont, _zoomLabelFont, _newTabButtonFont, _logFont,
+                     _settingsGlyphFont, _protectionStatusFont, _navigationGlyphFont, _stripGlyphFont,
                  })
         {
             font.Dispose();
